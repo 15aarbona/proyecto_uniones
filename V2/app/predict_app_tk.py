@@ -15,10 +15,12 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import numpy as np
 import pandas as pd
 
 import store
-from core.config import RAW_INPUT_COLUMNS
+from core.config import RAW_INPUT_COLUMNS, P_COLUMNS, GEOM_COLUMNS, CATALOGO_BOLT
+from core.geometry import gaps_from_p, p_from_named, assemble_from_named
 from gui_common import DataFrameTable, run_in_thread
 
 
@@ -86,7 +88,7 @@ class PredictApp(tk.Tk):
 
         hint = ttk.Label(
             self,
-            text="Tras predecir: haz doble clic en la columna «Validar» de una fila para marcarla como correcta.",
+            text="Tras predecir: doble clic en «Validar» marca la fila como correcta; doble clic en cualquier otra celda la edita (Enter = aceptar, Esc = cancelar).",
             foreground="#555",
         )
         hint.pack(anchor="w", padx=10, pady=(2, 0))
@@ -178,7 +180,7 @@ class PredictApp(tk.Tk):
         self.save_btn.config(state="normal")
         self.info_label.config(
             text=f"Predicción completa para {len(self.result_df)} filas "
-                 f"(incluye p1..p12 reconstruidas). Doble clic en «Validar» para marcar filas correctas."
+                 f"(incluye p1..p12 reconstruidas). Doble clic en una celda para corregir su valor y en «Validar» para marcar la fila."
         )
 
     def _on_predict_error(self, err):
@@ -188,28 +190,127 @@ class PredictApp(tk.Tk):
         messagebox.showerror("Error al predecir", str(err))
 
     # ------------------------------------------------------------------
+    # Columnas que no se editan a mano: identificadores y derivadas por aritmética
+    NON_EDITABLE = {"UNICODE", "BEAM", "COLUMN", "Hole", "num_filas_tornillos", "tiene_cantonera"}
+    TEXT_COLUMNS = {"DrawingCode", "Bolt", "SlipCritical"}
+
     def _on_cell_double_click(self, event):
         tree = self.table.tree
         if self.result_df is None:
             return
-        region = tree.identify_region(event.x, event.y)
-        if region != "cell":
+        if tree.identify_region(event.x, event.y) != "cell":
             return
         col_id = tree.identify_column(event.x)  # '#1', '#2', ...
         row_id = tree.identify_row(event.y)
         if not row_id:
             return
-        cols = tree["columns"]
-        col_index = int(col_id.replace("#", "")) - 1
-        if cols[col_index] != "Validar":
+        col_name = tree["columns"][int(col_id.replace("#", "")) - 1]
+
+        if col_name == "Validar":
+            idx = int(row_id)
+            if idx in self.validated:
+                self.validated.discard(idx)
+                tree.set(row_id, "Validar", "☐")
+            else:
+                self.validated.add(idx)
+                tree.set(row_id, "Validar", "☑")
             return
-        idx = int(row_id)
-        if idx in self.validated:
-            self.validated.discard(idx)
-            tree.set(row_id, "Validar", "☐")
-        else:
-            self.validated.add(idx)
-            tree.set(row_id, "Validar", "☑")
+
+        if col_name in self.NON_EDITABLE:
+            self.info_label.config(text=f"«{col_name}» no es editable (identificador o valor derivado automáticamente).")
+            return
+        self._start_cell_edit(row_id, col_id, col_name)
+
+    def _start_cell_edit(self, row_id, col_id, col_name):
+        tree = self.table.tree
+        bbox = tree.bbox(row_id, col_id)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        var = tk.StringVar(value=str(tree.set(row_id, col_name)))
+        entry = ttk.Entry(tree, textvariable=var)
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.focus_set()
+        entry.select_range(0, "end")
+        done = {"v": False}
+
+        def finish(commit):
+            if done["v"]:
+                return
+            done["v"] = True
+            new_text = var.get().strip()
+            entry.destroy()
+            if commit:
+                self._apply_edit(int(row_id), col_name, new_text)
+
+        entry.bind("<Return>", lambda e: finish(True))
+        entry.bind("<FocusOut>", lambda e: finish(True))
+        entry.bind("<Escape>", lambda e: finish(False))
+
+    def _apply_edit(self, idx, col_name, text):
+        """Valida y aplica una edición manual, y recalcula lo que dependa de ella."""
+        df = self.result_df
+        try:
+            if col_name == "Bolt":
+                t = text.upper().replace(" ", "")
+                nominal = int(t[1:] if t.startswith("M") else t)
+                if nominal not in CATALOGO_BOLT:
+                    raise ValueError(f"Bolt debe ser uno de {['M%d' % b for b in CATALOGO_BOLT]}")
+                value = f"M{nominal}"
+            elif col_name == "SlipCritical":
+                value = text.upper()
+                if value not in ("YES", "NO"):
+                    raise ValueError("SlipCritical debe ser YES o NO")
+            elif col_name in self.TEXT_COLUMNS:
+                if not text:
+                    raise ValueError(f"{col_name} no puede estar vacío")
+                value = text
+            else:
+                value = float(text.replace(",", "."))
+                if value < 0:
+                    raise ValueError("El valor no puede ser negativo")
+        except ValueError as e:
+            messagebox.showerror("Valor no válido", str(e))
+            return
+
+        if df.at[idx, col_name] == value:
+            return
+        df.at[idx, col_name] = value
+        self._recompute_derived(idx, col_name)
+        self._refresh_row(idx)
+        self.info_label.config(text=f"Fila {idx + 1}: «{col_name}» editado. Recuerda marcarla como validada para guardarla.")
+
+    def _recompute_derived(self, idx, edited_col):
+        """Mantiene coherentes p1..p12 <-> E-S/D_i/I-C/C_i/E-C y Hole/num_filas/cantonera."""
+        df, feats = self.result_df, self.feats_df
+        if edited_col in P_COLUMNS:
+            row = pd.DataFrame([{
+                **{c: df.at[idx, c] for c in P_COLUMNS},
+                "e": df.at[idx, "e"], "d": df.at[idx, "d"],
+                "BEAM_d_mm": feats.at[idx, "BEAM_d_mm"],
+            }])
+            geom = gaps_from_p(row).iloc[0]
+            for c in GEOM_COLUMNS:
+                df.at[idx, c] = 0.0 if pd.isna(geom[c]) else float(geom[c])
+        elif edited_col in GEOM_COLUMNS:
+            p = p_from_named(df.loc[[idx], GEOM_COLUMNS]).iloc[0]
+            for c in P_COLUMNS:
+                df.at[idx, c] = float(p[c])
+
+        bolt_nominal = int(str(df.at[idx, "Bolt"]).replace("M", ""))
+        derived = assemble_from_named(df.loc[[idx], GEOM_COLUMNS], [bolt_nominal]).iloc[0]
+        df.at[idx, "Hole"] = derived["Hole"]
+        df.at[idx, "num_filas_tornillos"] = derived["num_filas_tornillos"]
+        df.at[idx, "tiene_cantonera"] = bool(derived["tiene_cantonera"])
+
+    def _refresh_row(self, idx):
+        tree = self.table.tree
+        iid = str(idx)
+        for c in tree["columns"]:
+            if c == "Validar":
+                continue
+            v = self.result_df.at[idx, c]
+            tree.set(iid, c, "" if pd.isna(v) else v)
 
     def _toggle_all(self, value):
         if self.result_df is None:

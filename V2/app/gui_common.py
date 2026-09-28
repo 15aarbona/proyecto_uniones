@@ -10,6 +10,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import ttk
+from tkinter import font as tkfont
 
 import pandas as pd
 
@@ -20,6 +21,8 @@ class DataFrameTable(ttk.Frame):
         self.max_rows = max_rows
         self.df = None
 
+        ttk.Style().configure("Treeview", rowheight=26)
+        ttk.Style().configure("Treeview.Heading", padding=(6, 4))
         self.tree = ttk.Treeview(self, show="headings")
         vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
@@ -40,10 +43,17 @@ class DataFrameTable(ttk.Frame):
 
         cols = list(df.columns)
         self.tree["columns"] = cols
+
+        # Ancho de cada columna según su contenido (cabecera y valores), sin
+        # encogerlas para que quepan: si no caben, se desplaza en horizontal.
+        f = tkfont.nametofont("TkDefaultFont")
+        sample = df.head(300)
         for c in cols:
+            texts = [str(c)] + [("" if pd.isna(v) else str(v)) for v in sample[c].tolist()]
+            width = max(f.measure(t) for t in texts) + 32
+            width = max(90, min(width, 260))
             self.tree.heading(c, text=str(c))
-            width = 130 if c != "Validar" else 70
-            self.tree.column(c, width=width, anchor="center", stretch=True)
+            self.tree.column(c, width=width, minwidth=90, anchor="center", stretch=False)
 
         shown = df.head(self.max_rows)
         for i, (_, row) in enumerate(shown.iterrows()):

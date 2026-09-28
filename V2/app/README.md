@@ -84,7 +84,12 @@ incorporar casos nuevos sin perder nada, usa "Reentrenar".
    `derive_dependent_columns`), incluida la reconstrucción de `p1..p12`.
 3. **Descargar resultados…** — elige el nombre y la extensión (`.xlsx` o `.csv`) y se
    guarda en ese formato.
-4. Doble clic en la columna **"Validar"** de las filas que un ingeniero ha revisado y
+4. **Editar valores**: doble clic en cualquier celda (salvo identificadores y columnas
+   derivadas) para corregirla; Enter acepta, Esc cancela. Se valida el valor (`Bolt` en
+   catálogo, `SlipCritical` YES/NO, números ≥ 0) y se mantiene la coherencia: si editas
+   `p1..p12` se recalculan `E-S/D_i/I-C/C_i/E-C`, y si editas estos, se reconstruyen las
+   `p`; `Hole`, `num_filas_tornillos` y `tiene_cantonera` se recalculan siempre.
+5. Doble clic en la columna **"Validar"** de las filas que un ingeniero ha revisado y
    da por buenas → **"Guardar validadas en el dataset"** las añade como filas nuevas
    al dataset global (no reentrena automáticamente — eso lo decide el administrador).
 
