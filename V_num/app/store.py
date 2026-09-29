@@ -34,8 +34,8 @@ from core.lookups import (
     build_profile_lookup_from_tekla_csvs, check_profile_coverage, build_training_features,
     infer_source_from_profile,
 )
-from core.dataset import Preprocessor, ConnectionDataset, counts_from_ys, ys_from_p
-from core.config import P_COLUMNS, Y_COLUMNS
+from core.dataset import Preprocessor, ConnectionDataset, counts_from_ys, ys_from_p, counts_from_p, bolt_nominal_mm
+from core.config import P_COLUMNS, P_LABEL_COLUMNS, Y_COLUMNS
 from core.model import ConnectionDesignNet
 from core.losses import ConnectionDesignLoss
 from core.training import fit, predict_loader, outputs_to_design, forward_numpy
@@ -71,6 +71,9 @@ GLOBAL_SCHEMA = (
        "fy_acero_mpa", "fu_acero_mpa", "fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa",
        "n_cantonera", "n_alma", "Lh"]
 )
+
+# Esquema persistido completo: GLOBAL_SCHEMA + etiquetas de zona por paso p.
+PERSISTED_SCHEMA = GLOBAL_SCHEMA + P_LABEL_COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +193,68 @@ def rebuild_global_dataset(rich_paths: list[Path]) -> pd.DataFrame:
     return global_df
 
 
+def build_global_structure_from_pi_tag(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    data_pi_tag.csv (separador ';', con p1_label..p12_label, SIN Lh) -> dataframe con
+    PERSISTED_SCHEMA (GLOBAL_SCHEMA + p1_label..p12_label).
+
+    - Calcula n_alma / n_cantonera con la lógica de transformar_topologia_y_cotas
+      (dataset.counts_from_p) SIN calcular ni guardar las cotas Yx (no están en el modelo).
+    - Lh no existe en este CSV: se añade a 0 (0 = sin cartabón) para mantener el
+      esquema del modelo; si el CSV la trajera, se usa tal cual (clip >= 0).
+    - Bolt llega como 'M24' -> se convierte a int nominal.
+    - Verifica que las p activas formen un prefijo y cuadren con los conteos.
+    """
+    df = df.copy()
+
+    if "Lh" not in df.columns:
+        df["Lh"] = 0.0
+    df["Lh"] = df["Lh"].clip(lower=0.0)
+
+    if "n_alma" not in df.columns or "n_cantonera" not in df.columns:
+        n_alma, n_cantonera, _ = counts_from_p(df)
+        df["n_alma"] = n_alma
+        df["n_cantonera"] = n_cantonera
+
+    df["Bolt"] = bolt_nominal_mm(df).astype(int)
+    df["n_alma"] = df["n_alma"].astype(int)
+    df["n_cantonera"] = df["n_cantonera"].astype(int)
+
+    # coherencia: las p activas deben ser un prefijo y cuadrar con los conteos
+    P = df[P_COLUMNS].fillna(0.0).values
+    active = (P > 0).astype(int)
+    assert ((active[:, :-1] == 0) & (active[:, 1:] == 1)).sum() == 0, \
+        "Las p activas deben formar un prefijo p1..p_k"
+    assert (active.sum(axis=1) == df["n_alma"].values + df["n_cantonera"].values + 1).all(), \
+        "nº de p activas != n_alma + n_cantonera + 1"
+    # coherencia labels: p activa nunca UNUSED, p inactiva siempre UNUSED
+    for j, c in enumerate(P_LABEL_COLUMNS):
+        lab = df[c].astype(str).values
+        assert not (lab[active[:, j] == 1] == "UNUSED").any(), \
+            f"{c}: hay p activa etiquetada UNUSED"
+        assert not (lab[active[:, j] == 0] != "UNUSED").any(), \
+            f"{c}: hay p inactiva etiquetada sin UNUSED"
+
+    return df[PERSISTED_SCHEMA].reset_index(drop=True)
+
+
+def train_pi_tag(csv_path, epochs=200, lr=2e-3, val_size=0.15) -> dict:
+    """
+    Entrenamiento desde data_pi_tag.csv (separador ';').
+    Split pedido por el usuario:  df_train, df_test = train_test_split(df_resultado,
+    test_size=0.2, random_state=2); además se saca una validación interna del train
+    (val_size, semilla fija) porque el bucle de fit necesita val_loader.
+    Guarda bundle + dataset global (PERSISTED_SCHEMA) al terminar.
+    """
+    raw = pd.read_csv(csv_path, sep=";")
+    df_resultado = build_global_structure_from_pi_tag(raw)
+
+    df_train, df_test = train_test_split(df_resultado, test_size=0.2, random_state=2)
+    df_train, df_val = train_test_split(df_train, test_size=val_size, random_state=42)
+
+    return _train_from_df(df_train, df_val, df_test, epochs, lr, mode="initial")
+
+
 def _build_model(pre: Preprocessor, device) -> ConnectionDesignNet:
     return ConnectionDesignNet(
         cat_cardinalities=pre.cat_cardinalities,
@@ -222,12 +287,26 @@ def _compute_metrics(test_df: pd.DataFrame, full_design: pd.DataFrame) -> dict:
         "n_cantonera": _acc("n_cantonera", lambda s: s.astype(int)),
     }
 
+    # Acierto por p_label (global y solo en pasos activos), si el esquema lo trae.
+    p_label_acc = {}
+    if all(c in test_df.columns for c in P_LABEL_COLUMNS) and all(c in full_design.columns for c in P_LABEL_COLUMNS):
+        real_l = test_df[P_LABEL_COLUMNS].astype(str).reset_index(drop=True)
+        pred_l = full_design[P_LABEL_COLUMNS].astype(str).reset_index(drop=True)
+        p_label_acc = {c: float((real_l[c].values == pred_l[c].values).mean()) for c in P_LABEL_COLUMNS}
+        activos = (test_df[P_COLUMNS].fillna(0.0).values > 0)
+        p_label_acc_activos = {
+            c: float(np.mean(real_l[c].values[activos[:, j]] == pred_l[c].values[activos[:, j]]))
+            for j, c in enumerate(P_LABEL_COLUMNS) if activos[:, j].sum() > 0
+        }
+
     df_real, df_pred = preparar_para_evaluar(test_df, full_design)
     df_res = evaluar_predicciones(df_real, df_pred)
 
     return {
         "n_test": int(len(test_df)),
         "classification_accuracy": cls_acc,
+        "p_label_accuracy": p_label_acc,
+        "p_label_accuracy_activos": p_label_acc_activos if p_label_acc else {},
         "regression_table": df_res.to_dict(orient="records"),
     }
 
@@ -292,7 +371,7 @@ def _train_from_df(train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.Dat
     full_design = outputs_to_design(outputs, pre)
     metrics = _compute_metrics(test_df, full_design)
 
-    global_df = pd.concat([train_df, val_df, test_df], ignore_index=True)[GLOBAL_SCHEMA]
+    global_df = pd.concat([train_df, val_df, test_df], ignore_index=True)[PERSISTED_SCHEMA]
     meta = _save_bundle(model, pre, global_df, metrics, epochs, lr, mode=mode)
     return meta
 
@@ -334,7 +413,7 @@ def retrain(epochs=80, lr=1e-3, test_size=0.2) -> dict:
     if global_df is None or len(global_df) == 0:
         raise RuntimeError("No hay dataset global todavía. Entrena primero el modelo inicial.")
 
-    missing = [c for c in GLOBAL_SCHEMA if c not in global_df.columns]
+    missing = [c for c in PERSISTED_SCHEMA if c not in global_df.columns]
     if missing:
         raise KeyError(f"El dataset global no tiene la estructura esperada. Faltan: {missing}")
 
@@ -362,7 +441,7 @@ def retrain(epochs=80, lr=1e-3, test_size=0.2) -> dict:
     full_design = outputs_to_design(outputs, pre)
     metrics = _compute_metrics(test_df, full_design)
 
-    meta = _save_bundle(model, pre, global_df[GLOBAL_SCHEMA], metrics, epochs, lr, mode="retrain")
+    meta = _save_bundle(model, pre, global_df[PERSISTED_SCHEMA], metrics, epochs, lr, mode="retrain")
     return meta
 
 
@@ -451,7 +530,7 @@ def build_dataset_rows(feats_df: pd.DataFrame, design_df: pd.DataFrame) -> pd.Da
     combined["SlipCritical"] = combined["SlipCritical"].astype(str).str.upper()\
                              .map({"TRUE": 1, "FALSE": 0, "YES": 1, "NO": 0}).astype(bool)
 
-    schema = global_df.columns if (global_df := load_global_dataset()) is not None else GLOBAL_SCHEMA
+    schema = global_df.columns if (global_df := load_global_dataset()) is not None else PERSISTED_SCHEMA
     for c in schema:
         if c not in combined.columns:
             combined[c] = np.nan

@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from .config import REGRESSION_ALWAYS, MASKED_COLUMNS, P_COLUMNS, Y_COLUMNS
+from .config import REGRESSION_ALWAYS, MASKED_COLUMNS, P_COLUMNS, P_LABEL_COLUMNS, Y_COLUMNS
 from .dataset import ys_from_p
 
 
@@ -133,4 +133,25 @@ def error_p_por_canto(test_df, full_design, n_bins=4):
     tab["N"] = canto.value_counts().sort_index().values
     print("MAE (mm) de las p activas por canto de viga:")
     print(tab.to_string())
+    return tab
+
+
+def evaluar_p_labels(test_df, full_design):
+    """
+    Acierto de la zona predicha por paso (p1_label..p12_label). Para pasos inactivos
+    (p real = 0) la clase esperada es UNUSED; se evalua el acierto global y, aparte,
+    el acierto SOLO en pasos activos (excluye UNUSED real).
+    """
+    res = []
+    for c in P_LABEL_COLUMNS:
+        real = test_df[c].astype(str).values
+        pred = full_design[c].astype(str).values
+        acc = float(np.mean(real == pred))
+        act = test_df[P_COLUMNS[P_LABEL_COLUMNS.index(c)]].fillna(0.0).values > 0
+        acc_act = float(np.mean(real[act] == pred[act])) if act.sum() > 0 else float("nan")
+        res.append({"Variable": c, "N": int(len(real)), "Accuracy": round(acc, 4),
+                    "Accuracy (activos)": round(acc_act, 4) if act.sum() > 0 else ""})
+    tab = pd.DataFrame(res)
+    print("Acierto por p_label (global / solo pasos activos):")
+    print(tab.to_string(index=False))
     return tab

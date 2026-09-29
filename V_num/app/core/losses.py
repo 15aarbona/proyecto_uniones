@@ -36,10 +36,11 @@ class ConnectionDesignLoss(nn.Module):
     """
 
     def __init__(self, w_cls=1.0, w_counts=1.0, w_reg=1.0, w_masked_value=2.0,
-                 w_masked_presence=1.0, n_alma_weights=None, n_cantonera_weights=None):
+                 w_masked_presence=1.0, w_p_label=1.0, n_alma_weights=None, n_cantonera_weights=None):
         super().__init__()
         self.w_cls, self.w_counts, self.w_reg = w_cls, w_counts, w_reg
         self.w_masked_value, self.w_masked_presence = w_masked_value, w_masked_presence
+        self.w_p_label = w_p_label
         # buffers: viajan con .to(device) junto al resto del módulo
         self.register_buffer(
             "w_n_alma",
@@ -72,12 +73,21 @@ class ConnectionDesignLoss(nn.Module):
             self.huber(preds["masked_value"], targets["masked_value"]), mask)
         loss_masked_presence = self.bce(preds["masked_presence_logit"], mask)
 
+        # p_label: CE por cada paso (preds (B,12,C) vs targets (B,12)); media sobre los 12.
+        if "p_label_idx" in targets and "p_label_logits" in preds:
+            loss_p_label = F.cross_entropy(
+                preds["p_label_logits"].reshape(-1, preds["p_label_logits"].shape[-1]),
+                targets["p_label_idx"].reshape(-1))
+        else:
+            loss_p_label = preds["reg_always"].sum() * 0.0  # 0 con gradiente válido
+
         total = (
             self.w_cls * loss_cls
             + self.w_counts * loss_counts
             + self.w_reg * loss_reg_always
             + self.w_masked_value * loss_masked_value
             + self.w_masked_presence * loss_masked_presence
+            + self.w_p_label * loss_p_label
         )
 
         parts = {
@@ -89,5 +99,6 @@ class ConnectionDesignLoss(nn.Module):
             "reg_always": loss_reg_always.item(),
             "masked_value": loss_masked_value.item(),
             "masked_presence": loss_masked_presence.item(),
+            "p_label": loss_p_label.item(),
         }
         return total, parts

@@ -3,6 +3,10 @@ Exporta a CSV la tabla completa de resultados por variable en el TEST:
   - Regresión siempre activa: g, e, d, Bp, tp, Lh
   - Con máscara: p1..p12 (pasos predichos) y tws, ts, tbs, tst
   - Clasificación: standard, Bolt, SlipCritical, n_alma, n_cantonera
+  - Clasificación por paso: p1_label..p12_label (zona), global y solo pasos activos
+
+El test es el split de data_pi_tag.csv:
+    df_train, df_test = train_test_split(df_resultado, test_size=0.2, random_state=2)
 
 Las columnas con máscara y las p se evalúan solo en muestras activas (valor real > 0).
 
@@ -13,13 +17,16 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 import store
-from core.config import P_COLUMNS, STIFFENER_COLUMNS, REGRESSION_ALWAYS, MASKED_COLUMNS
+from core.config import (
+    P_COLUMNS, P_LABEL_COLUMNS, STIFFENER_COLUMNS, REGRESSION_ALWAYS, MASKED_COLUMNS,
+)
 from core.training import forward_numpy, outputs_to_design
 
-TEST_PATH = store.APP_DIR.parent.parent / "data" / "test_v2.parquet"
+CSV_PATH = store.DATA_DIR / "data_pi_tag.csv"
 
 
 def _reg_row(col, y_true, y_pred, tipo, tol=(5.0, 10.0)):
@@ -63,13 +70,13 @@ def main(out_path):
         raise SystemExit("No hay modelo entrenado.")
     model, pre, device = bundle
 
-    test = pd.read_parquet(TEST_PATH)
-    feats = store.build_global_structure(test, source_path=TEST_PATH)
+    df_resultado = store.build_global_structure_from_pi_tag(pd.read_csv(CSV_PATH, sep=";"))
+    _, df_test = train_test_split(df_resultado, test_size=0.2, random_state=2)
 
-    x_cat, x_num = pre.transform_features(feats)
+    x_cat, x_num = pre.transform_features(df_test)
     outputs = forward_numpy(model, x_cat, x_num, device)
     design = outputs_to_design(outputs, pre).reset_index(drop=True)
-    real = feats.reset_index(drop=True)
+    real = df_test.reset_index(drop=True)
 
     filas = []
     for col in REGRESSION_ALWAYS:
@@ -79,7 +86,7 @@ def main(out_path):
     for col in P_COLUMNS:
         filas.append(_reg_row(col, real[col], design[col], "p (predicha)"))
 
-    # Clasificación
+    # Clasificación (cabezas globales)
     filas.append(_cls_row("standard", real["standard"].astype(str), design["standard"].astype(str), "Clasificación"))
     filas.append(_cls_row("Bolt", real["Bolt"].astype(int), design["Bolt"].astype(int), "Clasificación"))
     slip_real = real["SlipCritical"].astype(str).str.upper().map(
@@ -87,6 +94,20 @@ def main(out_path):
     filas.append(_cls_row("SlipCritical", slip_real, design["SlipCritical"].astype(str), "Clasificación"))
     filas.append(_cls_row("n_alma", real["n_alma"].astype(int), design["n_alma"].astype(int), "Clasificación"))
     filas.append(_cls_row("n_cantonera", real["n_cantonera"].astype(int), design["n_cantonera"].astype(int), "Clasificación"))
+
+    # Clasificación de zona por paso: p1_label..p12_label (global)
+    for c in P_LABEL_COLUMNS:
+        filas.append(_cls_row(c, real[c].astype(str), design[c].astype(str), "Clasificación p_label"))
+    # y solo en pasos activos (p real > 0), que es lo relevante de taller
+    activos = real[P_COLUMNS].fillna(0.0).values > 0
+    for j, c in enumerate(P_LABEL_COLUMNS):
+        mask = activos[:, j]
+        if mask.sum() == 0:
+            continue
+        filas.append(_cls_row(c + " (activos)",
+                              real[c].astype(str).values[mask],
+                              design[c].astype(str).values[mask],
+                              "Clasificación p_label (activos)"))
 
     res = pd.DataFrame([f for f in filas if f is not None])
     res.to_csv(out_path, index=False)

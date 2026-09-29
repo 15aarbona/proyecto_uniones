@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from .postprocess import decode_predictions, derive_dependent_columns, _sigmoid
+from .config import P_LABEL_COLUMNS
 
 
 def _split_batch(batch, device):
@@ -103,5 +104,7 @@ def outputs_to_design(outputs, pre):
         standard_logits=outputs["standard_logits"],
         standard_classes=pre.standard_encoder.classes_,
         slip_critical_logit=outputs["slip_critical_logit"],
+        p_label_logits=outputs.get("p_label_logits"),
+        p_label_classes=pre.p_label_classes,
     )
     return derive_dependent_columns(design)

@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -7,6 +8,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from .config import (
     CATEGORICAL_FEATURES, NUMERIC_FEATURES, REGRESSION_ALWAYS,
     MASKED_COLUMNS, CATALOGO_BOLT, Y_COLUMNS, P_COLUMNS,
+    P_LABEL_COLUMNS, N_P_LABEL_CLASSES,
     TARGET_CLS_N_ALMA, TARGET_CLS_N_CANTONERA,
     N_ALMA_CLASSES, N_CANTONERA_CLASSES,
 )
@@ -15,11 +17,10 @@ BOLT_TO_IDX = {v: i for i, v in enumerate(CATALOGO_BOLT)}
 
 
 def bolt_nominal_mm(df):
-    """Bolt -> diámetro nominal en mm. Acepta int (16, 20, ...) o string ('M20')."""
+    """Bolt -> diámetro nominal en mm. Acepta int (16, 20, ...) o string ('M20'),
+    incluido el dtype 'string' de pandas (Arrow)."""
     b = df["Bolt"]
-    if b.dtype == object:
-        b = b.astype(str).str.replace("M", "", regex=False)
-    return b.astype(int)
+    return b.astype(str).str.replace("M", "", regex=False).astype(int)
 
 
 def ys_from_p(df):
@@ -67,6 +68,33 @@ def counts_from_ys(df):
     return n_alma, n_cantonera, num_filas
 
 
+def counts_from_p(df):
+    """
+    n_alma / n_cantonera / num_filas directamente desde p1..p12 + e + d + BEAM_d_mm.
+    Misma lógica de transformar_topologia_y_cotas (variables.ipynb) pero SIN calcular
+    ni guardar las cotas Yx (solo se usan internamente y no se persisten):
+      - fila 1 en cota e (no ocupa columna p)
+      - y_ala_sup = e + d, y_ala_inf = e + d + BEAM_d_mm
+      - Y_i = e + cumsum(p)_i solo donde p_i > 0 (transitorio, no se guarda)
+      - n_alma      = filas activas con y_ala_sup <= Y <= y_ala_inf
+      - n_debajo    = filas activas con Y > y_ala_inf  (== 1 + n_cantonera)
+      - num_filas   = 1 + nº de p activas = n_alma + n_cantonera + 2
+    """
+    P = df[P_COLUMNS].fillna(0.0).values.astype(float)
+    e = df["e"].values.astype(float)
+    d = df["d"].values.astype(float)
+    h = df["BEAM_d_mm"].values.astype(float)
+    y_ala_sup = e + d
+    y_ala_inf = e + d + h
+
+    Y = np.where(P > 0, P.cumsum(axis=1) + e[:, None], 0.0)
+    n_alma = ((Y >= y_ala_sup[:, None]) & (Y <= y_ala_inf[:, None]) & (P > 0)).sum(axis=1)
+    n_debajo = ((Y > y_ala_inf[:, None]) & (P > 0)).sum(axis=1)
+    n_cantonera = np.maximum(n_debajo - 1, 0)
+    num_filas = 1 + (P > 0).sum(axis=1)
+    return n_alma.astype(int), n_cantonera.astype(int), num_filas.astype(int)
+
+
 class Preprocessor:
     """Ajusta encoders/scalers SOLO con el split de train y los reutiliza en val/test/inferencia.
     Requiere el esquema v4 (p1..p12 directos como targets con máscara; n_alma, n_cantonera, standard, Bolt int)."""
@@ -76,6 +104,13 @@ class Preprocessor:
         self.num_scaler = StandardScaler().fit(df[NUMERIC_FEATURES].values)
         self.reg_always_scaler = StandardScaler().fit(df[REGRESSION_ALWAYS].values)
         self.standard_encoder = LabelEncoder().fit(df["standard"].astype(str))
+
+        # Label encoders for p_label columns (11 classes each).
+        if all(c in df.columns for c in P_LABEL_COLUMNS):
+            self.p_label_encoder = LabelEncoder().fit(
+                pd.concat([df[c].astype(str) for c in P_LABEL_COLUMNS], ignore_index=True))
+        else:
+            self.p_label_encoder = None
 
         # Media/std de cada columna enmascarada (pasos p + rigidizadores) SOLO sobre sus
         # valores activos (>0): si se incluyeran los ceros, la media de columnas raras
@@ -118,6 +153,19 @@ class Preprocessor:
     def n_standard_classes(self):
         return len(self.standard_encoder.classes_)
 
+    def _encode_p_labels(self, df):
+        """(B, 12) índices de zona con el encoder global; 0 si el esquema no trae labels."""
+        if getattr(self, "p_label_encoder", None) is not None and all(c in df.columns for c in P_LABEL_COLUMNS):
+            idx = np.stack([self.p_label_encoder.transform(df[c].astype(str)) for c in P_LABEL_COLUMNS], axis=1)
+            return idx.astype(np.int64)
+        return np.zeros((len(df), len(P_LABEL_COLUMNS)), dtype=np.int64)
+
+    @property
+    def p_label_classes(self):
+        if getattr(self, "p_label_encoder", None) is not None:
+            return list(self.p_label_encoder.classes_)
+        return None
+
     def transform_features(self, df):
         x_cat = np.stack([self.cat_encoders[c].transform(df[c].astype(str)) for c in CATEGORICAL_FEATURES], axis=1)
         x_num = self.num_scaler.transform(df[NUMERIC_FEATURES].values).astype(np.float32)
@@ -126,9 +174,7 @@ class Preprocessor:
     def transform_targets(self, df):
         standard_idx = self.standard_encoder.transform(df["standard"].astype(str))
         bolt_idx = bolt_nominal_mm(df).map(BOLT_TO_IDX).values
-        slip = (df["SlipCritical"].astype(str) == "YES").astype(np.float32).values \
-            if df["SlipCritical"].dtype == object \
-            else df["SlipCritical"].astype(bool).astype(np.float32).values
+        slip = df["SlipCritical"].astype(str).str.upper().isin(["YES", "TRUE", "1"]).astype(np.float32).values
         n_alma_idx = df["n_alma"].astype(int).values
         n_cant_idx = df["n_cantonera"].astype(int).values
 
@@ -137,6 +183,8 @@ class Preprocessor:
         m = df[MASKED_COLUMNS].fillna(0.0).values.astype(np.float32)
         masked_mask = (m > 0.0).astype(np.float32)
         masked_value = ((m - self.masked_mean) / self.masked_std).astype(np.float32)
+
+        p_label_idx = self._encode_p_labels(df)
 
         return {
             "standard_idx": standard_idx.astype(np.int64),
@@ -147,6 +195,7 @@ class Preprocessor:
             "reg_always": reg_always,
             "masked_value": masked_value,
             "masked_mask": masked_mask,
+            "p_label_idx": p_label_idx,
         }
 
     def inverse_reg_always(self, standardized):

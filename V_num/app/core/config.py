@@ -10,6 +10,10 @@ data/train_v3.parquet:
               desaparecen son las del final). El modelo LAS PREDICE DIRECTAMENTE (con máscara
               de presencia); las Ys ya NO se derivan ni se persisten:
               desaparecen del schema persistido y del output del modelo).
+  - p1_label..p12_label : clase de cada paso (BEAM_TOP_FLANGE, BEAM_WEB_EXTREME,
+    BEAM_BOTTOM_FLANGE, BEAM_WEB_CENTRAL, BEAM_WEB_ADJ_CENTER, HAUNCH_FLANGE,
+    HAUNCH_WEB_EXTREME, HAUNCH_WEB_CENTRAL, HAUNCH_WEB_ADJ_CENTER, AMBIGUOUS_ZONE,
+    UNUSED). El modelo predice estas clases además de los valores p (con máscara).
   - n_alma,n_cantonera : nº de filas de tornillos entre las alas de la viga y nº de
               filas en la cantonera(por debajo del ala inferior].
               Relación exacta verificada en el dataset:
@@ -73,10 +77,15 @@ TARGET_CLS_SLIP_CRITICAL = "SlipCritical"        # bool
 TARGET_CLS_N_ALMA = "n_alma"                      # nº filas entre las alas (0..6)  -- NUEVO
 TARGET_CLS_N_CANTONERA = "n_cantonera"            # nº filas en cantonera (0..5)  -- NUEVO
 
+# Clasificación de cada paso p: clase de zona (11 valores), una etiqueta por paso.
+N_Y = 12
+P_LABEL_COLUMNS = [f"p{i}_label" for i in range(1, N_Y + 1)]
+N_P_LABEL_CLASSES = 11
+
 CLASSIFICATION_TARGETS = [
     TARGET_CLS_STANDARD, TARGET_CLS_BOLT, TARGET_CLS_SLIP_CRITICAL,
     TARGET_CLS_N_ALMA, TARGET_CLS_N_CANTONERA,
-]
+] + P_LABEL_COLUMNS
 
 # Regresión SIEMPRE activa. Lh: longitud del cartabón (0 = sin cartabón; en el dataset
 # crudo hay valores negativos basura -> se limpian a 0 al construir el dataset).

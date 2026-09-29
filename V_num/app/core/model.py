@@ -8,6 +8,8 @@ Salidas:
   - reg_always          : g, e, d, Bp, tp, Lh                (regresión estandarizada)
   - masked_value / masked_presence_logit : MASKED_COLUMNS = P_COLUMNS (pasos p1..p12),
     tws, ts, tbs, tst                                           (regresión con máscara)
+  - p_label_logits : (B, 12, N_P_LABEL_CLASSES) — clase de zona de cada paso p
+    (una cabeza por p1_label..p12_label; 11 clases: BEAM_*/HAUNCH_*/AMBIGUOUS_ZONE/UNUSED)
 
 Esquema de data/train_v3.parquet: las p activas son siempre un prefijo p1..p_k con
 k = n_alma + n_cantonera + 1 (la fila 1 está en cota 'e'); las que desaparecen son
@@ -22,10 +24,12 @@ import torch.nn as nn
 
 from .config import (
     CATALOGO_BOLT, MASKED_COLUMNS, N_ALMA_CLASSES, N_CANTONERA_CLASSES,
+    P_LABEL_COLUMNS, N_P_LABEL_CLASSES,
 )
 
 N_REG_ALWAYS = 6                    # g, e, d, Bp, tp, Lh
-N_MASKED = len(MASKED_COLUMNS)      # 12 Ys + 4 rigidizadores = 16
+N_MASKED = len(MASKED_COLUMNS)      # 12 p + 4 rigidizadores = 16
+N_P_LABELS = len(P_LABEL_COLUMNS)   # 12 etiquetas de zona (una por paso p)
 
 
 class ResNetBlock(nn.Module):
@@ -85,6 +89,13 @@ class ConnectionDesignNet(nn.Module):
         self.head_masked_presence = nn.Sequential(
             nn.Linear(hidden_dim, 128), nn.ReLU(), nn.Linear(128, N_MASKED)
         )
+        # 12 cabezas de clasificación de zona, una por paso p (p1_label..p12_label).
+        self.heads_p_label = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, 32), nn.ReLU(),
+                nn.Linear(32, N_P_LABEL_CLASSES),
+            ) for _ in P_LABEL_COLUMNS
+        ])
 
     def forward(self, x_cat, x_num):
         emb_outs = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
@@ -102,4 +113,5 @@ class ConnectionDesignNet(nn.Module):
             "reg_always": self.head_reg_always(x),
             "masked_value": self.head_masked_value(x),
             "masked_presence_logit": self.head_masked_presence(x),
+            "p_label_logits": torch.stack([head(x) for head in self.heads_p_label], dim=1),
         }

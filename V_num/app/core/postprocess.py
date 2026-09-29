@@ -18,7 +18,8 @@ import pandas as pd
 from .config import (
     CATALOGO_BOLT, CATALOGO_g, CATALOGO_e, CATALOGO_d, CATALOGO_Bp, CATALOGO_tp,
     CATALOGO_Lh, CATALOGO_tws, CATALOGO_ts, CATALOGO_tbs, CATALOGO_tst,
-    REGRESSION_ALWAYS, MASKED_COLUMNS, P_COLUMNS, Y_COLUMNS, STIFFENER_COLUMNS, Y_GRID_STEP, N_Y,
+    REGRESSION_ALWAYS, MASKED_COLUMNS, P_COLUMNS, P_LABEL_COLUMNS, Y_COLUMNS,
+    STIFFENER_COLUMNS, Y_GRID_STEP, N_Y,
 )
 
 CATALOGS = {
@@ -45,10 +46,12 @@ def decode_predictions(reg_always_real: np.ndarray, masked_value_real: np.ndarra
                        n_alma_logits: np.ndarray, n_cantonera_logits: np.ndarray,
                        standard_logits: np.ndarray = None, standard_classes=None,
                        slip_critical_logit: np.ndarray = None,
+                       p_label_logits: np.ndarray = None, p_label_classes=None,
                        thresholds=None) -> pd.DataFrame:
     """
     reg_always_real / masked_value_real: ya des-estandarizados (mm).
     masked_* siguen el orden de config.MASKED_COLUMNS = P_COLUMNS + STIFFENER_COLUMNS.
+    p_label_logits: (B, 12, C) logits de zona por paso; p_label_classes: nombres de clase.
     Devuelve un DataFrame (una fila por muestra) ANTES de calcular las columnas derivadas.
     """
     n = reg_always_real.shape[0]
@@ -101,6 +104,12 @@ def decode_predictions(reg_always_real: np.ndarray, masked_value_real: np.ndarra
 
     if slip_critical_logit is not None:
         out["SlipCritical"] = np.where(_sigmoid(slip_critical_logit) >= 0.5, "YES", "NO")
+
+    # zona de cada paso p: argmax de la cabeza correspondiente
+    if p_label_logits is not None and p_label_classes is not None:
+        p_label_idx = p_label_logits.argmax(axis=-1)   # (B, 12)
+        for j, name in enumerate(P_LABEL_COLUMNS):
+            out[name] = np.array(p_label_classes)[p_label_idx[:, j]]
 
     return pd.DataFrame(out)
 
