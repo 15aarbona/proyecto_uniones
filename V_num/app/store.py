@@ -1,4 +1,4 @@
-"""
+﻿"""
 Capa de orquestación entre las GUIs (tkinter) y el pipeline (core/).
 
 Responsabilidades:
@@ -56,9 +56,8 @@ DEFAULT_TEKLA_PATHS = (DATA_DIR / "tekla_eu.csv", DATA_DIR / "tekla_cad.csv", DA
 ID_COLUMNS = ["UNICODE", "BEAM", "COLUMN"]
 
 # Estructura canónica del dataset global: esquema "rico" persistido en PASOS p1..p12
-# (no en Ys: las Ys se derivan en post-proceso) + conteos de
-# estructura n_alma/n_cantonera. Lh se añade al final porque es un target del esquema
-# train_v3 que no existe en el parquet v2 (se inyecta del v3 hermano).
+# (no en Ys: las Ys no estan en el modelo) + conteos de
+# estructura n_alma/n_cantonera. Lh se elimino del esquema (no existe en data_pi_tag).
 GLOBAL_SCHEMA = (
     ["Capacity_Moment", "Capacity_Shear", "Capacity_Axial",
      "g", "tws", "Bp", "Lp", "tp", "e", "d"]
@@ -69,7 +68,7 @@ GLOBAL_SCHEMA = (
        "BEAM_type", "BEAM_d_mm", "BEAM_bf_mm", "BEAM_tw_mm", "BEAM_tf_mm", "BEAM_r1_mm", "BEAM_wely_mm", "BEAM_w_kgm",
        "COLUMN_type", "COLUMN_d_mm", "COLUMN_bf_mm", "COLUMN_tw_mm", "COLUMN_tf_mm", "COLUMN_r1_mm", "COLUMN_wely_mm", "COLUMN_w_kgm",
        "fy_acero_mpa", "fu_acero_mpa", "fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa",
-       "n_cantonera", "n_alma", "Lh"]
+       "n_cantonera", "n_alma"]
 )
 
 # Esquema persistido completo: GLOBAL_SCHEMA + etiquetas de zona por paso p.
@@ -110,50 +109,20 @@ def _device():
 # Conversión del esquema "rico" (train_v2/test_v2) a la estructura nueva (v4)
 # ---------------------------------------------------------------------------
 
-def _inject_lh_if_needed(df: pd.DataFrame, source_path) -> pd.DataFrame:
-    """
-    Los parquet ricos tipo train_v2.parquet NO traen Lh (se quedó fuera), pero sí la trae
-    su hermano train_v3.parquet, alineado fila a fila con v2 (verificado). Si falta Lh,
-    se busca el parquet v3 equivalente junto al dado y se inyecta con aserciones de
-    alineación; si no se puede, error claro.
-    """
-    if "Lh" in df.columns:
-        return df
-    p = Path(source_path)
-    v3_path = p.with_name(p.name.replace("v2", "v3"))
-    if not v3_path.exists():
-        raise KeyError(
-            f"'{p.name}' no trae 'Lh' (necesaria en la estructura nueva) y no se encontró "
-            f"'{v3_path.name}' para tomarla. Usa el parquet v3 equivalente o uno que incluya Lh."
-        )
-    v3 = pd.read_parquet(v3_path)
-    if len(v3) != len(df):
-        raise KeyError(f"{v3_path.name} no tiene las mismas filas que {p.name}: no se puede inyectar Lh de forma segura.")
-    check_cols = [c for c in ("g", "e", "d", "Bp", "tp", "Bolt", "standard") if c in df.columns and c in v3.columns]
-    if check_cols and not (df[check_cols].reset_index(drop=True) == v3[check_cols].reset_index(drop=True)).all().all():
-        raise KeyError(f"{v3_path.name} no está alineado fila a fila con {p.name}: no se inyecta Lh.")
-    df = df.copy()
-    df["Lh"] = v3["Lh"].values
-    return df
-
-
 def build_global_structure(df: pd.DataFrame, source_path=None) -> pd.DataFrame:
     """
     Parquet rico (tipo data/train_v2.parquet: Capacity_*, BEAM/COLUMN, tipos, fy/fu,
     p1..p12, Lp, Hole, DrawingCode, Source, standard, Bolt int) -> dataframe con la
-    estructura GLOBAL_SCHEMA exacta (pasos p1..p12 + n_alma/n_cantonera). Si falta Lh se
-    inyecta del parquet v3 hermano (source_path). Si faltan n_alma/n_cantonera se derivan
-    de las Ys (p -> Y). Lh negativo (basura del dataset crudo) se limpia a 0.
+    estructura GLOBAL_SCHEMA exacta (pasos p1..p12 + n_alma/n_cantonera). Si faltan
+    n_alma/n_cantonera se derivan de las Ys (p -> Y).
     """
-    if source_path is not None:
-        df = _inject_lh_if_needed(df, source_path)
     df = df.copy()
 
     renames = {"AceroEstructural": "grado_acero", "EstandarTornillos": "clase_tornillo"}
     df = df.rename(columns={k: v for k, v in renames.items() if k in df.columns})
 
     missing = [c for c in GLOBAL_SCHEMA
-               if c not in df.columns and c not in ("n_alma", "n_cantonera", "Lh")]
+               if c not in df.columns and c not in ("n_alma", "n_cantonera")]
     if missing:
         raise KeyError(f"Faltan columnas en el parquet de entrada: {missing}")
 
@@ -161,9 +130,6 @@ def build_global_structure(df: pd.DataFrame, source_path=None) -> pd.DataFrame:
         n_alma, n_cantonera, _ = counts_from_ys(ys_from_p(df))
         df["n_alma"] = n_alma
         df["n_cantonera"] = n_cantonera
-
-    # Lh: en el crudo hay sentinelas negativos (int32 min) -> 0 = sin cartabón
-    df["Lh"] = df["Lh"].clip(lower=0.0)
 
     # coherencia: las Ys derivadas de p deben ser un prefijo y cuadrar con los conteos
     Y = ys_from_p(df)[Y_COLUMNS].values
@@ -200,16 +166,11 @@ def build_global_structure_from_pi_tag(df: pd.DataFrame) -> pd.DataFrame:
 
     - Calcula n_alma / n_cantonera con la lógica de transformar_topologia_y_cotas
       (dataset.counts_from_p) SIN calcular ni guardar las cotas Yx (no están en el modelo).
-    - Lh no existe en este CSV: se añade a 0 (0 = sin cartabón) para mantener el
-      esquema del modelo; si el CSV la trajera, se usa tal cual (clip >= 0).
+    - Lh ya no forma parte del esquema (no existe en data_pi_tag y se quitó del output).
     - Bolt llega como 'M24' -> se convierte a int nominal.
     - Verifica que las p activas formen un prefijo y cuadren con los conteos.
     """
     df = df.copy()
-
-    if "Lh" not in df.columns:
-        df["Lh"] = 0.0
-    df["Lh"] = df["Lh"].clip(lower=0.0)
 
     if "n_alma" not in df.columns or "n_cantonera" not in df.columns:
         n_alma, n_cantonera, _ = counts_from_p(df)

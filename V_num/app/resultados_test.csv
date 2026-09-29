@@ -1,50 +1,49 @@
 Variable,Tipo,N,MAE (mm),RMSE (mm),R2 Score,% Exacto (0.5mm),% <= 5mm,% <= 10mm,Accuracy
-g,Regresión,945,2.25,4.82,0.895,67.3,92.2,98.2,
-e,Regresión,945,0.31,1.4,0.941,94.6,99.4,99.9,
-d,Regresión,945,1.12,2.12,0.933,46.9,96.3,98.8,
-Bp,Regresión,945,4.04,5.95,0.986,10.2,76.0,92.9,
-tp,Regresión,945,0.53,1.68,0.906,89.6,99.6,100.0,
-Lh,Regresión,945,0.0,0.0,1.0,100.0,100.0,100.0,
-tws,Rigidizador (máscara),31,6.87,8.62,-5.527,25.8,32.3,87.1,
-ts,Rigidizador (máscara),897,0.23,1.31,0.851,94.4,99.1,99.7,
-tbs,Rigidizador (máscara),522,0.23,1.4,0.869,96.4,98.3,100.0,
-tst,Rigidizador (máscara),478,0.13,1.29,0.69,98.7,99.4,99.6,
-p1,p (predicha),945,2.18,4.61,0.957,67.8,93.4,96.8,
-p2,p (predicha),945,5.56,12.79,0.865,43.7,82.3,90.1,
-p3,p (predicha),939,6.72,11.97,0.925,34.4,74.3,86.4,
-p4,p (predicha),682,7.74,19.43,0.801,43.3,78.0,88.6,
-p5,p (predicha),414,5.69,16.28,0.71,52.4,82.6,92.5,
-p6,p (predicha),223,6.44,16.76,0.884,45.3,80.7,90.1,
-p7,p (predicha),101,5.89,20.51,0.63,53.5,90.1,92.1,
-p8,p (predicha),51,3.73,7.34,0.93,56.9,86.3,92.2,
-p9,p (predicha),21,1.43,3.09,0.988,76.2,95.2,100.0,
-p10,p (predicha),14,1.07,2.31,0.992,78.6,100.0,100.0,
+g,Regresión,945,2.39,5.15,0.879,67.1,91.1,96.8,
+e,Regresión,945,0.24,1.26,0.952,95.8,99.5,99.9,
+d,Regresión,945,1.18,2.15,0.931,41.3,96.2,98.9,
+Bp,Regresión,945,3.93,5.81,0.987,11.9,76.2,94.1,
+tp,Regresión,945,0.47,1.55,0.92,90.6,99.8,100.0,
+tws,Rigidizador (máscara),31,6.32,7.67,-4.17,25.8,35.5,93.5,
+ts,Rigidizador (máscara),897,0.23,1.22,0.871,94.1,98.9,99.9,
+tbs,Rigidizador (máscara),522,0.29,1.52,0.844,95.2,98.1,99.8,
+tst,Rigidizador (máscara),478,0.12,1.1,0.777,98.7,99.2,99.8,
+p1,p (predicha),945,2.2,4.68,0.956,67.9,93.1,97.0,
+p2,p (predicha),945,5.79,11.95,0.882,37.6,81.2,90.8,
+p3,p (predicha),939,6.95,12.59,0.917,34.1,72.3,85.6,
+p4,p (predicha),682,8.05,18.98,0.81,35.8,76.2,87.4,
+p5,p (predicha),414,5.63,15.46,0.739,45.9,84.5,92.0,
+p6,p (predicha),223,8.21,22.03,0.799,39.5,77.1,88.8,
+p7,p (predicha),101,4.21,16.94,0.747,69.3,93.1,95.0,
+p8,p (predicha),51,1.57,5.05,0.967,84.3,92.2,98.0,
+p9,p (predicha),21,1.19,2.89,0.989,81.0,95.2,100.0,
+p10,p (predicha),14,0.71,1.89,0.995,85.7,100.0,100.0,
 p11,p (predicha),4,0.0,0.0,1.0,100.0,100.0,100.0,
 p12,p (predicha),4,0.0,0.0,1.0,100.0,100.0,100.0,
 standard,Clasificación,945,,,,,,,0.9989
 Bolt,Clasificación,945,,,,,,,0.9661
-SlipCritical,Clasificación,945,,,,,,,0.9862
-n_alma,Clasificación,945,,,,,,,0.9915
-n_cantonera,Clasificación,945,,,,,,,0.964
+SlipCritical,Clasificación,945,,,,,,,0.9894
+n_alma,Clasificación,945,,,,,,,0.9873
+n_cantonera,Clasificación,945,,,,,,,0.9608
 p1_label,Clasificación p_label,945,,,,,,,1.0
-p2_label,Clasificación p_label,945,,,,,,,0.9894
+p2_label,Clasificación p_label,945,,,,,,,0.9905
 p3_label,Clasificación p_label,945,,,,,,,0.9894
-p4_label,Clasificación p_label,945,,,,,,,0.964
-p5_label,Clasificación p_label,945,,,,,,,0.9735
-p6_label,Clasificación p_label,945,,,,,,,0.981
-p7_label,Clasificación p_label,945,,,,,,,0.9968
+p4_label,Clasificación p_label,945,,,,,,,0.963
+p5_label,Clasificación p_label,945,,,,,,,0.9714
+p6_label,Clasificación p_label,945,,,,,,,0.982
+p7_label,Clasificación p_label,945,,,,,,,0.9989
 p8_label,Clasificación p_label,945,,,,,,,1.0
 p9_label,Clasificación p_label,945,,,,,,,1.0
 p10_label,Clasificación p_label,945,,,,,,,1.0
 p11_label,Clasificación p_label,945,,,,,,,1.0
 p12_label,Clasificación p_label,945,,,,,,,1.0
 p1_label (activos),Clasificación p_label (activos),945,,,,,,,1.0
-p2_label (activos),Clasificación p_label (activos),945,,,,,,,0.9894
+p2_label (activos),Clasificación p_label (activos),945,,,,,,,0.9905
 p3_label (activos),Clasificación p_label (activos),939,,,,,,,0.9894
-p4_label (activos),Clasificación p_label (activos),682,,,,,,,0.9677
-p5_label (activos),Clasificación p_label (activos),414,,,,,,,0.9662
+p4_label (activos),Clasificación p_label (activos),682,,,,,,,0.9692
+p5_label (activos),Clasificación p_label (activos),414,,,,,,,0.9758
 p6_label (activos),Clasificación p_label (activos),223,,,,,,,0.9731
-p7_label (activos),Clasificación p_label (activos),101,,,,,,,0.9901
+p7_label (activos),Clasificación p_label (activos),101,,,,,,,1.0
 p8_label (activos),Clasificación p_label (activos),51,,,,,,,1.0
 p9_label (activos),Clasificación p_label (activos),21,,,,,,,1.0
 p10_label (activos),Clasificación p_label (activos),14,,,,,,,1.0

@@ -1,6 +1,6 @@
 ﻿"""
 Exporta a CSV la tabla completa de resultados por variable en el TEST:
-  - Regresión siempre activa: g, e, d, Bp, tp, Lh
+  - Regresión siempre activa: g, e, d, Bp, tp
   - Con máscara: p1..p12 (pasos predichos) y tws, ts, tbs, tst
   - Clasificación: standard, Bolt, SlipCritical, n_alma, n_cantonera
   - Clasificación por paso: p1_label..p12_label (zona), global y solo pasos activos

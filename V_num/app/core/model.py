@@ -5,7 +5,7 @@ Salidas:
   - standard_logits, bolt_logits, slip_critical_logit        (clasificación)
   - n_alma_logits, n_cantonera_logits                        (NUEVO: conteos, CE ponderada;
     describen la estructura que antes daban las columnas derivadas de los p)
-  - reg_always          : g, e, d, Bp, tp, Lh                (regresión estandarizada)
+  - reg_always          : g, e, d, Bp, tp                   (regresión estandarizada)
   - masked_value / masked_presence_logit : MASKED_COLUMNS = P_COLUMNS (pasos p1..p12),
     tws, ts, tbs, tst                                           (regresión con máscara)
   - p_label_logits : (B, 12, N_P_LABEL_CLASSES) — clase de zona de cada paso p
@@ -24,10 +24,10 @@ import torch.nn as nn
 
 from .config import (
     CATALOGO_BOLT, MASKED_COLUMNS, N_ALMA_CLASSES, N_CANTONERA_CLASSES,
-    P_LABEL_COLUMNS, N_P_LABEL_CLASSES,
+    P_LABEL_COLUMNS, N_P_LABEL_CLASSES, REGRESSION_ALWAYS,
 )
 
-N_REG_ALWAYS = 6                    # g, e, d, Bp, tp, Lh
+N_REG_ALWAYS = len(REGRESSION_ALWAYS)   # g, e, d, Bp, tp
 N_MASKED = len(MASKED_COLUMNS)      # 12 p + 4 rigidizadores = 16
 N_P_LABELS = len(P_LABEL_COLUMNS)   # 12 etiquetas de zona (una por paso p)
 

@@ -17,14 +17,13 @@ import pandas as pd
 
 from .config import (
     CATALOGO_BOLT, CATALOGO_g, CATALOGO_e, CATALOGO_d, CATALOGO_Bp, CATALOGO_tp,
-    CATALOGO_Lh, CATALOGO_tws, CATALOGO_ts, CATALOGO_tbs, CATALOGO_tst,
+    CATALOGO_tws, CATALOGO_ts, CATALOGO_tbs, CATALOGO_tst,
     REGRESSION_ALWAYS, MASKED_COLUMNS, P_COLUMNS, P_LABEL_COLUMNS, Y_COLUMNS,
     STIFFENER_COLUMNS, Y_GRID_STEP, N_Y,
 )
 
 CATALOGS = {
     "g": CATALOGO_g, "e": CATALOGO_e, "d": CATALOGO_d, "Bp": CATALOGO_Bp, "tp": CATALOGO_tp,
-    "Lh": CATALOGO_Lh,
     "tws": CATALOGO_tws, "ts": CATALOGO_ts, "tbs": CATALOGO_tbs, "tst": CATALOGO_tst,
 }
 
@@ -61,8 +60,6 @@ def decode_predictions(reg_always_real: np.ndarray, masked_value_real: np.ndarra
     out = {}
     for j, name in enumerate(REGRESSION_ALWAYS):
         vals = reg_always_real[:, j]
-        if name == "Lh":
-            vals = np.maximum(vals, 0.0)   # limpiar residuos negativos: 0 = sin cartabn
         out[name] = snap_to_catalog(vals, CATALOGS.get(name))
 
     masked_names = P_COLUMNS + STIFFENER_COLUMNS

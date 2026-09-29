@@ -55,9 +55,9 @@ CATEGORICAL_FEATURES = [
 
 NUMERIC_FEATURES = [
     # Geometría de viga (lookup por BEAM)
-    "BEAM_d_mm", "BEAM_bf_mm", "BEAM_tw_mm", "BEAM_tf_mm", "BEAM_r1_mm", "BEAM_wely_mm", "BEAM_w_kgm",
+    "BEAM_d_mm", "BEAM_bf_mm", "BEAM_tw_mm", "BEAM_tf_mm",
     # Geometría de columna (lookup por COLUMN)
-    "COLUMN_d_mm", "COLUMN_bf_mm", "COLUMN_tw_mm", "COLUMN_tf_mm", "COLUMN_r1_mm", "COLUMN_wely_mm", "COLUMN_w_kgm",
+    "COLUMN_d_mm", "COLUMN_bf_mm", "COLUMN_tw_mm", "COLUMN_tf_mm",
     # Propiedades mecánicas (lookup por grado_acero / clase_tornillo)
     "fy_acero_mpa", "fu_acero_mpa", "fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa",
     # Demanda: capacidades ABSOLUTAS (decisión: se usan en vez de los porcentajes)
@@ -89,7 +89,7 @@ CLASSIFICATION_TARGETS = [
 
 # Regresión SIEMPRE activa. Lh: longitud del cartabón (0 = sin cartabón; en el dataset
 # crudo hay valores negativos basura -> se limpian a 0 al construir el dataset).
-REGRESSION_ALWAYS = ["g", "e", "d", "Bp", "tp", "Lh"]
+REGRESSION_ALWAYS = ["g", "e", "d", "Bp", "tp"]
 
 # Regresión CON MÁSCARA (0 = "no existe esa fila/rigidizador"). Pasos p1..p12 primero,
 # rigidizadores después (postprocess/evaluation asumen este orden).

@@ -39,7 +39,6 @@ if __name__ == "__main__":
     nY = (Y > 0).sum(axis=1)
     print(f"  #Ys == n_alma + n_cantonera + 1 (Y derivadas de p): "
           f"{(nY == global_df['n_alma'] + global_df['n_cantonera'] + 1).all()}")
-    print(f"  Lh >= 0                          : {(global_df['Lh'] >= 0).all()}")
     print(f"  n_alma rango                     : {global_df['n_alma'].min()}..{global_df['n_alma'].max()}")
     print(f"  n_cantonera rango                : {global_df['n_cantonera'].min()}..{global_df['n_cantonera'].max()}")
     print(f"  standard                         : {global_df['standard'].nunique()} valores")
