@@ -1,9 +1,6 @@
 """
-Definición central de columnas, catálogos y roles (v4).
+Definición central de columnas, catálogos y roles.
 
-v4: el target de geometría deja de ser la descomposición con nombre (E-S, D_1..D_5,
-I-C, C_1..C_5, E-C, derivada de p1..p12) y pasa a ser directamente el esquema de
-data/train_v3.parquet:
 - p1..p12 : PASOS RELATIVOS entre filas de tornillos consecutivas ( p_i = Y_i - Y_{i-1},
               con p1 = Y1 - e). Las p activas son SIEMPRE un prefijo p1..p_k (p=0 =>
               "no existe esa fila"); el nº de p activas = n_alma + n_cantonera + 1 (las que
@@ -22,8 +19,6 @@ data/train_v3.parquet:
               n_sup (fila 1, cota e) y n_inf (última fila, bajo el ala inferior) son
               siempre 1, por eso el +2. Ambos conteos están DESBALANCEADOS (los valores
               altos son mucho menos probables): la loss usa CE ponderada.
-  - Lh sustituye a Lp como regresión siempre activa (0 = sin cartabón/haunch; los
-    valores negativos basura del dataset se limpian a 0).
   - standard (normativa, 4 valores) sustituye a DrawingCode como head de clasificación.
   - La máscara de presencia por columna se mantiene (BCE), aunque el nº real de Ys
     activas queda determinado por n_alma + n_cantonera: en post-proceso el prefijo se
@@ -134,7 +129,7 @@ CATALOGO_tp = [12, 15, 20, 25, 30, 35, 40, 45, 50, 60]
 # poner p.ej. list(range(35, 101, 5)); afecta a la coherencia con e/Y1.
 CATALOGO_d = None
 CATALOGO_Lh = None                                      # continuo (40..715), no snap
-CATALOGO_tws = [0, 6, 8, 10, 12, 15, 20]
+CATALOGO_tws = [0, 6, 8, 10, 12, 15, 20] # hay un caso de 5
 CATALOGO_ts = [0, 10, 12, 15, 20, 25, 30, 35, 40]
 CATALOGO_tbs = [0, 10, 12, 15, 20, 25, 30, 35, 40]
 CATALOGO_tst = [0, 10, 15, 20]

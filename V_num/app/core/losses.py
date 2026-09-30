@@ -36,7 +36,8 @@ class ConnectionDesignLoss(nn.Module):
     """
 
     def __init__(self, w_cls=1.0, w_counts=1.0, w_reg=1.0, w_masked_value=2.0,
-                 w_masked_presence=1.0, w_p_label=1.0, n_alma_weights=None, n_cantonera_weights=None):
+                 w_masked_presence=1.0, w_p_label=1.0, n_alma_weights=None, n_cantonera_weights=None,
+                 presence_pos_weight=None):
         super().__init__()
         self.w_cls, self.w_counts, self.w_reg = w_cls, w_counts, w_reg
         self.w_masked_value, self.w_masked_presence = w_masked_value, w_masked_presence
@@ -50,9 +51,22 @@ class ConnectionDesignLoss(nn.Module):
             "w_n_cantonera",
             None if n_cantonera_weights is None else torch.as_tensor(n_cantonera_weights, dtype=torch.float32),
         )
+        # pos_weight de presencia por columna (frecuencia inversa); None => todo 1.
+        self.register_buffer(
+            "presence_pos_weight",
+            None if presence_pos_weight is None else torch.as_tensor(presence_pos_weight, dtype=torch.float32),
+        )
         self.ce = nn.CrossEntropyLoss()
         self.bce = nn.BCEWithLogitsLoss()
         self.huber = nn.SmoothL1Loss(reduction="none", beta=1.0)
+
+    def _bce_presence(self, logits, target):
+        """BCE de presencia con pos_weight por columna y reducción media por columna,
+        para que las columnas raras (tws) no se ahoguen en el mar de ceros."""
+        bce = F.binary_cross_entropy_with_logits(
+            logits, target, pos_weight=self.presence_pos_weight, reduction="none")
+        per_col = bce.mean(dim=0)
+        return per_col.mean()
 
     def forward(self, preds, targets):
         loss_standard = self.ce(preds["standard_logits"], targets["standard_idx"])
@@ -71,7 +85,7 @@ class ConnectionDesignLoss(nn.Module):
         mask = targets["masked_mask"]
         loss_masked_value = _per_column_mean(
             self.huber(preds["masked_value"], targets["masked_value"]), mask)
-        loss_masked_presence = self.bce(preds["masked_presence_logit"], mask)
+        loss_masked_presence = self._bce_presence(preds["masked_presence_logit"], mask)
 
         # p_label: CE por cada paso (preds (B,12,C) vs targets (B,12)); media sobre los 12.
         if "p_label_idx" in targets and "p_label_logits" in preds:

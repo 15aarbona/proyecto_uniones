@@ -228,6 +228,7 @@ def _build_criterion(pre: Preprocessor) -> ConnectionDesignLoss:
     return ConnectionDesignLoss(
         n_alma_weights=pre.count_class_weights["n_alma"],
         n_cantonera_weights=pre.count_class_weights["n_cantonera"],
+        presence_pos_weight=getattr(pre, "presence_pos_weight", None),
     )
 
 
