@@ -127,6 +127,14 @@ class Preprocessor:
                 self.masked_mean[j] = m[act, j].mean()
                 self.masked_std[j] = max(m[act, j].std(), 1e-6)
 
+        # Peso positivo de presencia por columna (frecuencia inversa) para el BCE
+        # ponderado: compensa el desbalance de clase. tws es ~97% ceros -> el activo
+        # recibe ~30x más peso en la pérdida de presencia (en vez de ahogarse en ceros).
+        self.presence_pos_weight = np.ones(m.shape[1])
+        for j in range(m.shape[1]):
+            frac = self.masked_active_frac[j]
+            self.presence_pos_weight[j] = max((1.0 - frac) / max(frac, 1e-6), 1.0)
+
         # Pesos de clase (frecuencia inversa, normalizados a media 1) para los conteos
         # desbalanceados n_alma / n_cantonera: los valores altos son raros y sin peso
         # la CE ignoraría esas clases.
