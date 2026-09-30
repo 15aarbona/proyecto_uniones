@@ -11,7 +11,7 @@ igual que en variables.ipynb. build_profile_lookup_from_df es un fallback más p
 import re
 import pandas as pd
 
-from config import ACERO_TABLE, TORNILLO_TABLE
+from .config import ACERO_TABLE, TORNILLO_TABLE
 
 PROFILE_GEOM_COLS = ["type", "d_mm", "bf_mm", "tw_mm", "tf_mm", "r1_mm", "wely_mm", "w_kgm"]
 
@@ -102,12 +102,14 @@ def add_material_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_training_features(raw_df: pd.DataFrame, profile_lookup: pd.DataFrame) -> pd.DataFrame:
-    """
-    Punto único de entrada: recibe un dataframe con las columnas "pobres" de
-    fictional.csv (o equivalentes ya presentes en train/test.parquet) y devuelve
-    el dataframe con TODAS las features que espera el modelo (config.FEATURE_COLUMNS).
+    """Construye las variables ricas de V3 desde la entrada mínima de producción.
+
+    ``standard`` debe venir en la entrada porque determina el marco normativo del
+    diseño. ``Source`` se deriva del perfil de la viga si no se proporciona.
     """
     df = raw_df.copy()
+    if "Source" not in df.columns:
+        df["Source"] = df["BEAM"].map(infer_source_from_profile)
     df = add_profile_features(df, profile_lookup)
     df = add_material_features(df)
     return df

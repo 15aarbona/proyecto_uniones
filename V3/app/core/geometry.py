@@ -26,10 +26,11 @@ p_from_named      : reconstruye p1..p12 desde las variables nombradas (solo para
 check_reversibility: gaps_from_p seguido de p_from_named debe devolver el p original.
                       Es la prueba de que la descomposición no pierde información.
 """
+
 import numpy as np
 import pandas as pd
 
-from config import P_COLUMNS, MAX_D, MAX_C, D_COLUMNS, C_COLUMNS, GEOM_COLUMNS
+from .config import P_COLUMNS, MAX_D, MAX_C, D_COLUMNS, C_COLUMNS, GEOM_COLUMNS
 
 
 def _gaps_row(pasos, e, d, h_beam):
@@ -59,7 +60,7 @@ def _gaps_row(pasos, e, d, h_beam):
             res["I-C"] = pasos[idx_IC]
         for i, val in enumerate(pasos[1:idx_IC][:MAX_D], start=1):
             res[f"D_{i}"] = val
-        tail = pasos[idx_IC + 1:]
+        tail = pasos[idx_IC + 1 :]
         if len(tail) >= 1:
             res["tiene_cantonera"] = True
             res["E-C"] = tail[-1]
@@ -77,9 +78,11 @@ def _gaps_row(pasos, e, d, h_beam):
 
 def gaps_from_p(df: pd.DataFrame) -> pd.DataFrame:
     """df con p1..p12, e, d, BEAM_d_mm -> DataFrame con GEOM_COLUMNS + tiene_cantonera."""
+
     def _row(row):
         pasos = [row[c] for c in P_COLUMNS if pd.notna(row[c]) and row[c] > 0]
         return pd.Series(_gaps_row(pasos, row["e"], row["d"], row["BEAM_d_mm"]))
+
     return df.apply(_row, axis=1)
 
 
@@ -93,11 +96,14 @@ def assemble_from_named(named: pd.DataFrame, bolt_nominal_mm) -> pd.DataFrame:
     """
     active = named[GEOM_COLUMNS].fillna(0.0) > 0
     n_huecos = active.sum(axis=1)
-    out = pd.DataFrame({
-        "Hole": np.asarray(bolt_nominal_mm) + 2,
-        "num_filas_tornillos": (1 + n_huecos).values,
-        "tiene_cantonera": (active[C_COLUMNS].any(axis=1) | active["E-C"]).values,
-    }, index=named.index)
+    out = pd.DataFrame(
+        {
+            "Hole": np.asarray(bolt_nominal_mm) + 2,
+            "num_filas_tornillos": (1 + n_huecos).values,
+            "tiene_cantonera": (active[C_COLUMNS].any(axis=1) | active["E-C"]).values,
+        },
+        index=named.index,
+    )
     return out
 
 
@@ -114,7 +120,7 @@ def p_from_named(named: pd.DataFrame) -> pd.DataFrame:
     for i in range(len(named)):
         row = vals[i]
         activos = row[row > 0]
-        out[i, :min(len(activos), len(P_COLUMNS))] = activos[:len(P_COLUMNS)]
+        out[i, : min(len(activos), len(P_COLUMNS))] = activos[: len(P_COLUMNS)]
     return pd.DataFrame(out, columns=P_COLUMNS, index=named.index)
 
 
@@ -129,9 +135,13 @@ def check_reversibility(df: pd.DataFrame, tol=1e-6) -> dict:
     p_rec = p_from_named(named).values
     ok = np.all(np.abs(p_true - p_rec) <= tol, axis=1)
     n_pasos = (df[P_COLUMNS].fillna(0.0) > 0).sum(axis=1)
-    print(f"Reconstrucción p exacta: {100*ok.mean():.1f}% de las filas "
-          f"({(~ok).sum()} de {len(df)} no coinciden)")
+    print(
+        f"Reconstrucción p exacta: {100 * ok.mean():.1f}% de las filas "
+        f"({(~ok).sum()} de {len(df)} no coinciden)"
+    )
     if (~ok).any():
-        print("  nº de pasos en las filas que fallan (sospecha: > MAX_D+MAX_C+3 huecos, "
-              f"o ala inferior fuera de rango):\n{n_pasos[~ok].value_counts().sort_index().to_string()}")
+        print(
+            "  nº de pasos en las filas que fallan (sospecha: > MAX_D+MAX_C+3 huecos, "
+            f"o ala inferior fuera de rango):\n{n_pasos[~ok].value_counts().sort_index().to_string()}"
+        )
     return {"frac_exacto": float(ok.mean()), "n_fallos": int((~ok).sum())}

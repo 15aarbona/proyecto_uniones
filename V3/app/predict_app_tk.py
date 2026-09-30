@@ -19,8 +19,7 @@ import numpy as np
 import pandas as pd
 
 import store
-from core.config import RAW_INPUT_COLUMNS, P_COLUMNS, GEOM_COLUMNS, CATALOGO_BOLT
-from core.geometry import gaps_from_p, p_from_named, assemble_from_named
+from core.config import RAW_INPUT_COLUMNS, P_COLUMNS, P_LABEL_COLUMNS, CATALOGO_BOLT
 from gui_common import DataFrameTable, run_in_thread
 
 
@@ -48,7 +47,7 @@ def write_table(df: pd.DataFrame, path: str) -> None:
 class PredictApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Predicción de diseño de conexiones")
+        self.title("Predicción V3 de diseño de conexiones")
         self.geometry("1250x760")
 
         self.input_df = None
@@ -180,7 +179,7 @@ class PredictApp(tk.Tk):
         self.save_btn.config(state="normal")
         self.info_label.config(
             text=f"Predicción completa para {len(self.result_df)} filas "
-                 f"(incluye p1..p12 reconstruidas). Doble clic en una celda para corregir su valor y en «Validar» para marcar la fila."
+                 f"(incluye p1..p12 y sus etiquetas semánticas). Doble clic en una celda para corregir su valor y en «Validar» para marcar la fila."
         )
 
     def _on_predict_error(self, err):
@@ -192,7 +191,7 @@ class PredictApp(tk.Tk):
     # ------------------------------------------------------------------
     # Columnas que no se editan a mano: identificadores y derivadas por aritmética
     NON_EDITABLE = {"UNICODE", "BEAM", "COLUMN", "Hole", "num_filas_tornillos", "tiene_cantonera"}
-    TEXT_COLUMNS = {"DrawingCode", "Bolt", "SlipCritical"}
+    TEXT_COLUMNS = {"DrawingCode", "Bolt", "SlipCritical", *P_LABEL_COLUMNS}
 
     def _on_cell_double_click(self, event):
         tree = self.table.tree
@@ -261,6 +260,11 @@ class PredictApp(tk.Tk):
                 value = text.upper()
                 if value not in ("YES", "NO"):
                     raise ValueError("SlipCritical debe ser YES o NO")
+            elif col_name in P_LABEL_COLUMNS:
+                value = text.upper()
+                classes = set(store.load_metadata().get("p_label_classes", []))
+                if value not in classes:
+                    raise ValueError(f"Etiqueta desconocida. Valores admitidos: {sorted(classes)}")
             elif col_name in self.TEXT_COLUMNS:
                 if not text:
                     raise ValueError(f"{col_name} no puede estar vacío")
@@ -281,27 +285,27 @@ class PredictApp(tk.Tk):
         self.info_label.config(text=f"Fila {idx + 1}: «{col_name}» editado. Recuerda marcarla como validada para guardarla.")
 
     def _recompute_derived(self, idx, edited_col):
-        """Mantiene coherentes p1..p12 <-> E-S/D_i/I-C/C_i/E-C y Hole/num_filas/cantonera."""
-        df, feats = self.result_df, self.feats_df
-        if edited_col in P_COLUMNS:
-            row = pd.DataFrame([{
-                **{c: df.at[idx, c] for c in P_COLUMNS},
-                "e": df.at[idx, "e"], "d": df.at[idx, "d"],
-                "BEAM_d_mm": feats.at[idx, "BEAM_d_mm"],
-            }])
-            geom = gaps_from_p(row).iloc[0]
-            for c in GEOM_COLUMNS:
-                df.at[idx, c] = 0.0 if pd.isna(geom[c]) else float(geom[c])
-        elif edited_col in GEOM_COLUMNS:
-            p = p_from_named(df.loc[[idx], GEOM_COLUMNS]).iloc[0]
-            for c in P_COLUMNS:
-                df.at[idx, c] = float(p[c])
+        """Mantiene coherentes valores p, etiquetas semánticas y columnas derivadas V3."""
+        df = self.result_df
+        if edited_col in P_LABEL_COLUMNS:
+            pos = P_LABEL_COLUMNS.index(edited_col)
+            if str(df.at[idx, edited_col]).upper() == "UNUSED":
+                df.at[idx, P_COLUMNS[pos]] = 0.0
+        elif edited_col in P_COLUMNS:
+            pos = P_COLUMNS.index(edited_col)
+            label_col = P_LABEL_COLUMNS[pos]
+            if float(df.at[idx, edited_col]) == 0:
+                df.at[idx, label_col] = "UNUSED"
+            elif str(df.at[idx, label_col]).upper() == "UNUSED":
+                # Un valor activo sin significado sería inválido para entrenamiento.
+                df.at[idx, P_COLUMNS[pos]] = 0.0
+                self.info_label.config(text=f"Asigna primero una etiqueta activa a «{label_col}».")
 
         bolt_nominal = int(str(df.at[idx, "Bolt"]).replace("M", ""))
-        derived = assemble_from_named(df.loc[[idx], GEOM_COLUMNS], [bolt_nominal]).iloc[0]
-        df.at[idx, "Hole"] = derived["Hole"]
-        df.at[idx, "num_filas_tornillos"] = derived["num_filas_tornillos"]
-        df.at[idx, "tiene_cantonera"] = bool(derived["tiene_cantonera"])
+        labels = [str(df.at[idx, c]).upper() for c in P_LABEL_COLUMNS]
+        df.at[idx, "Hole"] = bolt_nominal + 2
+        df.at[idx, "num_filas_tornillos"] = 1 + sum(x != "UNUSED" for x in labels)
+        df.at[idx, "tiene_cantonera"] = any(x.startswith("HAUNCH") for x in labels)
 
     def _refresh_row(self, idx):
         tree = self.table.tree

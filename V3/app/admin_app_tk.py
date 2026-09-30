@@ -112,7 +112,7 @@ class AdminApp(tk.Tk):
         note = ttk.Label(
             f,
             text=(
-                "Entrena el modelo por primera vez a partir de train.parquet / test.parquet\n"
+                "Entrena el modelo por primera vez a partir de CSV/Excel de entrenamiento y test\n"
                 "(el dataset \"rico\", con p1..p12, DrawingCode, Bolt, etc.). Al terminar se guarda\n"
                 "el modelo Y se crea el dataset global (con la geometría E-S/D_i/I-C/C_i/E-C ya\n"
                 "calculada) que se usará en los reentrenos futuros.\n"
@@ -123,12 +123,12 @@ class AdminApp(tk.Tk):
         )
         note.grid(row=0, column=0, columnspan=3, sticky="w", **pad)
 
-        ttk.Label(f, text="test.parquet (obligatorio):").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Label(f, text="Dataset principal o test (obligatorio):").grid(row=1, column=0, sticky="w", **pad)
         self.test_path_var = tk.StringVar()
         ttk.Entry(f, textvariable=self.test_path_var, width=70).grid(row=1, column=1, **pad)
         ttk.Button(f, text="Elegir…", command=self._pick_test).grid(row=1, column=2, **pad)
 
-        ttk.Label(f, text="train.parquet (opcional):").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Label(f, text="Dataset de entrenamiento separado (opcional):").grid(row=2, column=0, sticky="w", **pad)
         self.train_path_var = tk.StringVar()
         ttk.Entry(f, textvariable=self.train_path_var, width=70).grid(row=2, column=1, **pad)
         ttk.Button(f, text="Elegir…", command=self._pick_train).grid(row=2, column=2, **pad)
@@ -152,19 +152,19 @@ class AdminApp(tk.Tk):
         self.init_status.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
 
     def _pick_test(self):
-        p = filedialog.askopenfilename(filetypes=[("Parquet", "*.parquet")])
+        p = filedialog.askopenfilename(filetypes=[("Datos", "*.csv *.xlsx *.xls *.parquet"), ("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Parquet", "*.parquet")])
         if p:
             self.test_path_var.set(p)
 
     def _pick_train(self):
-        p = filedialog.askopenfilename(filetypes=[("Parquet", "*.parquet")])
+        p = filedialog.askopenfilename(filetypes=[("Datos", "*.csv *.xlsx *.xls *.parquet"), ("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Parquet", "*.parquet")])
         if p:
             self.train_path_var.set(p)
 
     def _run_initial(self):
         test_path = self.test_path_var.get().strip()
         if not test_path:
-            messagebox.showerror("Falta test.parquet", "Selecciona el fichero test.parquet.")
+            messagebox.showerror("Falta dataset", "Selecciona el fichero principal.")
             return
         if store.model_exists():
             if not messagebox.askyesno(
