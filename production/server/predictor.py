@@ -2,6 +2,8 @@
 Módulo de inferencia en producción (sin transformaciones en servidor).
 Toma las 20 features directo del payload de Excel y ejecuta el modelo.
 """
+import hashlib
+import json
 import logging
 import math
 import pickle
@@ -16,7 +18,9 @@ import torch
 import config
 import dataset
 import model
+import storage
 from config import (
+    FEATURE_COLUMNS,
     MODEL_PATH,
     NUMERIC_FEATURES,
     PREPROCESSOR_PATH,
@@ -38,7 +42,7 @@ log = logging.getLogger("ai-server")
 MODEL_VERSION = "resnet-tabular-uniones-v4"
 
 OUTPUT_FIELDS = [
-    "standard", "bolt", "SlipCritical", "n_alma", "n_cantonera", "N_Y",
+    "PredID", "standard", "bolt", "SlipCritical", "n_alma", "n_cantonera", "N_Y",
     "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12",
     "g", "e", "d", "Bp", "tp", "tws", "ts", "tbs", "tst",
     "Hole", "num_filas_tornillos", "tiene_cantonera"
@@ -121,7 +125,10 @@ def predict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not valid_rows:
         return []
 
-    df = pd.DataFrame(valid_rows)
+    # nombres canónicos (Unicode->UNICODE...) y categóricas derivadas (BEAM_type, grado_acero...)
+    prepared_rows = [storage.prepare_input_row(r) for r in valid_rows]
+    df = pd.DataFrame(prepared_rows)
+    _warn_missing_features(df)
     model_inst, preprocessor = load_model_and_preprocessor()
 
     if model_inst is not None and preprocessor is not None:
@@ -135,14 +142,62 @@ def predict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 outputs_np = {k: v.cpu().numpy() for k, v in raw_outputs.items()}
 
             design_df = outputs_to_design(outputs_np, preprocessor)
-            return _format_outputs(df, design_df)
+            pred_ids = _cache_predictions(prepared_rows, df, design_df)
+            return _format_outputs(df, design_df, pred_ids)
         except Exception as e:
             log.exception(f"Error durante la inferencia con PyTorch: {e}")
 
-    return _stub_predict(valid_rows)
+    return _stub_predict(prepared_rows)
 
 
-def _format_outputs(input_df: pd.DataFrame, design_df: pd.DataFrame) -> List[Dict[str, Any]]:
+def _warn_missing_features(df: pd.DataFrame) -> None:
+    """El preprocesador rellena con 0 lo que falte: avisamos en el log para no predecir a ciegas."""
+    missing = [c for c in FEATURE_COLUMNS if c not in df.columns or df[c].isna().all()]
+    if missing:
+        log.warning(f"/predict: columnas de entrada ausentes o vacías (se rellenarán con 0/UNKNOWN): {missing}")
+
+
+def _make_pred_id(clean_row: Dict[str, Any]) -> str:
+    raw = json.dumps(clean_row, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_predictions(valid_rows: List[Dict[str, Any]], input_df: pd.DataFrame,
+                       design_df: pd.DataFrame) -> List[str]:
+    """
+    Guarda en el servidor, por cada fila predicha, sus ENTRADAS y las etiquetas de zona pX_label
+    (que no se envían a Excel). Devuelve un PredID por fila: Excel lo escribe en la tabla de
+    predicciones y lo devuelve en /validate, así el servidor recupera entradas y etiquetas sin
+    depender de UNICODE ni de cómo Excel fusione las tablas.
+    """
+    pred_ids: List[str] = []
+    items = []
+    for pos in range(len(input_df)):
+        clean_in = _clean_dict(valid_rows[pos])
+        pid = _make_pred_id(clean_in)
+        pred_ids.append(pid)
+        try:
+            des = design_df.iloc[pos]
+            labels = {f"p{i}_label": des.get(f"p{i}_label") for i in range(1, 13)}
+            items.append({
+                "pred_id": pid,
+                "uid": clean_in.get("UNICODE"),
+                "inputs": storage.normalize_row(clean_in),
+                "n_alma": int(des["n_alma"]),
+                "n_cantonera": int(des["n_cantonera"]),
+                "labels": {k: (None if v is None or pd.isna(v) else str(v)) for k, v in labels.items()},
+            })
+        except Exception as e:
+            log.exception(f"No se pudo preparar la caché de la fila {pos}: {e}")
+    try:
+        storage.cache_predictions(items)
+    except Exception as e:
+        log.exception(f"No se pudo guardar la caché de predicciones: {e}")
+    return pred_ids
+
+
+def _format_outputs(input_df: pd.DataFrame, design_df: pd.DataFrame,
+                    pred_ids: List[str] = None) -> List[Dict[str, Any]]:
     out = []
     for idx, row in input_df.iterrows():
         des = design_df.iloc[idx].to_dict()
@@ -151,6 +206,8 @@ def _format_outputs(input_df: pd.DataFrame, design_df: pd.DataFrame) -> List[Dic
         pred = {}
         if "UNICODE" in row and pd.notna(row["UNICODE"]):
             pred["UNICODE"] = row["UNICODE"]
+        if pred_ids:
+            pred["PredID"] = pred_ids[idx]
 
         pred.update({
             "standard": str(des.get("standard", "AISC 360-16")),

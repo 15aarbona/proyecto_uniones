@@ -1,7 +1,8 @@
 """
 Script de entrenamiento para el modelo de uniones viga-columna.
-Lee el dataset, ajusta el preprocesador, entrena la red PyTorch
-y guarda model.pt y preprocessor.pkl en server/models/.
+Lee el dataset base (train_v3.parquet) y el acumulado desde Excel (global_dataset.parquet),
+los combina con nombres de columna normalizados, ajusta el preprocesador, entrena la red
+PyTorch y guarda model.pt y preprocessor.pkl en server/models/.
 """
 import logging
 import pickle
@@ -12,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 import config
+import storage
 from dataset import ConnectionDataset, Preprocessor
 from losses import ConnectionDesignLoss
 from model import ConnectionDesignNet
@@ -25,28 +27,41 @@ logging.basicConfig(
 log = logging.getLogger("ai-train")
 
 
-def train_main(data_path: Path = None, epochs: int = 200, batch_size: int = 32, lr: float = 2e-3):
-    # 1. Localizar archivo de datos
-    if data_path is None:
-        # Busca primero el dataset acumulado; si no existe, busca el dataset base de entrenamiento
-        if config.DATASET_PATH.exists():
-            data_path = config.DATASET_PATH
-        else:
-            data_path = config.DATA_DIR / "train_v3.parquet"
+def _load_training_frame(data_path: Path = None) -> pd.DataFrame:
+    """Si no se indica ruta, combina el dataset base con el acumulado desde Excel."""
+    if data_path is not None:
+        if not data_path.exists():
+            raise FileNotFoundError(f"No se encontró el dataset indicado: {data_path}")
+        df = pd.read_parquet(data_path) if data_path.suffix == ".parquet" else pd.read_csv(data_path)
+        return storage.normalize_df_columns(df)
 
-    if not data_path.exists():
+    frames = []
+    base_path = config.DATA_DIR / "train_v3.parquet"
+    if base_path.exists():
+        log.info(f"Cargando dataset base: {base_path}")
+        frames.append(storage.normalize_df_columns(pd.read_parquet(base_path)))
+    if config.DATASET_PATH.exists():
+        log.info(f"Cargando dataset acumulado desde Excel: {config.DATASET_PATH}")
+        g = storage.load_dataset()
+        ok = storage.valid_input_mask(g)
+        if len(g) and (~ok).any():
+            log.warning(
+                f"Se excluyen {int((~ok).sum())} de {len(g)} filas del dataset acumulado por no "
+                f"traer las entradas (BEAM_*/COLUMN_*/grado_acero/clase_tornillo)."
+            )
+        frames.append(g[ok])
+
+    if not frames:
         raise FileNotFoundError(
-            f"No se encontró ningún dataset para entrenar en {data_path}. "
-            f"Asegúrate de colocar 'train_v3.parquet' en la carpeta '{config.DATA_DIR}' "
-            f"o validar filas desde Excel."
+            f"No se encontró ningún dataset para entrenar. "
+            f"Coloca 'train_v3.parquet' en '{config.DATA_DIR}' o valida filas desde Excel."
         )
+    return pd.concat(frames, ignore_index=True)
 
-    log.info(f"Cargando datos de entrenamiento desde: {data_path}")
-    if data_path.suffix == ".parquet":
-        df = pd.read_parquet(data_path)
-    else:
-        df = pd.read_csv(data_path)
 
+def train_main(data_path: Path = None, epochs: int = 200, batch_size: int = 32, lr: float = 2e-3):
+    # 1. Cargar datos (base + acumulado, con columnas normalizadas)
+    df = _load_training_frame(data_path)
     log.info(f"Dataset cargado correctamente: {len(df)} filas.")
 
     # 2. Ajustar Preprocesador

@@ -74,12 +74,15 @@ class ConnectionDesignLoss(nn.Module):
         loss_masked_presence = self.bce(preds["masked_presence_logit"], mask)
 
         # p_label: CE por cada paso (preds (B,12,C) vs targets (B,12)); media sobre los 12.
+        # Las etiquetas ausentes vienen como -100 (ignore_index de F.cross_entropy).
+        # Si en el batch no hay ninguna etiqueta válida, la CE daría NaN -> pérdida 0.
+        loss_p_label = preds["reg_always"].sum() * 0.0  # 0 con gradiente válido
         if "p_label_idx" in targets and "p_label_logits" in preds:
-            loss_p_label = F.cross_entropy(
-                preds["p_label_logits"].reshape(-1, preds["p_label_logits"].shape[-1]),
-                targets["p_label_idx"].reshape(-1))
-        else:
-            loss_p_label = preds["reg_always"].sum() * 0.0  # 0 con gradiente válido
+            tgt = targets["p_label_idx"].reshape(-1)
+            if (tgt != -100).any():
+                loss_p_label = F.cross_entropy(
+                    preds["p_label_logits"].reshape(-1, preds["p_label_logits"].shape[-1]),
+                    tgt, ignore_index=-100)
 
         total = (
             self.w_cls * loss_cls

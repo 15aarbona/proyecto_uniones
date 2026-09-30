@@ -169,13 +169,41 @@ Private Function BuildCombinedJson(onlyStatusPredicho As Boolean, ByRef outCount
     Dim statusColIdxPred As Long, unicodeColIdx1 As Long, unicodeColIdx2 As Long, unicodeColIdxPred As Long
     Dim rowDict As Object, auxRow As Object, mergedRow As Object
     Dim k As Variant, firstVal As Boolean
+    Dim auxKey As String
 
     outCount = 0
     Set lo1 = FindListObject("Tabla_MOMENT_M1")
     Set lo2 = FindListObject("TParametrosAux")
     Set loPred = FindListObject("Tabla_Predicciones_IA")
 
-    ' 1. Indexar Tabla_MOMENT_M1
+    ' 1. Indexar TParametrosAux: por FILA DE HOJA (no necesita UNICODE) y, si la tabla lo tiene, por UNICODE
+    Set dictAux = CreateObject("Scripting.Dictionary")
+    If Not lo2 Is Nothing Then
+        unicodeColIdx2 = GetListColumnIndex(lo2, "UNICODE")
+        For r = 1 To lo2.ListRows.Count
+            If Not IsListRowEmpty(lo2, r) Then
+                Set auxRow = CreateObject("Scripting.Dictionary")
+                For c = 1 To lo2.ListColumns.Count
+                    colName = lo2.HeaderRowRange.Cells(1, c).Value
+                    If UCase$(colName) <> "UNICODE" Then
+                        auxRow(colName) = CellToJsonValue(lo2.DataBodyRange.Cells(r, c))
+                    End If
+                Next c
+
+                auxKey = "@ROW" & CStr(lo2.DataBodyRange.Cells(r, 1).Row)
+                If Not dictAux.Exists(auxKey) Then dictAux.Add auxKey, auxRow
+
+                If unicodeColIdx2 > 0 Then
+                    unicodeKey = Trim$(CStr(lo2.DataBodyRange.Cells(r, unicodeColIdx2).Value))
+                    If unicodeKey <> "" Then
+                        If Not dictAux.Exists(unicodeKey) Then dictAux.Add unicodeKey, auxRow
+                    End If
+                End If
+            End If
+        Next r
+    End If
+
+    ' 2. Indexar Tabla_MOMENT_M1 (cada fila ya lleva fusionados los parametros de TParametrosAux)
     Set dictM1 = CreateObject("Scripting.Dictionary")
     If Not lo1 Is Nothing Then
         unicodeColIdx1 = GetListColumnIndex(lo1, "UNICODE")
@@ -189,31 +217,21 @@ Private Function BuildCombinedJson(onlyStatusPredicho As Boolean, ByRef outCount
                     Set rowDict = CreateObject("Scripting.Dictionary")
                     For c = 1 To lo1.ListColumns.Count
                         colName = lo1.HeaderRowRange.Cells(1, c).Value
-                        rowDict.Add colName, CellToJsonValue(lo1.DataBodyRange.Cells(r, c))
+                        rowDict(colName) = CellToJsonValue(lo1.DataBodyRange.Cells(r, c))
                     Next c
-                    dictM1.Add keyLookup, rowDict
-                End If
-            End If
-        Next r
-    End If
 
-    ' 2. Indexar TParametrosAux
-    Set dictAux = CreateObject("Scripting.Dictionary")
-    If Not lo2 Is Nothing Then
-        unicodeColIdx2 = GetListColumnIndex(lo2, "UNICODE")
-        For r = 1 To lo2.ListRows.Count
-            If Not IsListRowEmpty(lo2, r) Then
-                unicodeKey = ""
-                If unicodeColIdx2 > 0 Then unicodeKey = Trim$(CStr(lo2.DataBodyRange.Cells(r, unicodeColIdx2).Value))
-                If unicodeKey <> "" And Not dictAux.Exists(unicodeKey) Then
-                    Set auxRow = CreateObject("Scripting.Dictionary")
-                    For c = 1 To lo2.ListColumns.Count
-                        colName = lo2.HeaderRowRange.Cells(1, c).Value
-                        If colName <> "UNICODE" Then
-                            auxRow.Add colName, CellToJsonValue(lo2.DataBodyRange.Cells(r, c))
-                        End If
-                    Next c
-                    dictAux.Add unicodeKey, auxRow
+                    Set auxRow = FindAuxRow(dictAux, lo1.DataBodyRange.Cells(r, 1).Row, unicodeKey)
+                    If Not auxRow Is Nothing Then
+                        For Each k In auxRow.Keys
+                            If Not rowDict.Exists(CStr(k)) Then
+                                rowDict(CStr(k)) = auxRow(k)
+                            ElseIf rowDict(CStr(k)) = "null" Then
+                                rowDict(CStr(k)) = auxRow(k)
+                            End If
+                        Next k
+                    End If
+
+                    dictM1.Add keyLookup, rowDict
                 End If
             End If
         Next r
@@ -316,11 +334,13 @@ Private Function BuildCombinedJson(onlyStatusPredicho As Boolean, ByRef outCount
                     jsonRow = jsonRow & JsonString(colName) & ":" & CellToJsonValue(lo1.DataBodyRange.Cells(r, c))
                 Next c
 
-                ' Aux
-                If unicodeKey <> "" And dictAux.Exists(unicodeKey) Then
-                    Set auxRow = dictAux(unicodeKey)
+                ' Aux (misma fila de hoja que la fila de MOMENT_M1, o por UNICODE si la tabla lo tiene)
+                Set auxRow = FindAuxRow(dictAux, lo1.DataBodyRange.Cells(r, 1).Row, unicodeKey)
+                If Not auxRow Is Nothing Then
                     For Each k In auxRow.Keys
-                        jsonRow = jsonRow & "," & JsonString(CStr(k)) & ":" & auxRow(k)
+                        If GetListColumnIndex(lo1, CStr(k)) = 0 Then
+                            jsonRow = jsonRow & "," & JsonString(CStr(k)) & ":" & auxRow(k)
+                        End If
                     Next k
                 End If
 
@@ -551,6 +571,18 @@ Private Function FindListObject(tableName As String) As ListObject
         End If
     Next ws
     On Error GoTo 0
+End Function
+
+Private Function FindAuxRow(dictAux As Object, ByVal sheetRow As Long, ByVal unicodeKey As String) As Object
+    ' Devuelve la fila de TParametrosAux que esta en la MISMA FILA DE HOJA que la de MOMENT_M1.
+    ' Si no hay coincidencia por fila, prueba por UNICODE (solo si TParametrosAux lo tiene).
+    Dim rowKey As String
+    rowKey = "@ROW" & CStr(sheetRow)
+    If dictAux.Exists(rowKey) Then
+        Set FindAuxRow = dictAux(rowKey)
+    ElseIf unicodeKey <> "" Then
+        If dictAux.Exists(unicodeKey) Then Set FindAuxRow = dictAux(unicodeKey)
+    End If
 End Function
 
 Private Function GetListColumnIndex(lo As ListObject, colName As String) As Long

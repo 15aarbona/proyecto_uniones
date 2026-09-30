@@ -96,7 +96,11 @@ def validate(
         raise HTTPException(status_code=400, detail="La petición no trae filas (rows vacío)")
 
     rows_before = len(storage.load_dataset())
-    result = storage.append_rows(payload.rows, source="excel")
+    try:
+        result = storage.append_rows(payload.rows, source="excel")
+    except storage.InvalidRowsError as e:
+        log.warning(f"/validate rechazado: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
     rows_after = result["total_rows"]
 
     log.info(f"/validate: guardadas {result['saved']} filas, total dataset={rows_after}")

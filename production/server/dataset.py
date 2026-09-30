@@ -126,7 +126,9 @@ class Preprocessor:
         self.standard_encoder = LabelEncoder().fit(std_s)
 
         if all(c in df.columns for c in P_LABEL_COLUMNS):
-            p_concat = pd.concat([df[c].fillna("UNUSED").astype(str) for c in P_LABEL_COLUMNS], ignore_index=True)
+            # Las etiquetas ausentes (NaN) NO se convierten en 'UNUSED': se ignoran en el entrenamiento.
+            p_concat = pd.concat([df[c] for c in P_LABEL_COLUMNS], ignore_index=True).dropna().astype(str)
+            p_concat = pd.concat([p_concat, pd.Series(["UNUSED"])], ignore_index=True)
             self.p_label_encoder = LabelEncoder().fit(p_concat)
         else:
             self.p_label_encoder = None
@@ -170,16 +172,21 @@ class Preprocessor:
         return len(self.standard_encoder.classes_)
 
     def _encode_p_labels(self, df):
-        if getattr(self, "p_label_encoder", None) is not None and all(c in df.columns for c in P_LABEL_COLUMNS):
-            known = set(self.p_label_encoder.classes_)
-            fallback = self.p_label_encoder.classes_[0]
-            encoded = []
-            for c in P_LABEL_COLUMNS:
-                s = df[c].fillna("UNUSED").astype(str).map(lambda x: x if x in known else fallback)
-                encoded.append(self.p_label_encoder.transform(s))
-            idx = np.stack(encoded, axis=1)
-            return idx.astype(np.int64)
-        return np.zeros((len(df), len(P_LABEL_COLUMNS)), dtype=np.int64)
+        """Índices de clase por paso p. -100 = etiqueta ausente/desconocida (ignorada por la CE)."""
+        n = len(df)
+        if getattr(self, "p_label_encoder", None) is None:
+            return np.full((n, len(P_LABEL_COLUMNS)), -100, dtype=np.int64)
+        mapping = {c: i for i, c in enumerate(self.p_label_encoder.classes_)}
+        cols = []
+        for c in P_LABEL_COLUMNS:
+            if c not in df.columns:
+                cols.append(np.full(n, -100, dtype=np.int64))
+            else:
+                cols.append(
+                    df[c].map(lambda x: mapping.get(str(x), -100) if pd.notna(x) else -100)
+                    .astype(np.int64).values
+                )
+        return np.stack(cols, axis=1)
 
     @property
     def p_label_classes(self):
