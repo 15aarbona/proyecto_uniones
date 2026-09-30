@@ -437,10 +437,11 @@ Private Sub WriteResponseToSheet(jsonResponse As String, newStatus As String)
             Next c
         Next i
 
-        ' Crear Tabla Estructurada
+        ' Crear Tabla Estructurada y Centrar Contenido
         Set targetRange = ws.Range(ws.Cells(startRow, startCol), ws.Cells(startRow + numRows, startCol + numCols - 1))
         Set loPred = ws.ListObjects.Add(xlSrcRange, targetRange, , xlYes)
         loPred.Name = "Tabla_Predicciones_IA"
+        loPred.Range.HorizontalAlignment = xlCenter ' <-- Texto centrado en toda la tabla
         Exit Sub
     End If
 
