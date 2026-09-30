@@ -20,7 +20,7 @@ LOG_PATH = DATA_DIR / "server.log"
 API_KEY = os.environ.get("AI_API_KEY", "changeme")
 
 HOST = os.environ.get("AI_HOST", "0.0.0.0")
-PORT = int(os.environ.get("AI_PORT", "8000"))
+PORT = int(os.environ.get("AI_PORT", "8080"))
 
 MODEL_VERSION = "resnet-tabular-uniones-v4"
 

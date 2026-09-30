@@ -3,6 +3,7 @@ Módulo de inferencia en producción (sin transformaciones en servidor).
 Toma las 20 features directo del payload de Excel y ejecuta el modelo.
 """
 import logging
+import math
 import pickle
 import sys
 from pathlib import Path
@@ -16,7 +17,6 @@ import config
 import dataset
 import model
 from config import (
-    FEATURE_COLUMNS,
     MODEL_PATH,
     NUMERIC_FEATURES,
     PREPROCESSOR_PATH,
@@ -49,6 +49,27 @@ _PREPROCESSOR: Preprocessor | None = None
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _clean_value(val: Any) -> Any:
+    """Sanea valores para garantizar compatibilidad JSON (evita NaN e Inf)."""
+    if val is None:
+        return None
+    if isinstance(val, (float, np.floating)):
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return float(val)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if pd.isna(val):
+        return None
+    return val
+
+
+def _clean_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: _clean_value(v) for k, v in d.items()}
+
+
 def load_model_and_preprocessor():
     global _MODEL, _PREPROCESSOR
     if _MODEL is not None and _PREPROCESSOR is not None:
@@ -70,7 +91,6 @@ def load_model_and_preprocessor():
                 n_standard_classes=n_std_cls,
             ).to(_DEVICE)
 
-            # Acepta tanto un checkpoint dict ("model_state") como el modelo directo
             if isinstance(checkpoint, dict) and "model_state" in checkpoint:
                 _MODEL.load_state_dict(checkpoint["model_state"])
             elif isinstance(checkpoint, dict):
@@ -93,7 +113,15 @@ def predict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not rows:
         return []
 
-    df = pd.DataFrame(rows)
+    valid_rows = [
+        r for r in rows
+        if any(v is not None and str(v).strip() != "" for v in r.values())
+    ]
+
+    if not valid_rows:
+        return []
+
+    df = pd.DataFrame(valid_rows)
     model_inst, preprocessor = load_model_and_preprocessor()
 
     if model_inst is not None and preprocessor is not None:
@@ -111,7 +139,7 @@ def predict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except Exception as e:
             log.exception(f"Error durante la inferencia con PyTorch: {e}")
 
-    return _stub_predict(rows)
+    return _stub_predict(valid_rows)
 
 
 def _format_outputs(input_df: pd.DataFrame, design_df: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -119,36 +147,44 @@ def _format_outputs(input_df: pd.DataFrame, design_df: pd.DataFrame) -> List[Dic
     for idx, row in input_df.iterrows():
         des = design_df.iloc[idx].to_dict()
         bolt_val = des.get("Bolt", des.get("bolt", 20))
-        pred = {
+        
+        pred = {}
+        if "UNICODE" in row and pd.notna(row["UNICODE"]):
+            pred["UNICODE"] = row["UNICODE"]
+
+        pred.update({
             "standard": str(des.get("standard", "AISC 360-16")),
             "bolt": bolt_val,
-            "Bolt": bolt_val,
             "SlipCritical": des.get("SlipCritical", "NO"),
             "n_alma": int(des.get("n_alma", 2)),
             "n_cantonera": int(des.get("n_cantonera", 0)),
             "N_Y": 12,
-            **{f"P{i}": float(des.get(f"p{i}", 0.0)) for i in range(1, 13)},
-            "g": float(des.get("g", 100.0)),
-            "e": float(des.get("e", 50.0)),
-            "d": float(des.get("d", 50.0)),
-            "Bp": float(des.get("Bp", 200.0)),
-            "tp": float(des.get("tp", 20.0)),
-            "tws": float(des.get("tws", 0.0)),
-            "ts": float(des.get("ts", 0.0)),
-            "tbs": float(des.get("tbs", 0.0)),
-            "tst": float(des.get("tst", 0.0)),
-            "Hole": float(des.get("Hole", 22.0)),
+            **{f"P{i}": des.get(f"p{i}", 0.0) for i in range(1, 13)},
+            "g": des.get("g", 100.0),
+            "e": des.get("e", 50.0),
+            "d": des.get("d", 50.0),
+            "Bp": des.get("Bp", 200.0),
+            "tp": des.get("tp", 20.0),
+            "tws": des.get("tws", 0.0),
+            "ts": des.get("ts", 0.0),
+            "tbs": des.get("tbs", 0.0),
+            "tst": des.get("tst", 0.0),
+            "Hole": des.get("Hole", 22.0),
             "num_filas_tornillos": int(des.get("num_filas_tornillos", 4)),
             "tiene_cantonera": bool(des.get("tiene_cantonera", False)),
-        }
-        out.append({**row.to_dict(), **pred})
+        })
+        out.append(_clean_dict(pred))
     return out
 
 
 def _stub_predict(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for row in rows:
-        pred = {
+        pred = {}
+        if "UNICODE" in row and row["UNICODE"] is not None:
+            pred["UNICODE"] = row["UNICODE"]
+
+        pred.update({
             "standard": "AISC 360-16",
             "bolt": 20,
             "SlipCritical": "NO",
@@ -170,8 +206,8 @@ def _stub_predict(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "Hole": 22.0,
             "num_filas_tornillos": 4,
             "tiene_cantonera": False,
-        }
-        out.append({**row, **pred})
+        })
+        out.append(_clean_dict(pred))
     return out
 
 

@@ -1,41 +1,16 @@
-Attribute VB_Name = "AI_Client"
 Option Explicit
 
 ' ============================================================================
-' Cliente de Excel <-> servidor de inferencia (fase de pruebas, columnas de prueba).
-'
-' QUÉ HACE ESTE MÓDULO
-'   - Sub SendToAI()          [botón "Enviar a IA"]        envía TODAS las filas de la
-'                              hoja activa a POST /predict y escribe la respuesta.
-'   - Sub ValidateAndSend()   [botón "Validar y enviar"]   envía las filas ya predichas
-'                              (con los valores que el ingeniero haya editado a mano) a
-'                              POST /validate, para que el servidor las guarde de cara a
-'                              un reentreno futuro.
-'
-' DISEÑO: NO asume nombres de columna fijos. Lee la fila de cabeceras (fila 1) tal cual
-' esté en la hoja, manda esas columnas tal cual al servidor, y escribe cualquier columna
-' nueva que venga en la respuesta (p.ej. "pred_valor_A") añadiéndola al final si no existe
-' ya. Así, cuando las columnas de entrada/salida reales estén cerradas, no hace falta tocar
-' esta macro: basta con que la hoja tenga esas cabeceras.
-'
-' CÓMO INSTALAR
-'   1. Abre el editor VBA (Alt+F11) en el libro donde quieras usar esto.
-'   2. Archivo -> Importar archivo... -> selecciona este AI_Client.bas
-'   3. Herramientas -> Referencias -> marca "Microsoft WinHTTP Services, version 5.1"
-'      (si no aparece marcada, dará error "ActiveX no puede crear el objeto").
-'   4. Ajusta las constantes SERVER_URL / API_KEY / SHEET_NAME más abajo.
-'   5. Inserta dos botones (Desarrollador -> Insertar -> Botón de formulario) y asígnales
-'      las macros AI_Client.SendToAI y AI_Client.ValidateAndSend.
+' Cliente de Excel <-> Servidor de Inferencia (Trabaja directamente en ActiveSheet)
 ' ============================================================================
 
 ' --- Configuración: EDITAR AQUÍ --------------------------------------------------------
-Private Const SERVER_URL As String = "http://127.0.0.1:8080"   ' cambiar al equipo central cuando toque
-Private Const API_KEY As String = "changeme"                     ' debe coincidir con AI_API_KEY del servidor
-Private Const SHEET_NAME As String = "Datos_IA"                 ' hoja donde está la tabla de entrada
-Private Const HEADER_ROW As Long = 1                             ' fila de cabeceras
-Private Const FIRST_DATA_ROW As Long = 2                         ' primera fila de datos
-Private Const STATUS_COLUMN_NAME As String = "Estado_IA"        ' columna de estado (se crea sola si no existe)
-Private Const TIMEOUT_MS As Long = 30000                         ' 30 s
+Private Const SERVER_URL As String = "http://127.0.0.1:8080"   ' URL y puerto del servidor
+Private Const API_KEY As String = "changeme"                     ' Clave de seguridad (AI_API_KEY)
+Private Const HEADER_ROW As Long = 1                             ' Fila de cabecera para rangos simples
+Private Const FIRST_DATA_ROW As Long = 2                         ' Fila inicial de datos para rangos simples
+Private Const STATUS_COLUMN_NAME As String = "Estado_IA"        ' Columna de seguimiento
+Private Const TIMEOUT_MS As Long = 30000                         ' Timeout HTTP (30s)
 ' ----------------------------------------------------------------------------------------
 
 Private Const STATUS_PREDICHO As String = "Predicho"
@@ -43,31 +18,24 @@ Private Const STATUS_VALIDADO As String = "Validado y enviado"
 
 
 ' ============================================================================
-' BOTÓN 1: "Enviar a IA" — manda TODAS las filas con datos a /predict.
+' BOTÓN 1: "Enviar a IA"
 ' ============================================================================
 Public Sub SendToAI()
-    Dim ws As Worksheet
-    Dim lastRow As Long, lastCol As Long
-    Dim headers() As String
     Dim payload As String
     Dim response As String
     Dim httpStatus As Long
+    Dim totalRows As Long
 
     On Error GoTo ErrHandler
 
-    Set ws = GetSheet(SHEET_NAME)
-    lastCol = GetLastColumn(ws)
-    lastRow = GetLastRow(ws)
+    payload = BuildCombinedJson(onlyStatusPredicho:=False, outCount:=totalRows)
 
-    If lastRow < FIRST_DATA_ROW Then
-        MsgBox "No hay filas de datos en la hoja '" & SHEET_NAME & "'.", vbExclamation
+    If totalRows = 0 Then
+        MsgBox "No se encontraron filas con datos válidos en la hoja activa ('" & ActiveSheet.Name & "').", vbExclamation
         Exit Sub
     End If
 
-    headers = ReadHeaders(ws, lastCol)
-    payload = BuildRowsJson(ws, headers, FIRST_DATA_ROW, lastRow)
-
-    Application.StatusBar = "Enviando " & (lastRow - FIRST_DATA_ROW + 1) & " fila(s) a la IA..."
+    Application.StatusBar = "Enviando " & totalRows & " unión(es) a la IA..."
     If Not HttpPostJson(SERVER_URL & "/predict", payload, response, httpStatus) Then
         MsgBox "No se ha podido contactar con el servidor de IA:" & vbCrLf & response, vbCritical
         GoTo CleanExit
@@ -78,8 +46,8 @@ Public Sub SendToAI()
         GoTo CleanExit
     End If
 
-    WriteResponseToSheet ws, headers, FIRST_DATA_ROW, lastRow, response, STATUS_PREDICHO
-    MsgBox "Predicción recibida para " & (lastRow - FIRST_DATA_ROW + 1) & " fila(s).", vbInformation
+    WriteResponseToSheet response, STATUS_PREDICHO
+    MsgBox "Predicción recibida para " & totalRows & " fila(s).", vbInformation
 
 CleanExit:
     Application.StatusBar = False
@@ -92,51 +60,25 @@ End Sub
 
 
 ' ============================================================================
-' BOTÓN 2: "Validar y enviar" — manda las filas marcadas como "Predicho" (con los valores
-' que el ingeniero haya editado a mano) a /validate, para que el servidor las guarde.
+' BOTÓN 2: "Validar y enviar"
 ' ============================================================================
 Public Sub ValidateAndSend()
-    Dim ws As Worksheet
-    Dim lastRow As Long, lastCol As Long
-    Dim headers() As String
-    Dim statusCol As Long
     Dim payload As String
     Dim response As String
     Dim httpStatus As Long
-    Dim r As Long, n As Long
+    Dim totalRows As Long
 
     On Error GoTo ErrHandler
 
-    Set ws = GetSheet(SHEET_NAME)
-    lastCol = GetLastColumn(ws)
-    lastRow = GetLastRow(ws)
-    headers = ReadHeaders(ws, lastCol)
-    statusCol = FindColumn(headers, STATUS_COLUMN_NAME)
+    payload = BuildCombinedJson(onlyStatusPredicho:=True, outCount:=totalRows)
 
-    If statusCol = 0 Then
-        MsgBox "No encuentro la columna '" & STATUS_COLUMN_NAME & "'. Pulsa antes 'Enviar a IA'.", vbExclamation
-        Exit Sub
-    End If
-
-    ' Solo se validan/envían las filas que ya tienen una predicción pendiente de validar.
-    n = 0
-    payload = "{""rows"": ["
-    For r = FIRST_DATA_ROW To lastRow
-        If CStr(ws.Cells(r, statusCol).value) = STATUS_PREDICHO Then
-            If n > 0 Then payload = payload & ","
-            payload = payload & RowToJson(ws, headers, r)
-            n = n + 1
-        End If
-    Next r
-    payload = payload & "]}"
-
-    If n = 0 Then
+    If totalRows = 0 Then
         MsgBox "No hay filas en estado '" & STATUS_PREDICHO & "' para validar." & vbCrLf & _
                "Pulsa primero 'Enviar a IA', revisa/edita los valores y vuelve a intentarlo.", vbExclamation
         Exit Sub
     End If
 
-    Application.StatusBar = "Enviando " & n & " fila(s) validada(s)..."
+    Application.StatusBar = "Enviando " & totalRows & " fila(s) validada(s)..."
     If Not HttpPostJson(SERVER_URL & "/validate", payload, response, httpStatus) Then
         MsgBox "No se ha podido contactar con el servidor de IA:" & vbCrLf & response, vbCritical
         GoTo CleanExit
@@ -147,14 +89,8 @@ Public Sub ValidateAndSend()
         GoTo CleanExit
     End If
 
-    ' Marcar como validadas las filas que se han enviado
-    For r = FIRST_DATA_ROW To lastRow
-        If CStr(ws.Cells(r, statusCol).value) = STATUS_PREDICHO Then
-            ws.Cells(r, statusCol).value = STATUS_VALIDADO & " (" & Format(Now, "yyyy-mm-dd hh:nn") & ")"
-        End If
-    Next r
-
-    MsgBox n & " fila(s) validada(s) y guardada(s) en el servidor.", vbInformation
+    UpdateStatusForSentRows STATUS_VALIDADO & " (" & Format(Now, "yyyy-mm-dd hh:nn") & ")"
+    MsgBox totalRows & " fila(s) validada(s) y guardada(s) en el servidor.", vbInformation
 
 CleanExit:
     Application.StatusBar = False
@@ -167,21 +103,491 @@ End Sub
 
 
 ' ============================================================================
-' HTTP (WinHTTP nativo, sin dependencias externas)
+' BOTÓN 3: "Reentrenar Modelo"
+' ============================================================================
+Public Sub ForceRetrain()
+    Dim response As String
+    Dim httpStatus As Long
+
+    If MsgBox("¿Deseas iniciar el reentrenamiento del modelo en el servidor con los datos actuales?", _
+              vbQuestion + vbYesNo, "Confirmar reentrenamiento") = vbNo Then
+        Exit Sub
+    End If
+
+    Application.StatusBar = "Solicitando reentrenamiento del modelo..."
+    
+    If Not HttpPostJson(SERVER_URL & "/retrain", "{}", response, httpStatus) Then
+        MsgBox "No se ha podido contactar con el servidor:" & vbCrLf & response, vbCritical
+        GoTo CleanExit
+    End If
+
+    If httpStatus <> 200 Then
+        MsgBox "El servidor devolvió un error (HTTP " & httpStatus & "):" & vbCrLf & response, vbCritical
+        GoTo CleanExit
+    End If
+
+    MsgBox "El reentrenamiento se ha iniciado con éxito en segundo plano." & vbCrLf & _
+           "El servidor actualizará automáticamente los pesos al terminar.", vbInformation
+
+CleanExit:
+    Application.StatusBar = False
+End Sub
+
+
+' ============================================================================
+' LÓGICA DE LECTURA Y CONSTRUCCIÓN DE JSON
+' ============================================================================
+Private Function IsListRowEmpty(lo As ListObject, rowIdx As Long) As Boolean
+    Dim c As Long
+    For c = 1 To lo.ListColumns.Count
+        If Trim$(CStr(lo.DataBodyRange.Cells(rowIdx, c).Value)) <> "" Then
+            IsListRowEmpty = False
+            Exit Function
+        End If
+    Next c
+    IsListRowEmpty = True
+End Function
+
+Private Function IsSheetRowEmpty(ws As Worksheet, rowIdx As Long, lastCol As Long) As Boolean
+    Dim c As Long
+    For c = 1 To lastCol
+        If Trim$(CStr(ws.Cells(rowIdx, c).Value)) <> "" Then
+            IsSheetRowEmpty = False
+            Exit Function
+        End If
+    Next c
+    IsSheetRowEmpty = True
+End Function
+
+Private Function BuildCombinedJson(onlyStatusPredicho As Boolean, ByRef outCount As Long) As String
+    Dim lo1 As ListObject, lo2 As ListObject, loPred As ListObject
+    Dim dictM1 As Object, dictAux As Object
+    Dim r As Long, c As Long
+    Dim unicodeKey As String, keyLookup As String
+    Dim jsonRow As String, payload As String
+    Dim colName As String, statusVal As String
+    Dim statusColIdxPred As Long, unicodeColIdx1 As Long, unicodeColIdx2 As Long, unicodeColIdxPred As Long
+    Dim rowDict As Object, auxRow As Object, mergedRow As Object
+    Dim k As Variant, firstVal As Boolean
+
+    outCount = 0
+    Set lo1 = FindListObject("Tabla_MOMENT_M1")
+    Set lo2 = FindListObject("TParametrosAux")
+    Set loPred = FindListObject("Tabla_Predicciones_IA")
+
+    ' 1. Indexar Tabla_MOMENT_M1
+    Set dictM1 = CreateObject("Scripting.Dictionary")
+    If Not lo1 Is Nothing Then
+        unicodeColIdx1 = GetListColumnIndex(lo1, "UNICODE")
+        For r = 1 To lo1.ListRows.Count
+            If Not IsListRowEmpty(lo1, r) Then
+                unicodeKey = ""
+                If unicodeColIdx1 > 0 Then unicodeKey = Trim$(CStr(lo1.DataBodyRange.Cells(r, unicodeColIdx1).Value))
+                keyLookup = IIf(unicodeKey <> "", unicodeKey, "ROW_" & CStr(r))
+
+                If Not dictM1.Exists(keyLookup) Then
+                    Set rowDict = CreateObject("Scripting.Dictionary")
+                    For c = 1 To lo1.ListColumns.Count
+                        colName = lo1.HeaderRowRange.Cells(1, c).Value
+                        rowDict.Add colName, CellToJsonValue(lo1.DataBodyRange.Cells(r, c))
+                    Next c
+                    dictM1.Add keyLookup, rowDict
+                End If
+            End If
+        Next r
+    End If
+
+    ' 2. Indexar TParametrosAux
+    Set dictAux = CreateObject("Scripting.Dictionary")
+    If Not lo2 Is Nothing Then
+        unicodeColIdx2 = GetListColumnIndex(lo2, "UNICODE")
+        For r = 1 To lo2.ListRows.Count
+            If Not IsListRowEmpty(lo2, r) Then
+                unicodeKey = ""
+                If unicodeColIdx2 > 0 Then unicodeKey = Trim$(CStr(lo2.DataBodyRange.Cells(r, unicodeColIdx2).Value))
+                If unicodeKey <> "" And Not dictAux.Exists(unicodeKey) Then
+                    Set auxRow = CreateObject("Scripting.Dictionary")
+                    For c = 1 To lo2.ListColumns.Count
+                        colName = lo2.HeaderRowRange.Cells(1, c).Value
+                        If colName <> "UNICODE" Then
+                            auxRow.Add colName, CellToJsonValue(lo2.DataBodyRange.Cells(r, c))
+                        End If
+                    Next c
+                    dictAux.Add unicodeKey, auxRow
+                End If
+            End If
+        Next r
+    End If
+
+    ' ------------------------------------------------------------------------
+    ' CASO A: VALIDACIÓN (onlyStatusPredicho = True) usando Tabla_Predicciones_IA
+    ' ------------------------------------------------------------------------
+    If onlyStatusPredicho Then
+        If loPred Is Nothing Then
+            BuildCombinedJson = BuildActiveSheetJson(True, outCount)
+            Exit Function
+        End If
+
+        statusColIdxPred = GetListColumnIndex(loPred, STATUS_COLUMN_NAME)
+        unicodeColIdxPred = GetListColumnIndex(loPred, "UNICODE")
+
+        payload = "{""rows"": ["
+
+        For r = 1 To loPred.ListRows.Count
+            If Not IsListRowEmpty(loPred, r) Then
+                statusVal = ""
+                If statusColIdxPred > 0 Then
+                    statusVal = Trim$(CStr(loPred.DataBodyRange.Cells(r, statusColIdxPred).Value))
+                End If
+
+                If UCase$(Left$(statusVal, Len(STATUS_PREDICHO))) = UCase$(STATUS_PREDICHO) Then
+                    unicodeKey = ""
+                    If unicodeColIdxPred > 0 Then unicodeKey = Trim$(CStr(loPred.DataBodyRange.Cells(r, unicodeColIdxPred).Value))
+                    keyLookup = IIf(unicodeKey <> "", unicodeKey, "ROW_" & CStr(r))
+
+                    Set mergedRow = CreateObject("Scripting.Dictionary")
+
+                    ' Fusionar MOMENT_M1
+                    If dictM1.Exists(keyLookup) Then
+                        Set rowDict = dictM1(keyLookup)
+                        For Each k In rowDict.Keys
+                            mergedRow(CStr(k)) = rowDict(k)
+                        Next k
+                    End If
+
+                    ' Fusionar Aux
+                    If unicodeKey <> "" And dictAux.Exists(unicodeKey) Then
+                        Set auxRow = dictAux(unicodeKey)
+                        For Each k In auxRow.Keys
+                            mergedRow(CStr(k)) = auxRow(k)
+                        Next k
+                    End If
+
+                    ' Fusionar Tabla_Predicciones_IA (incluye cambios manuales)
+                    For c = 1 To loPred.ListColumns.Count
+                        colName = loPred.HeaderRowRange.Cells(1, c).Value
+                        If UCase$(colName) <> UCase$(STATUS_COLUMN_NAME) Then
+                            mergedRow(colName) = CellToJsonValue(loPred.DataBodyRange.Cells(r, c))
+                        End If
+                    Next c
+
+                    ' Construir JSON
+                    If outCount > 0 Then payload = payload & ","
+                    jsonRow = "{"
+                    firstVal = True
+                    For Each k In mergedRow.Keys
+                        If Not firstVal Then jsonRow = jsonRow & ","
+                        jsonRow = jsonRow & JsonString(CStr(k)) & ":" & mergedRow(k)
+                        firstVal = False
+                    Next k
+                    jsonRow = jsonRow & "}"
+
+                    payload = payload & jsonRow
+                    outCount = outCount + 1
+                End If
+            End If
+        Next r
+
+        payload = payload & "]}"
+        BuildCombinedJson = payload
+        Exit Function
+    End If
+
+    ' ------------------------------------------------------------------------
+    ' CASO B: PREDICCIÓN INICIAL (onlyStatusPredicho = False) desde MOMENT_M1
+    ' ------------------------------------------------------------------------
+    If Not lo1 Is Nothing Then
+        unicodeColIdx1 = GetListColumnIndex(lo1, "UNICODE")
+        payload = "{""rows"": ["
+
+        For r = 1 To lo1.ListRows.Count
+            If Not IsListRowEmpty(lo1, r) Then
+                unicodeKey = ""
+                If unicodeColIdx1 > 0 Then unicodeKey = Trim$(CStr(lo1.DataBodyRange.Cells(r, unicodeColIdx1).Value))
+                keyLookup = IIf(unicodeKey <> "", unicodeKey, "ROW_" & CStr(r))
+
+                If outCount > 0 Then payload = payload & ","
+                jsonRow = "{"
+
+                ' MOMENT_M1
+                For c = 1 To lo1.ListColumns.Count
+                    colName = lo1.HeaderRowRange.Cells(1, c).Value
+                    If c > 1 Then jsonRow = jsonRow & ","
+                    jsonRow = jsonRow & JsonString(colName) & ":" & CellToJsonValue(lo1.DataBodyRange.Cells(r, c))
+                Next c
+
+                ' Aux
+                If unicodeKey <> "" And dictAux.Exists(unicodeKey) Then
+                    Set auxRow = dictAux(unicodeKey)
+                    For Each k In auxRow.Keys
+                        jsonRow = jsonRow & "," & JsonString(CStr(k)) & ":" & auxRow(k)
+                    Next k
+                End If
+
+                jsonRow = jsonRow & "}"
+                payload = payload & jsonRow
+                outCount = outCount + 1
+            End If
+        Next r
+
+        payload = payload & "]}"
+        BuildCombinedJson = payload
+        Exit Function
+    End If
+
+    ' Fallback en Rango de Hoja Activa
+    BuildCombinedJson = BuildActiveSheetJson(onlyStatusPredicho, outCount)
+End Function
+
+Private Function BuildActiveSheetJson(onlyStatusPredicho As Boolean, ByRef outCount As Long) As String
+    Dim ws As Worksheet
+    Dim lastRow As Long, lastCol As Long
+    Dim headers() As String
+    Dim statusCol As Long, r As Long
+    Dim payload As String
+
+    Set ws = ActiveSheet
+    lastCol = GetLastColumn(ws)
+    lastRow = GetLastRow(ws)
+    headers = ReadHeaders(ws, lastCol)
+    statusCol = FindColumn(headers, STATUS_COLUMN_NAME)
+
+    outCount = 0
+    payload = "{""rows"": ["
+    For r = FIRST_DATA_ROW To lastRow
+        If IsSheetRowEmpty(ws, r, lastCol) Then GoTo NextR
+
+        If onlyStatusPredicho Then
+            If statusCol = 0 Or UCase$(Left$(Trim$(CStr(ws.Cells(r, statusCol).Value)), Len(STATUS_PREDICHO))) <> UCase$(STATUS_PREDICHO) Then GoTo NextR
+        End If
+        If outCount > 0 Then payload = payload & ","
+        payload = payload & RowToJson(ws, headers, r)
+        outCount = outCount + 1
+NextR:
+    Next r
+    payload = payload & "]}"
+    BuildActiveSheetJson = payload
+End Function
+
+
+' ============================================================================
+' ESCRITURA DE RESULTADOS Y ESTADO DE IA
+' ============================================================================
+Private Sub WriteResponseToSheet(jsonResponse As String, newStatus As String)
+    Dim rowsArr As Collection
+    Dim rowObj As Object
+    Dim loAux As ListObject, loPred As ListObject
+    Dim ws As Worksheet
+    Dim startCol As Long, startRow As Long
+    Dim i As Long, c As Long
+    Dim keysCol As Collection, key As Variant
+    Dim numRows As Long, numCols As Long
+    Dim targetRange As Range
+    Dim hasStatusKey As Boolean
+
+    Set rowsArr = JsonParseRowsField(jsonResponse, "rows")
+    If rowsArr.Count = 0 Then Exit Sub
+
+    Set loAux = FindListObject("TParametrosAux")
+
+    If Not loAux Is Nothing Then
+        Set ws = loAux.Parent
+        startRow = loAux.Range.Row
+        startCol = loAux.Range.Column + loAux.Range.Columns.Count + 1
+
+        Set keysCol = New Collection
+        Set rowObj = rowsArr(1)
+        For Each key In rowObj.Keys
+            keysCol.Add CStr(key)
+        Next key
+        
+        hasStatusKey = False
+        For Each key In keysCol
+            If UCase$(CStr(key)) = UCase$(STATUS_COLUMN_NAME) Then hasStatusKey = True
+        Next key
+        If Not hasStatusKey Then keysCol.Add STATUS_COLUMN_NAME
+
+        numCols = keysCol.Count
+        numRows = rowsArr.Count
+
+        ' Limpiar tabla previa si existía
+        Set loPred = FindListObject("Tabla_Predicciones_IA")
+        If Not loPred Is Nothing Then
+            On Error Resume Next
+            loPred.Range.Clear
+            loPred.Delete
+            On Error GoTo 0
+        End If
+
+        ' Cabeceras
+        For c = 1 To numCols
+            ws.Cells(startRow, startCol + c - 1).Value = keysCol(c)
+        Next c
+
+        ' Datos
+        For i = 1 To numRows
+            Set rowObj = rowsArr(i)
+            For c = 1 To numCols
+                key = keysCol(c)
+                If UCase$(CStr(key)) = UCase$(STATUS_COLUMN_NAME) Then
+                    ws.Cells(startRow + i, startCol + c - 1).Value = newStatus
+                ElseIf rowObj.Exists(key) Then
+                    ws.Cells(startRow + i, startCol + c - 1).Value = rowObj(key)
+                End If
+            Next c
+        Next i
+
+        ' Crear Tabla Estructurada
+        Set targetRange = ws.Range(ws.Cells(startRow, startCol), ws.Cells(startRow + numRows, startCol + numCols - 1))
+        Set loPred = ws.ListObjects.Add(xlSrcRange, targetRange, , xlYes)
+        loPred.Name = "Tabla_Predicciones_IA"
+        Exit Sub
+    End If
+
+    ' Fallback en Rango
+    Set ws = ActiveSheet
+    Dim lastCol As Long, lastRow As Long, headers() As String, statusCol As Long
+    lastCol = GetLastColumn(ws)
+    headers = ReadHeaders(ws, lastCol)
+
+    statusCol = FindColumn(headers, STATUS_COLUMN_NAME)
+    If statusCol = 0 Then
+        lastCol = lastCol + 1
+        ws.Cells(HEADER_ROW, lastCol).Value = STATUS_COLUMN_NAME
+        ReDim Preserve headers(1 To lastCol)
+        headers(lastCol) = STATUS_COLUMN_NAME
+        statusCol = lastCol
+    End If
+
+    i = 1
+    For lastRow = FIRST_DATA_ROW To GetLastRow(ws)
+        If IsSheetRowEmpty(ws, lastRow, GetLastColumn(ws)) Then GoTo NextRWrite
+        If i > rowsArr.Count Then Exit For
+        Set rowObj = rowsArr(i)
+        For Each key In rowObj.Keys
+            statusCol = FindColumn(headers, CStr(key))
+            If statusCol = 0 Then
+                lastCol = GetLastColumn(ws) + 1
+                ws.Cells(HEADER_ROW, lastCol).Value = CStr(key)
+                ReDim Preserve headers(1 To lastCol)
+                headers(lastCol) = CStr(key)
+                statusCol = lastCol
+            End If
+            ws.Cells(lastRow, statusCol).Value = rowObj(key)
+        Next key
+        statusCol = FindColumn(headers, STATUS_COLUMN_NAME)
+        ws.Cells(lastRow, statusCol).Value = newStatus
+        i = i + 1
+NextRWrite:
+    Next lastRow
+End Sub
+
+Private Sub UpdateStatusForSentRows(newStatus As String)
+    Dim loPred As ListObject, lo1 As ListObject
+    Dim r As Long, statusColIdx As Long
+    Dim ws As Worksheet, lastRow As Long
+    Dim headers() As String
+
+    Set loPred = FindListObject("Tabla_Predicciones_IA")
+    If Not loPred Is Nothing Then
+        statusColIdx = GetListColumnIndex(loPred, STATUS_COLUMN_NAME)
+        If statusColIdx > 0 Then
+            For r = 1 To loPred.ListRows.Count
+                If UCase$(Left$(Trim$(CStr(loPred.DataBodyRange.Cells(r, statusColIdx).Value)), Len(STATUS_PREDICHO))) = UCase$(STATUS_PREDICHO) Then
+                    loPred.DataBodyRange.Cells(r, statusColIdx).Value = newStatus
+                End If
+            Next r
+        End If
+    End If
+
+    Set lo1 = FindListObject("Tabla_MOMENT_M1")
+    If Not lo1 Is Nothing Then
+        statusColIdx = GetListColumnIndex(lo1, STATUS_COLUMN_NAME)
+        If statusColIdx > 0 Then
+            For r = 1 To lo1.ListRows.Count
+                If UCase$(Left$(Trim$(CStr(lo1.DataBodyRange.Cells(r, statusColIdx).Value)), Len(STATUS_PREDICHO))) = UCase$(STATUS_PREDICHO) Then
+                    lo1.DataBodyRange.Cells(r, statusColIdx).Value = newStatus
+                End If
+            Next r
+        End If
+    End If
+
+    If loPred Is Nothing And lo1 Is Nothing Then
+        Set ws = ActiveSheet
+        headers = ReadHeaders(ws, GetLastColumn(ws))
+        statusColIdx = FindColumn(headers, STATUS_COLUMN_NAME)
+        lastRow = GetLastRow(ws)
+
+        If statusColIdx > 0 Then
+            For r = FIRST_DATA_ROW To lastRow
+                If UCase$(Left$(Trim$(CStr(ws.Cells(r, statusColIdx).Value)), Len(STATUS_PREDICHO))) = UCase$(STATUS_PREDICHO) Then
+                    ws.Cells(r, statusColIdx).Value = newStatus
+                End If
+            Next r
+        End If
+    End If
+End Sub
+
+
+' ============================================================================
+' HELPER BUSCADOR DE OBJETOS
+' ============================================================================
+Private Function FindListObject(tableName As String) As ListObject
+    Dim ws As Worksheet, lo As ListObject
+    On Error Resume Next
+    
+    Set lo = ActiveSheet.ListObjects(tableName)
+    If Not lo Is Nothing Then
+        Set FindListObject = lo
+        Exit Function
+    End If
+
+    For Each ws In ThisWorkbook.Worksheets
+        Set lo = ws.ListObjects(tableName)
+        If Not lo Is Nothing Then
+            Set FindListObject = lo
+            Exit Function
+        End If
+    Next ws
+    On Error GoTo 0
+End Function
+
+Private Function GetListColumnIndex(lo As ListObject, colName As String) As Long
+    On Error Resume Next
+    GetListColumnIndex = lo.ListColumns(colName).Index
+    On Error GoTo 0
+End Function
+
+
+' ============================================================================
+' HTTP (MSXML2.XMLHTTP)
 ' ============================================================================
 Private Function HttpPostJson(url As String, jsonBody As String, ByRef outResponse As String, ByRef outStatus As Long) As Boolean
     Dim http As Object
-    On Error GoTo Fail
+    On Error GoTo TryServerXMLHTTP
 
-    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    Set http = CreateObject("MSXML2.XMLHTTP")
     http.Open "POST", url, False
-    http.SetRequestHeader "Content-Type", "application/json; charset=utf-8"
-    http.SetRequestHeader "X-API-Key", API_KEY
-    http.SetTimeouts TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS
-    http.Send Utf8Encode(jsonBody)
+    http.setRequestHeader "Content-Type", "application/json; charset=utf-8"
+    http.setRequestHeader "X-API-Key", API_KEY
+    http.send jsonBody
 
     outStatus = http.Status
-    outResponse = Utf8Decode(http.responseBody)
+    outResponse = http.responseText
+    HttpPostJson = True
+    Exit Function
+
+TryServerXMLHTTP:
+    On Error GoTo Fail
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS
+    http.Open "POST", url, False
+    http.setRequestHeader "Content-Type", "application/json; charset=utf-8"
+    http.setRequestHeader "X-API-Key", API_KEY
+    http.send jsonBody
+
+    outStatus = http.Status
+    outResponse = http.responseText
     HttpPostJson = True
     Exit Function
 
@@ -194,21 +600,35 @@ End Function
 
 
 ' ============================================================================
-' Lectura/escritura de la hoja
+' LECTURA / ESCRITURA RANGO HOJA ACTIVA
 ' ============================================================================
-Private Function GetSheet(sheetName As String) As Worksheet
-    On Error Resume Next
-    Set GetSheet = ThisWorkbook.Worksheets(sheetName)
-    On Error GoTo 0
-    If GetSheet Is Nothing Then
-        MsgBox "No existe la hoja '" & sheetName & "'. Revisa la constante SHEET_NAME.", vbCritical
-        End
-    End If
+Private Function GetFirstColumn(ws As Worksheet) As Long
+    Dim c As Long
+    For c = 1 To ws.Columns.Count
+        If Trim$(CStr(ws.Cells(HEADER_ROW, c).Value)) <> "" Then
+            GetFirstColumn = c
+            Exit Function
+        End If
+    Next c
+    GetFirstColumn = 1
 End Function
 
 Private Function GetLastRow(ws As Worksheet) As Long
-    GetLastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row
-    If GetLastRow < HEADER_ROW Then GetLastRow = HEADER_ROW
+    Dim firstCol As Long, lastCol As Long, c As Long
+    Dim maxRow As Long, currentLastRow As Long
+    
+    firstCol = GetFirstColumn(ws)
+    lastCol = GetLastColumn(ws)
+    
+    maxRow = HEADER_ROW
+    For c = firstCol To lastCol
+        If Trim$(CStr(ws.Cells(HEADER_ROW, c).Value)) <> "" Then
+            currentLastRow = ws.Cells(ws.Rows.Count, c).End(xlUp).Row
+            If currentLastRow > maxRow Then maxRow = currentLastRow
+        End If
+    Next c
+    
+    GetLastRow = maxRow
 End Function
 
 Private Function GetLastColumn(ws As Worksheet) As Long
@@ -220,15 +640,15 @@ Private Function ReadHeaders(ws As Worksheet, lastCol As Long) As String()
     Dim c As Long
     ReDim headers(1 To lastCol)
     For c = 1 To lastCol
-        headers(c) = CStr(ws.Cells(HEADER_ROW, c).value)
+        headers(c) = CStr(ws.Cells(HEADER_ROW, c).Value)
     Next c
     ReadHeaders = headers
 End Function
 
-Private Function FindColumn(headers() As String, name As String) As Long
+Private Function FindColumn(headers() As String, targetName As String) As Long
     Dim i As Long
     For i = LBound(headers) To UBound(headers)
-        If headers(i) = name Then
+        If headers(i) = targetName Then
             FindColumn = i
             Exit Function
         End If
@@ -236,21 +656,6 @@ Private Function FindColumn(headers() As String, name As String) As Long
     FindColumn = 0
 End Function
 
-' Construye {"rows": [ {...}, {...} ]} para el rango [firstRow, lastRow]
-Private Function BuildRowsJson(ws As Worksheet, headers() As String, firstRow As Long, lastRow As Long) As String
-    Dim r As Long
-    Dim sb As String
-    sb = "{""rows"": ["
-    For r = firstRow To lastRow
-        If r > firstRow Then sb = sb & ","
-        sb = sb & RowToJson(ws, headers, r)
-    Next r
-    sb = sb & "]}"
-    BuildRowsJson = sb
-End Function
-
-' Una fila -> objeto JSON plano {"Cabecera1": valor, "Cabecera2": valor, ...}
-' Los valores numéricos se mandan como número, el resto como texto. Celdas vacías -> null.
 Private Function RowToJson(ws As Worksheet, headers() As String, r As Long) As String
     Dim c As Long
     Dim sb As String
@@ -268,67 +673,49 @@ ContinueLoop:
 End Function
 
 Private Function CellToJsonValue(cell As Range) As String
-    If IsEmpty(cell.value) Or cell.value = "" Then
+    On Error GoTo ErrVal
+
+    If IsError(cell.Value) Then
         CellToJsonValue = "null"
-    ElseIf IsNumeric(cell.value) Then
-        CellToJsonValue = Replace(CStr(cell.value), ",", ".")   ' por si el sistema usa coma decimal
-    Else
-        CellToJsonValue = JsonString(CStr(cell.value))
-    End If
-End Function
-
-' Escribe la respuesta de /predict (lista de objetos) de vuelta en la hoja. Las columnas de
-' la respuesta que no existan ya en la hoja se añaden al final (una sola vez).
-Private Sub WriteResponseToSheet(ws As Worksheet, ByRef headers() As String, firstRow As Long, lastRow As Long, _
-                                 jsonResponse As String, newStatus As String)
-    Dim rowsArr As Collection
-    Dim r As Long, i As Long
-    Dim rowObj As Object
-    Dim key As Variant
-    Dim col As Long
-    Dim lastCol As Long
-    Dim statusCol As Long
-
-    Set rowsArr = JsonParseRowsField(jsonResponse, "rows")
-    lastCol = UBound(headers)
-
-    ' Asegurar columna de estado
-    statusCol = FindColumn(headers, STATUS_COLUMN_NAME)
-    If statusCol = 0 Then
-        lastCol = lastCol + 1
-        ws.Cells(HEADER_ROW, lastCol).value = STATUS_COLUMN_NAME
-        ReDim Preserve headers(1 To lastCol)
-        headers(lastCol) = STATUS_COLUMN_NAME
-        statusCol = lastCol
+        Exit Function
     End If
 
-    i = 1
-    For r = firstRow To lastRow
-        If i > rowsArr.Count Then Exit For
-        Set rowObj = rowsArr(i)
-        For Each key In rowObj.Keys
-            col = FindColumn(headers, CStr(key))
-            If col = 0 Then
-                lastCol = lastCol + 1
-                ws.Cells(HEADER_ROW, lastCol).value = CStr(key)
-                ReDim Preserve headers(1 To lastCol)
-                headers(lastCol) = CStr(key)
-                col = lastCol
-                If key = STATUS_COLUMN_NAME Then statusCol = lastCol
+    If IsEmpty(cell.Value) Or VarType(cell.Value) = vbEmpty Then
+        CellToJsonValue = "null"
+        Exit Function
+    End If
+
+    Select Case VarType(cell.Value)
+        Case vbBoolean
+            If cell.Value Then
+                CellToJsonValue = "true"
+            Else
+                CellToJsonValue = "false"
             End If
-            ws.Cells(r, col).value = rowObj(key)
-        Next key
-        ws.Cells(r, statusCol).value = newStatus
-        i = i + 1
-    Next r
-End Sub
+        Case vbByte, vbInteger, vbLong, vbSingle, vbDouble, vbCurrency, vbDecimal
+            CellToJsonValue = Replace(CStr(cell.Value), ",", ".")
+        Case vbString
+            If Trim$(cell.Value) = "" Then
+                CellToJsonValue = "null"
+            Else
+                CellToJsonValue = JsonString(CStr(cell.Value))
+            End If
+        Case Else
+            If IsNumeric(cell.Value) Then
+                CellToJsonValue = Replace(CStr(cell.Value), ",", ".")
+            Else
+                CellToJsonValue = JsonString(CStr(cell.Value))
+            End If
+    End Select
+    Exit Function
+
+ErrVal:
+    CellToJsonValue = "null"
+End Function
 
 
 ' ============================================================================
-' JSON — serializador/parser mínimo (suficiente para objetos planos: string/número/bool/
-' null, y una lista de objetos planos bajo una clave dada, como "rows"). No pretende ser un
-' parser JSON general; si el modelo real necesita estructuras anidadas, sustituir por la
-' librería VBA-JSON (Tim Hall, github.com/VBA-tools/VBA-JSON).
+' PARSER JSON Y FORMATO
 ' ============================================================================
 Private Function JsonString(s As String) As String
     Dim t As String
@@ -342,27 +729,31 @@ Private Function JsonString(s As String) As String
     JsonString = """" & t & """"
 End Function
 
-' Extrae el array de objetos bajo la clave `field` (p.ej. "rows") de un JSON de nivel
-' superior tipo {"rows": [ {...}, {...} ], "otro": ...}. Devuelve una Collection de
-' Scripting.Dictionary (clave -> valor, valores ya como String/Double/Boolean/Null).
 Private Function JsonParseRowsField(json As String, field As String) As Collection
     Dim result As New Collection
     Dim keyPos As Long, arrStart As Long, arrEnd As Long
     Dim depth As Long, i As Long
     Dim objStart As Long
     Dim inString As Boolean, prevChar As String
+    Dim ch As String, c2 As String
+    Dim objDepth As Long, j As Long, ch2 As String
 
     keyPos = InStr(json, """" & field & """")
     If keyPos = 0 Then
         Set JsonParseRowsField = result
         Exit Function
     End If
-    arrStart = InStr(keyPos, json, "[")
 
-    ' localizar el cierre del array llevando la cuenta de corchetes (respetando strings)
-    depth = 0: inString = False: prevChar = ""
+    arrStart = InStr(keyPos, json, "[")
+    If arrStart = 0 Then
+        Set JsonParseRowsField = result
+        Exit Function
+    End If
+
+    depth = 0
+    inString = False
+    prevChar = ""
     For i = arrStart To Len(json)
-        Dim ch As String
         ch = Mid$(json, i, 1)
         If inString Then
             If ch = """" And prevChar <> "\" Then inString = False
@@ -373,23 +764,29 @@ Private Function JsonParseRowsField(json As String, field As String) As Collecti
                 depth = depth + 1
             ElseIf ch = "]" Then
                 depth = depth - 1
-                If depth = 0 Then arrEnd = i: Exit For
+                If depth = 0 Then
+                    arrEnd = i
+                    Exit For
+                End If
             End If
         End If
         prevChar = ch
     Next i
 
+    If arrEnd = 0 Then
+        Set JsonParseRowsField = result
+        Exit Function
+    End If
+
     i = arrStart + 1
     Do While i < arrEnd
-        Dim c2 As String
         c2 = Mid$(json, i, 1)
         If c2 = "{" Then
             objStart = i
-            Dim objDepth As Long
-            objDepth = 0: inString = False: prevChar = ""
-            Dim j As Long
+            objDepth = 0
+            inString = False
+            prevChar = ""
             For j = objStart To arrEnd
-                Dim ch2 As String
                 ch2 = Mid$(json, j, 1)
                 If inString Then
                     If ch2 = """" And prevChar <> "\" Then inString = False
@@ -405,8 +802,13 @@ Private Function JsonParseRowsField(json As String, field As String) As Collecti
                 End If
                 prevChar = ch2
             Next j
-            result.Add JsonParseObject(Mid$(json, objStart, j - objStart + 1))
-            i = j + 1
+
+            If j <= arrEnd Then
+                result.Add JsonParseObject(Mid$(json, objStart, j - objStart + 1))
+                i = j + 1
+            Else
+                Exit Do
+            End If
         Else
             i = i + 1
         End If
@@ -415,70 +817,82 @@ Private Function JsonParseRowsField(json As String, field As String) As Collecti
     Set JsonParseRowsField = result
 End Function
 
-' Parsea un objeto JSON plano {"clave": valor, ...} -> Scripting.Dictionary
 Private Function JsonParseObject(s As String) As Object
     Dim dict As Object
-    Set dict = CreateObject("Scripting.Dictionary")
     Dim i As Long, n As Long
     Dim inString As Boolean, prevChar As String
     Dim key As String, val As String
-    Dim state As Integer ' 0=esperando clave, 1=en clave, 2=esperando valor, 3=en valor string, 4=en valor literal
+    Dim state As Integer
+    Dim ch As String
 
+    Set dict = CreateObject("Scripting.Dictionary")
     n = Len(s)
-    i = 2 ' saltar la '{' inicial
+    i = 2
+
     Do While i < n
-        Dim ch As String
         ch = Mid$(s, i, 1)
         Select Case state
-            Case 0 ' esperando comillas de clave
+            Case 0
                 If ch = """" Then
-                    state = 1: key = "": i = i + 1
+                    state = 1
+                    key = ""
+                    i = i + 1
                 Else
                     i = i + 1
                 End If
-            Case 1 ' dentro de la clave
+
+            Case 1
                 If ch = """" Then
                     state = 2
                 ElseIf ch = "\" Then
-                    key = key & Mid$(s, i + 1, 1)
-                    i = i + 1
+                    If i < n Then
+                        key = key & Mid$(s, i + 1, 1)
+                        i = i + 1
+                    End If
                 Else
                     key = key & ch
                 End If
                 i = i + 1
-            Case 2 ' esperando ':' y luego el valor
+
+            Case 2
                 If ch = ":" Then
-                    ' saltar espacios
                     i = i + 1
-                    Do While i <= n And Mid$(s, i, 1) = " "
+                    Do While i <= n And (Mid$(s, i, 1) = " " Or Mid$(s, i, 1) = vbTab)
                         i = i + 1
                     Loop
-                    If Mid$(s, i, 1) = """" Then
-                        state = 3: val = ""
+                    If i <= n And Mid$(s, i, 1) = """" Then
+                        state = 3
+                        val = ""
                         i = i + 1
                     Else
-                        state = 4: val = ""
+                        state = 4
+                        val = ""
                     End If
                 Else
                     i = i + 1
                 End If
-            Case 3 ' valor string
+
+            Case 3
                 If ch = """" Then
                     dict.Add key, UnescapeJson(val)
                     state = 0
                     i = i + 1
-                    ' saltar hasta la siguiente comilla de clave o el final
-                    Do While i <= n And (Mid$(s, i, 1) = "," Or Mid$(s, i, 1) = " ")
+                    Do While i <= n And (Mid$(s, i, 1) = "," Or Mid$(s, i, 1) = " " Or Mid$(s, i, 1) = vbTab)
                         i = i + 1
                     Loop
                 ElseIf ch = "\" Then
-                    val = val & ch & Mid$(s, i + 1, 1)
-                    i = i + 2
+                    If i < n Then
+                        val = val & ch & Mid$(s, i + 1, 1)
+                        i = i + 2
+                    Else
+                        i = i + 1
+                    End If
                 Else
                     val = val & ch
                     i = i + 1
                 End If
-            Case 4 ' valor literal (número, true/false/null) hasta ',' o '}'
+
+            Case 4
                 If ch = "," Or ch = "}" Then
                     dict.Add key, ParseJsonLiteral(Trim$(val))
                     state = 0
@@ -515,34 +929,4 @@ Private Function UnescapeJson(s As String) As String
     t = Replace(t, "\""", """")
     t = Replace(t, "\\", "\")
     UnescapeJson = t
-End Function
-
-
-' ============================================================================
-' UTF-8 (WinHTTP.Send necesita bytes; responseBody hay que decodificarlo de vuelta)
-' ============================================================================
-Private Function Utf8Encode(s As String) As Variant
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 2 ' texto
-    stream.Charset = "utf-8"
-    stream.Open
-    stream.WriteText s
-    stream.Position = 0
-    stream.Type = 1 ' binario
-    Utf8Encode = stream.Read
-    stream.Close
-End Function
-
-Private Function Utf8Decode(bytes As Variant) As String
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 1 ' binario
-    stream.Open
-    stream.Write bytes
-    stream.Position = 0
-    stream.Type = 2 ' texto
-    stream.Charset = "utf-8"
-    Utf8Decode = stream.ReadText
-    stream.Close
 End Function

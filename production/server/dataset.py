@@ -10,6 +10,7 @@ from config import (
     P_LABEL_COLUMNS, N_P_LABEL_CLASSES,
     TARGET_CLS_N_ALMA, TARGET_CLS_N_CANTONERA,
     N_ALMA_CLASSES, N_CANTONERA_CLASSES,
+    ACERO_TABLE, TORNILLO_TABLE,
 )
 
 BOLT_TO_IDX = {v: i for i, v in enumerate(CATALOGO_BOLT)}
@@ -83,20 +84,45 @@ def counts_from_p(df):
 class Preprocessor:
     """Ajusta encoders/scalers sanitizando valores faltantes o etiquetas no vistas."""
 
+    def _enrich_materials(self, df):
+        """Auto-rellena fy/fu de acero y tornillos si faltan y se dispone de grado/clase."""
+        df = df.copy()
+
+        if "grado_acero" in df.columns:
+            for idx in df.index:
+                grado = str(df.at[idx, "grado_acero"]).strip() if pd.notna(df.at[idx, "grado_acero"]) else ""
+                if grado in ACERO_TABLE:
+                    for k, v in ACERO_TABLE[grado].items():
+                        if k not in df.columns or pd.isna(df.at[idx, k]) or df.at[idx, k] == 0:
+                            df.at[idx, k] = v
+
+        if "clase_tornillo" in df.columns:
+            for idx in df.index:
+                clase = str(df.at[idx, "clase_tornillo"]).strip() if pd.notna(df.at[idx, "clase_tornillo"]) else ""
+                if clase in TORNILLO_TABLE:
+                    for k, v in TORNILLO_TABLE[clase].items():
+                        if k not in df.columns or pd.isna(df.at[idx, k]) or df.at[idx, k] == 0:
+                            df.at[idx, k] = v
+
+        return df
+
     def fit(self, df):
+        df = self._enrich_materials(df)
+
         self.cat_encoders = {}
         for c in CATEGORICAL_FEATURES:
-            s = df[c].fillna("UNKNOWN").astype(str) if c in df.columns else pd.Series(["UNKNOWN"] * len(df))
+            s = df[c].fillna("UNKNOWN").astype(str) if c in df.columns else pd.Series(["UNKNOWN"] * len(df), index=df.index)
             self.cat_encoders[c] = LabelEncoder().fit(s)
 
-        num_vals = df[NUMERIC_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0.0).values
+        df_num = df.reindex(columns=NUMERIC_FEATURES, fill_value=0.0)
+        num_vals = df_num[NUMERIC_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0.0).values
         self.num_scaler = StandardScaler().fit(num_vals)
 
-        reg_vals = df[REGRESSION_ALWAYS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values \
-            if all(c in df.columns for c in REGRESSION_ALWAYS) else np.zeros((len(df), len(REGRESSION_ALWAYS)))
+        df_reg = df.reindex(columns=REGRESSION_ALWAYS, fill_value=0.0)
+        reg_vals = df_reg[REGRESSION_ALWAYS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values
         self.reg_always_scaler = StandardScaler().fit(reg_vals)
 
-        std_s = df["standard"].fillna("AISC 360-16").astype(str) if "standard" in df.columns else pd.Series(["AISC 360-16"] * len(df))
+        std_s = df["standard"].fillna("AISC 360-16").astype(str) if "standard" in df.columns else pd.Series(["AISC 360-16"] * len(df), index=df.index)
         self.standard_encoder = LabelEncoder().fit(std_s)
 
         if all(c in df.columns for c in P_LABEL_COLUMNS):
@@ -105,8 +131,8 @@ class Preprocessor:
         else:
             self.p_label_encoder = None
 
-        m = df[MASKED_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values.astype(np.float64) \
-            if all(c in df.columns for c in MASKED_COLUMNS) else np.zeros((len(df), len(MASKED_COLUMNS)))
+        df_masked = df.reindex(columns=MASKED_COLUMNS, fill_value=0.0)
+        m = df_masked[MASKED_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values.astype(np.float64)
 
         self.masked_mean = np.zeros(m.shape[1])
         self.masked_std = np.ones(m.shape[1])
@@ -162,22 +188,27 @@ class Preprocessor:
         return None
 
     def transform_features(self, df):
+        df = self._enrich_materials(df)
+
         encoded_cols = []
         for c in CATEGORICAL_FEATURES:
             encoder = self.cat_encoders[c]
             known = set(encoder.classes_)
             fallback = encoder.classes_[0]
-            s = df[c].fillna(fallback).astype(str) if c in df.columns else pd.Series([fallback] * len(df))
+            s = df[c].fillna(fallback).astype(str) if c in df.columns else pd.Series([fallback] * len(df), index=df.index)
             s_clean = s.map(lambda x: x if x in known else fallback)
             encoded_cols.append(encoder.transform(s_clean))
 
         x_cat = np.stack(encoded_cols, axis=1)
-        num_vals = df[NUMERIC_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0.0).values
+
+        # Reindexación segura para evitar KeyError cuando faltan columnas numéricas en Excel
+        df_num = df.reindex(columns=NUMERIC_FEATURES, fill_value=0.0)
+        num_vals = df_num[NUMERIC_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0.0).values
         x_num = self.num_scaler.transform(num_vals).astype(np.float32)
         return x_cat.astype(np.int64), x_num
 
     def transform_targets(self, df):
-        std_s = df["standard"].fillna("AISC 360-16").astype(str) if "standard" in df.columns else pd.Series(["AISC 360-16"] * len(df))
+        std_s = df["standard"].fillna("AISC 360-16").astype(str) if "standard" in df.columns else pd.Series(["AISC 360-16"] * len(df), index=df.index)
         known_std = set(self.standard_encoder.classes_)
         fallback_std = self.standard_encoder.classes_[0]
         std_clean = std_s.map(lambda x: x if x in known_std else fallback_std)
@@ -187,19 +218,19 @@ class Preprocessor:
         bolt_idx = bolt_s.map(BOLT_TO_IDX).fillna(0).astype(int).values
 
         slip_col = df["SlipCritical"] if "SlipCritical" in df.columns else (df["slip_critical"] if "slip_critical" in df.columns else "NO")
-        slip = pd.Series(slip_col).fillna("NO").astype(str).str.upper().isin(["YES", "TRUE", "1"]).astype(np.float32).values
+        slip = pd.Series(slip_col, index=df.index).fillna("NO").astype(str).str.upper().isin(["YES", "TRUE", "1"]).astype(np.float32).values
 
         n_alma_col = df["n_alma"] if "n_alma" in df.columns else 2
         n_cant_col = df["n_cantonera"] if "n_cantonera" in df.columns else 0
         n_alma_idx = pd.to_numeric(n_alma_col, errors="coerce").fillna(2).clip(0, N_ALMA_CLASSES - 1).astype(int).values
         n_cant_idx = pd.to_numeric(n_cant_col, errors="coerce").fillna(0).clip(0, N_CANTONERA_CLASSES - 1).astype(int).values
 
-        reg_vals = df[REGRESSION_ALWAYS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values \
-            if all(c in df.columns for c in REGRESSION_ALWAYS) else np.zeros((len(df), len(REGRESSION_ALWAYS)))
+        df_reg = df.reindex(columns=REGRESSION_ALWAYS, fill_value=0.0)
+        reg_vals = df_reg[REGRESSION_ALWAYS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values
         reg_always = self.reg_always_scaler.transform(reg_vals).astype(np.float32)
 
-        m = df[MASKED_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values.astype(np.float32) \
-            if all(c in df.columns for c in MASKED_COLUMNS) else np.zeros((len(df), len(MASKED_COLUMNS)), dtype=np.float32)
+        df_masked = df.reindex(columns=MASKED_COLUMNS, fill_value=0.0)
+        m = df_masked[MASKED_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).values.astype(np.float32)
         masked_mask = (m > 0.0).astype(np.float32)
         masked_value = ((m - self.masked_mean) / self.masked_std).astype(np.float32)
 
