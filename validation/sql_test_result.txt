@@ -1,0 +1,76 @@
+[05/10/2026 11:05:01,12] ejecutando "C:\Users\jabal\OtrosProyectos\proyecto_uniones\production\validation\test_sql_connection.ps1"  
+----------------------------------------------------------------
+ENTORNO LOCAL
+----------------------------------------------------------------
+Usuario      : portatilmsi\jabal
+Dominio      : PORTATILMSI
+Dominio PC   : WORKGROUP
+Servidor SQL : TR-SQLISO-YEC01\AMS   (host=TR-SQLISO-YEC01 instancia=AMS)
+----------------------------------------------------------------
+RED / RESOLUCION
+----------------------------------------------------------------
+
+Name                                   Type IPAddress    
+----                                   ---- ---------    
+TR-SQLISO-YEC01.ad.tecnicasreunidas.es    A 172.16.251.64
+
+
+
+Address         ResponseTime
+-------         ------------
+TR-SQLISO-YEC01            5
+TR-SQLISO-YEC01            4
+
+
+TCP 1433  : False
+TCP 1434  : True
+TCP 14330 : False
+----------------------------------------------------------------
+CONEXION SQL
+----------------------------------------------------------------
+Cadena: Server=TR-SQLISO-YEC01\AMS;Database=CONEXIONES;Integrated Security=True;Trusted_Connection=True;Connect Timeout=8;TrustServerCertificate=True
+
+----------------------------------------------------------------
+ETAPA 1 - LOGIN (master)
+----------------------------------------------------------------
+LOGIN OK en 327 ms
+  @@SERVERNAME      : TR-SQLISO-YEC01\AMS
+  Login efectivo    : AD\CJABALQUINTO
+  Login original    : AD\cjabalquinto
+  sysadmin          : 0
+  HAS_DBACCESS('CONEXIONES') : 1
+  Bases de datos visibles:
+    - BDAMS
+    - BDAMS2
+    - BDAMS3
+    - CONEXIONES
+    - CursoSQL
+    - DECLASH
+    - HS-132
+    - InterferenceApp
+    - master
+    - mh_manager_db
+    - model
+    - msdb
+    - Perfiles
+    - PerfilesBD
+    - sqldb-footingshub
+    - Tekla
+    - tempdb
+----------------------------------------------------------------
+ETAPA 2 - ACCESO A 'CONEXIONES'
+----------------------------------------------------------------
+CONEXION OK en 44 ms
+  @@SERVERNAME : TR-SQLISO-YEC01\AMS
+  Database     : CONEXIONES
+  Login        : AD\CJABALQUINTO
+  Version      : Microsoft SQL Server 2019 (RTM-CU32-GDR) (KB5102335) - 15.0.4480.2 (X64) 
+----------------------------------------------------------------
+TABLAS DE PERFILES (candidatas)
+----------------------------------------------------------------
+  dbo.ACERO_ESTRUCTURAL
+----------------------------------------------------------------
+RESULTADO
+----------------------------------------------------------------
+PASS: SQL accesible con esta identidad.
+[05/10/2026 11:05:21,88] fin (exit=0) 

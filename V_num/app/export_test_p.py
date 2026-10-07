@@ -44,6 +44,8 @@ def _reg_row(col, y_true, y_pred, tipo, tol=(5.0, 10.0)):
         "Variable": col, "Tipo": tipo, "N": len(y_true),
         "MAE (mm)": round(mean_absolute_error(y_true, y_pred), 2),
         "RMSE (mm)": round(np.sqrt(mean_squared_error(y_true, y_pred)), 2),
+        "SD Error (mm)": round(float(err.std()), 2),
+        "Max Error (mm)": round(float(err.max()), 2),
         "R2 Score": round(r2, 3),
         "% Exacto (0.5mm)": round((err <= 0.5).mean() * 100, 1),
         "% <= 5mm": round((err <= tol[0]).mean() * 100, 1),
@@ -58,7 +60,7 @@ def _cls_row(col, real, pred, tipo):
     n = len(real)
     return {
         "Variable": col, "Tipo": tipo, "N": n,
-        "MAE (mm)": "", "RMSE (mm)": "", "R2 Score": "",
+        "MAE (mm)": "", "RMSE (mm)": "", "SD Error (mm)": "", "Max Error (mm)": "", "R2 Score": "",
         "% Exacto (0.5mm)": "", "% <= 5mm": "", "% <= 10mm": "",
         "Accuracy": round(float((real == pred).mean()), 4),
     }
