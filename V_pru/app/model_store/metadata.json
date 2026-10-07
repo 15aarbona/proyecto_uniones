@@ -1,0 +1,271 @@
+{
+  "trained_at": "2026-10-02T10:53:28",
+  "mode": "initial",
+  "epochs": 200,
+  "lr": 0.002,
+  "n_rows_dataset": 4722,
+  "cat_cardinalities": [
+    3,
+    4,
+    2,
+    3
+  ],
+  "n_standard_classes": 4,
+  "standard_classes": [
+    "AISC-360-05/10",
+    "CSA S16-09",
+    "EN 1993-1-8",
+    "EN 1993-1-8 - SP RK EN 1993-1-8:2005/2011"
+  ],
+  "count_class_weights": {
+    "n_alma": [
+      5.832106113433838,
+      0.17673048377037048,
+      0.003112116362899542,
+      0.005405102856457233,
+      0.03513316810131073,
+      0.11435502022504807,
+      0.833158016204834
+    ],
+    "n_cantonera": [
+      0.023642072454094887,
+      0.0914321020245552,
+      0.036610197275877,
+      0.14055444300174713,
+      0.5875636339187622,
+      5.120197772979736
+    ]
+  },
+  "metrics": {
+    "n_test": 945,
+    "classification_accuracy": {
+      "standard": 0.9989417989417989,
+      "Bolt": 0.9597883597883597,
+      "SlipCritical": 0.9883597883597883,
+      "n_alma": 0.9777777777777777,
+      "n_cantonera": 0.9513227513227513
+    },
+    "regression_table": [
+      {
+        "Variable": "g",
+        "N (Muestras)": 945,
+        "MAE (mm)": 2.14,
+        "RMSE (mm)": 4.52,
+        "R2 Score": 0.914,
+        "% Exacto (Cat\u00e1logo)": 68.4,
+        "% <= 5mm (Taller)": 92.9,
+        "% <= 10mm (Taller)": 98.1
+      },
+      {
+        "Variable": "e",
+        "N (Muestras)": 945,
+        "MAE (mm)": 0.26,
+        "RMSE (mm)": 1.24,
+        "R2 Score": 0.955,
+        "% Exacto (Cat\u00e1logo)": 95.1,
+        "% <= 5mm (Taller)": 99.6,
+        "% <= 10mm (Taller)": 100.0
+      },
+      {
+        "Variable": "d",
+        "N (Muestras)": 945,
+        "MAE (mm)": 1.23,
+        "RMSE (mm)": 2.04,
+        "R2 Score": 0.942,
+        "% Exacto (Cat\u00e1logo)": 36.0,
+        "% <= 5mm (Taller)": 96.5,
+        "% <= 10mm (Taller)": 99.6
+      },
+      {
+        "Variable": "Bp",
+        "N (Muestras)": 945,
+        "MAE (mm)": 4.31,
+        "RMSE (mm)": 6.31,
+        "R2 Score": 0.985,
+        "% Exacto (Cat\u00e1logo)": 8.6,
+        "% <= 5mm (Taller)": 74.1,
+        "% <= 10mm (Taller)": 93.2
+      },
+      {
+        "Variable": "tp",
+        "N (Muestras)": 945,
+        "MAE (mm)": 0.54,
+        "RMSE (mm)": 1.74,
+        "R2 Score": 0.904,
+        "% Exacto (Cat\u00e1logo)": 89.3,
+        "% <= 5mm (Taller)": 99.5,
+        "% <= 10mm (Taller)": 99.9
+      },
+      {
+        "Variable": "p1",
+        "N (Muestras)": 945,
+        "MAE (mm)": 2.54,
+        "RMSE (mm)": 5.04,
+        "R2 Score": 0.955,
+        "% Exacto (Cat\u00e1logo)": 20.0,
+        "% <= 5mm (Taller)": 90.8,
+        "% <= 10mm (Taller)": 95.6
+      },
+      {
+        "Variable": "p2",
+        "N (Muestras)": 945,
+        "MAE (mm)": 4.93,
+        "RMSE (mm)": 10.8,
+        "R2 Score": 0.914,
+        "% Exacto (Cat\u00e1logo)": 12.4,
+        "% <= 5mm (Taller)": 73.5,
+        "% <= 10mm (Taller)": 90.6
+      },
+      {
+        "Variable": "p3",
+        "N (Muestras)": 940,
+        "MAE (mm)": 6.09,
+        "RMSE (mm)": 12.68,
+        "R2 Score": 0.921,
+        "% Exacto (Cat\u00e1logo)": 11.4,
+        "% <= 5mm (Taller)": 66.8,
+        "% <= 10mm (Taller)": 86.3
+      },
+      {
+        "Variable": "p4",
+        "N (Muestras)": 696,
+        "MAE (mm)": 5.95,
+        "RMSE (mm)": 15.51,
+        "R2 Score": 0.871,
+        "% Exacto (Cat\u00e1logo)": 13.8,
+        "% <= 5mm (Taller)": 79.5,
+        "% <= 10mm (Taller)": 90.4
+      },
+      {
+        "Variable": "p5",
+        "N (Muestras)": 445,
+        "MAE (mm)": 7.5,
+        "RMSE (mm)": 21.16,
+        "R2 Score": 0.596,
+        "% Exacto (Cat\u00e1logo)": 16.0,
+        "% <= 5mm (Taller)": 79.6,
+        "% <= 10mm (Taller)": 88.1
+      },
+      {
+        "Variable": "p6",
+        "N (Muestras)": 254,
+        "MAE (mm)": 8.34,
+        "RMSE (mm)": 24.05,
+        "R2 Score": 0.652,
+        "% Exacto (Cat\u00e1logo)": 12.2,
+        "% <= 5mm (Taller)": 75.6,
+        "% <= 10mm (Taller)": 89.8
+      },
+      {
+        "Variable": "p7",
+        "N (Muestras)": 112,
+        "MAE (mm)": 3.67,
+        "RMSE (mm)": 10.13,
+        "R2 Score": 0.898,
+        "% Exacto (Cat\u00e1logo)": 19.6,
+        "% <= 5mm (Taller)": 88.4,
+        "% <= 10mm (Taller)": 92.9
+      },
+      {
+        "Variable": "p8",
+        "N (Muestras)": 55,
+        "MAE (mm)": 2.49,
+        "RMSE (mm)": 5.4,
+        "R2 Score": 0.971,
+        "% Exacto (Cat\u00e1logo)": 32.7,
+        "% <= 5mm (Taller)": 89.1,
+        "% <= 10mm (Taller)": 90.9
+      },
+      {
+        "Variable": "p9",
+        "N (Muestras)": 27,
+        "MAE (mm)": 1.26,
+        "RMSE (mm)": 2.4,
+        "R2 Score": 0.989,
+        "% Exacto (Cat\u00e1logo)": 55.6,
+        "% <= 5mm (Taller)": 96.3,
+        "% <= 10mm (Taller)": 96.3
+      },
+      {
+        "Variable": "p10",
+        "N (Muestras)": 16,
+        "MAE (mm)": 0.67,
+        "RMSE (mm)": 1.04,
+        "R2 Score": 0.998,
+        "% Exacto (Cat\u00e1logo)": 56.2,
+        "% <= 5mm (Taller)": 100.0,
+        "% <= 10mm (Taller)": 100.0
+      },
+      {
+        "Variable": "p11",
+        "N (Muestras)": 5,
+        "MAE (mm)": 0.0,
+        "RMSE (mm)": 0.0,
+        "R2 Score": 1.0,
+        "% Exacto (Cat\u00e1logo)": 100.0,
+        "% <= 5mm (Taller)": 100.0,
+        "% <= 10mm (Taller)": 100.0
+      },
+      {
+        "Variable": "p12",
+        "N (Muestras)": 5,
+        "MAE (mm)": 0.0,
+        "RMSE (mm)": 0.0,
+        "R2 Score": 1.0,
+        "% Exacto (Cat\u00e1logo)": 100.0,
+        "% <= 5mm (Taller)": 100.0,
+        "% <= 10mm (Taller)": 100.0
+      },
+      {
+        "Variable": "tws",
+        "N (Muestras)": 26,
+        "MAE (mm)": 5.0,
+        "RMSE (mm)": 6.52,
+        "R2 Score": -0.681,
+        "% Exacto (Cat\u00e1logo)": 30.8,
+        "% <= 5mm (Taller)": 53.8,
+        "% <= 10mm (Taller)": 96.2
+      },
+      {
+        "Variable": "ts",
+        "N (Muestras)": 909,
+        "MAE (mm)": 0.27,
+        "RMSE (mm)": 1.25,
+        "R2 Score": 0.894,
+        "% Exacto (Cat\u00e1logo)": 92.7,
+        "% <= 5mm (Taller)": 99.0,
+        "% <= 10mm (Taller)": 99.8
+      },
+      {
+        "Variable": "tbs",
+        "N (Muestras)": 549,
+        "MAE (mm)": 0.26,
+        "RMSE (mm)": 1.44,
+        "R2 Score": 0.897,
+        "% Exacto (Cat\u00e1logo)": 95.6,
+        "% <= 5mm (Taller)": 98.2,
+        "% <= 10mm (Taller)": 100.0
+      },
+      {
+        "Variable": "tst",
+        "N (Muestras)": 513,
+        "MAE (mm)": 0.14,
+        "RMSE (mm)": 1.29,
+        "R2 Score": 0.714,
+        "% Exacto (Cat\u00e1logo)": 98.4,
+        "% <= 5mm (Taller)": 99.4,
+        "% <= 10mm (Taller)": 99.6
+      },
+      {
+        "Variable": "Lh",
+        "N (Muestras)": 539,
+        "MAE (mm)": 14.64,
+        "RMSE (mm)": 36.96,
+        "R2 Score": 0.908,
+        "% Exacto (Cat\u00e1logo)": 4.6,
+        "% <= 5mm (Taller)": 46.2,
+        "% <= 10mm (Taller)": 70.1
+      }
+    ]
+  }
+}
