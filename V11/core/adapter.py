@@ -28,6 +28,7 @@ Estructura del paquete instalado:
 from pathlib import Path
 
 import joblib
+import logging
 import numpy as np
 import pandas as pd
 import torch
@@ -43,6 +44,7 @@ from .postprocess import decode_predictions, derive_dependent_columns
 
 MODEL_NAME = "V11"
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Contrato de entrada
 # ---------------------------------------------------------------------------
@@ -75,6 +77,9 @@ PERCENT_TO_CAPACITY = {
     "ratio_shear": "FyEd_Porcen",
     "ratio_axial": "FxEd_Porcen",
 }
+=======
+log = logging.getLogger("model-adapter")
+>>>>>>> 2f1411c82f5753e8be416d285f7d9dd229662ff3
 
 # Columnas completas que consume el modelo (V11 no las define en config.py).
 FEATURE_COLUMNS = list(CATEGORICAL_FEATURES) + list(NUMERIC_FEATURES)
@@ -217,9 +222,68 @@ def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df[keep]
 
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Carga e inferencia
 # ---------------------------------------------------------------------------
+=======
+def _nearest_known(value: str, table: dict, known: list, keys: tuple) -> str:
+    """Clase conocida con propiedades mas parecidas (distancia relativa al cuadrado)."""
+    target = table.get(value)
+    if target is None:
+        return known[0]
+    best, best_dist = known[0], None
+    for candidate in known:
+        props = table.get(candidate)
+        if not props:
+            continue
+        dist = sum(((target[k] - props[k]) / (props[k] + 1e-9)) ** 2 for k in keys)
+        if best_dist is None or dist < best_dist:
+            best, best_dist = candidate, dist
+    return best
+
+
+# Categorias de material -> (tabla, propiedades) para aproximar valores no vistos.
+_MATERIAL_FALLBACK = {
+    "grado_acero": (ACERO_TABLE, ("fy_acero_mpa", "fu_acero_mpa")),
+    "clase_tornillo": (
+        TORNILLO_TABLE,
+        ("fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa"),
+    ),
+}
+
+
+def _coerce_categories(df: pd.DataFrame, pre: Preprocessor) -> pd.DataFrame:
+    """Mapea categorias no vistas en entrenamiento a una clase conocida.
+
+    `grado_acero`/`clase_tornillo` son redundantes con `fy/fu/fv`, que si entran como
+    features numericas; por eso un valor no visto no impide predecir: se aproxima a la
+    clase conocida de propiedades mas parecidas. El resto (BEAM_type/COLUMN_type) cae a
+    la primera clase conocida. Se registra un aviso en el log."""
+    df = df.copy()
+    for feature in CATEGORICAL_FEATURES:
+        known = [str(c) for c in pre.cat_encoders[feature].classes_]
+        known_set = set(known)
+        values = df[feature].astype(str)
+        unknown = sorted(set(values) - known_set)
+        if not unknown:
+            continue
+        table, keys = _MATERIAL_FALLBACK.get(feature, (None, None))
+        if table is not None:
+            mapping = {u: _nearest_known(u, table, known, keys) for u in unknown}
+        else:
+            mapping = {u: known[0] for u in unknown}
+        log.warning(
+            "Categorias de '%s' no vistas en entrenamiento %s -> %s",
+            feature,
+            unknown,
+            mapping,
+        )
+        df[feature] = [mapping.get(v, v) for v in values]
+    return df
+
+
+>>>>>>> 2f1411c82f5753e8be416d285f7d9dd229662ff3
 def load() -> dict:
     """Carga pesos + preprocesador y devuelve el bundle de inferencia."""
     if not WEIGHTS_PATH.exists() or not PREPROCESSOR_PATH.exists():
@@ -266,6 +330,7 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     device = bundle["device"]
 
     try:
+        features_df = _coerce_categories(features_df, pre)
         x_cat, x_num = pre.transform_features(features_df)
     except ValueError as exc:
         # Categorias (perfil/grado/clase) que el preprocesador no vio en entrenamiento.

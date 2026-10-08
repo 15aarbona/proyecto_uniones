@@ -19,7 +19,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -66,7 +66,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
     allow_methods=["GET", "POST"],
-    allow_headers=["X-API-Key", "Content-Type"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -78,13 +78,6 @@ class RowsIn(BaseModel):
 
 class ActivateIn(BaseModel):
     name: str = Field(..., description="Nombre de la carpeta del modelo, p. ej. 'V11'.")
-
-
-def _check_api_key(x_api_key: str | None):
-    if x_api_key != config.API_KEY:
-        raise HTTPException(
-            status_code=401, detail="API key invalida o ausente (cabecera X-API-Key)"
-        )
 
 
 @app.exception_handler(predictor.InputContractError)
@@ -146,12 +139,11 @@ def root():
         503: {"description": "No hay ningun modelo activo"},
     },
 )
-def options(x_api_key: str | None = Header(default=None)):
+def options():
     """Devuelve las opciones validas (perfiles, materiales...) del modelo activo.
 
     Cada adaptador define su propia `options()`, de modo que al cambiar de modelo en
     caliente la web recibe automaticamente las opciones del nuevo contrato."""
-    _check_api_key(x_api_key)
     try:
         bundle = model_registry.get()
     except RuntimeError as exc:
@@ -169,11 +161,10 @@ def options(x_api_key: str | None = Header(default=None)):
     response_description="Modelo activado y su contrato.",
     responses={404: {"description": "El modelo no esta instalado"}},
 )
-def activate_model(payload: ActivateIn, x_api_key: str | None = Header(default=None)):
+def activate_model(payload: ActivateIn):
     """Carga desde disco el modelo `name` y lo deja activo, sin reiniciar el servidor.
 
     Si ya estaba activo, lo recarga (util si se han actualizado sus pesos)."""
-    _check_api_key(x_api_key)
     try:
         bundle = model_registry.activate(payload.name)
     except FileNotFoundError as exc:
@@ -200,12 +191,11 @@ def activate_model(payload: ActivateIn, x_api_key: str | None = Header(default=N
         503: {"description": "No hay ningun modelo activo"},
     },
 )
-def predict(payload: RowsIn, x_api_key: str | None = Header(default=None)):
+def predict(payload: RowsIn):
     """Valida el contrato, preprocesa y predice con el modelo activo.
 
     La respuesta incluye, por fila, las entradas basicas, las features completas
     calculadas por el adaptador y las predicciones del modelo."""
-    _check_api_key(x_api_key)
     if not payload.rows:
         raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
     log.info("/predict: %d filas recibidas", len(payload.rows))
@@ -237,9 +227,7 @@ def predict(payload: RowsIn, x_api_key: str | None = Header(default=None)):
 def validate(
     payload: RowsIn,
     background_tasks: BackgroundTasks,
-    x_api_key: str | None = Header(default=None),
 ):
-    _check_api_key(x_api_key)
     if not payload.rows:
         raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
     try:
@@ -253,8 +241,7 @@ def validate(
 
 
 @app.get("/dataset/summary", tags=["datos"], summary="Resumen del dataset acumulado")
-def dataset_summary(x_api_key: str | None = Header(default=None)):
-    _check_api_key(x_api_key)
+def dataset_summary():
     return storage.summary()
 
 

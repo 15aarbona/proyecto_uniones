@@ -16,14 +16,11 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATASET_PATH = DATA_DIR / "global_dataset.parquet"
 LOG_PATH = DATA_DIR / "server.log"
 
-# Clave API de seguridad HTTP ("X-API-Key")
-API_KEY = os.environ.get("AI_API_KEY", "changeme")
-
 HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8080"))
 
 # Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
-# se sirve fuera de la red interna (la API key viaja en una cabecera).
+# se sirve fuera de la red interna.
 # Para abrir el HTML con doble clic (file://) añadir "null" solo para pruebas.
 CORS_ORIGINS = [
     o.strip()

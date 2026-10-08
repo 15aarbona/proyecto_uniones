@@ -76,7 +76,7 @@ abiertos los ficheros del modelo (los abre y cierra al cargar):
 
 ```bash
 make install-model MODEL=V12
-curl -X POST localhost:8080/model/activate -H "X-API-Key: changeme" \
+curl -X POST localhost:8080/model/activate \
      -H "Content-Type: application/json" -d '{"name":"V12"}'
 ```
 
@@ -86,18 +86,20 @@ modelo con el que empezaron.
 
 ## Endpoints
 
-| Método | Ruta | Auth | Qué hace |
-|---|---|---|---|
-| GET | `/health` | no | Estado, modelo activo y nº de filas del dataset |
-| GET | `/models` | no | Modelos instalados y cuál está activo |
-| GET | `/model` | no | Contrato del modelo activo (inputs/features/outputs) |
-| POST | `/model/activate` | sí | `{"name":"V11"}` → activa/recarga un modelo |
-| POST | `/predict` | sí | Valida contrato, preprocesa y predice |
-| POST | `/validate` | sí | Guarda filas validadas (sin reentreno) |
-| GET | `/dataset/summary` | sí | Resumen del dataset acumulado |
+| Método | Ruta | Qué hace |
+|---|---|---|
+| GET | `/health` | Estado, modelo activo y nº de filas del dataset |
+| GET | `/models` | Modelos instalados y cuál está activo |
+| GET | `/model` | Contrato del modelo activo (inputs/features/outputs) |
+| GET | `/options` | Valores admitidos para desplegables (los publica el modelo; 404 si no) |
+| GET | `/` y `/web/...` | Interfaz web (`web/conexiones_tr.html`) |
+| POST | `/model/activate` | `{"name":"V11"}` → activa/recarga un modelo |
+| POST | `/predict` | Valida contrato, preprocesa y predice |
+| POST | `/validate` | Guarda filas validadas (sin reentreno) |
+| GET | `/dataset/summary` | Resumen del dataset acumulado |
 
-Auth = cabecera `X-API-Key` igual a `AI_API_KEY` (por defecto `changeme`). Documentación
-interactiva en `/docs` (Swagger) y `/redoc`.
+Sin autenticación (API abierta en la red interna). Documentación interactiva en `/docs`
+(Swagger) y `/redoc`.
 
 ## `POST /predict`
 
@@ -131,9 +133,16 @@ Si a alguna fila le falta alguno de los inputs requeridos por el modelo activo:
              "Capacity_Axial","grado_acero","clase_tornillo"]}
 ```
 
-También devuelve 422 si un valor no lo conoce el preprocesador (perfil fuera de los
-catálogos Tekla, grado de acero o clase de tornillo no vistos en entrenamiento).
-Otros códigos: `400` filas vacías, `401` API key, `503` sin modelo activo.
+También devuelve 422 si un perfil no está en los catálogos Tekla o si un valor de
+material no está en las tablas del adaptador.
+
+Los **grados de acero y clases de tornillo válidos que el modelo no vio en
+entrenamiento** (p. ej. `S275JR` o `8.8` si el modelo solo se entrenó con `S355JR` y
+`10.9/A325M`) **no dan error**: `fy/fu/fv` entran como features numéricas, así que la
+categoría se aproxima a la clase conocida de propiedades más parecidas y se registra un
+aviso en `data/server.log`.
+
+Otros códigos: `400` filas vacías, `503` sin modelo activo.
 
 ## Añadir un modelo nuevo (carpeta V)
 

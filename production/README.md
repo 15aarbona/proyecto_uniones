@@ -37,7 +37,7 @@ Documentación interactiva de la API: `http://localhost:8080/docs`.
 
 ```bash
 make install-model MODEL=V12
-curl -X POST localhost:8080/model/activate -H "X-API-Key: changeme" \
+curl -X POST localhost:8080/model/activate \
      -H "Content-Type: application/json" -d '{"name":"V12"}'
 ```
 
@@ -46,6 +46,6 @@ El servidor debe correr con `--workers 1` para que el modelo activo sea único.
 ## Qué falta para producción real
 
 1. Decidir dónde vive el servidor (equipo central, SO, puerto) y desplegarlo como servicio.
-2. Cambiar `AI_API_KEY`/`API_KEY` a un valor real y apuntar `SERVER_URL` del `.bas` a esa máquina.
+2. Apuntar `SERVER_URL` del `.bas` a esa máquina.
 3. Cuando toque, añadir el guardado de un **dataset raw para reentreno**: cada modelo
    transformará ese dataset con su propio `adapter.py`.
