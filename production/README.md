@@ -1,9 +1,9 @@
 # Producción — servidor central + cliente Excel
 
-Tubería completa **Excel ↔ servidor de IA**. El servidor sirve modelos reales
-(paquetes autocontenidos en `server/models/<NAME>/`) y admite **cambio de modelo en
-caliente** sin reiniciar. El preproceso (de entradas básicas a features completas) vive
-en el `adapter.py` de cada modelo.
+Tubería completa **Excel/web ↔ servidor de IA**. El servidor sirve modelos reales
+(paquetes autocontenidos en `server/models/<NAME>/`): **todos los instalados se cargan a
+la vez** y cada petición se **enruta al modelo** indicado en `model`. El preproceso
+(tabla → features internas) vive en el `adapter.py` de cada modelo.
 
 ```
 production/
@@ -24,16 +24,17 @@ production/
 1. Desde la **raíz** del repo:
    ```bash
    make install-model MODEL=V11
-   uv run uvicorn main:app --app-dir production/server --host 0.0.0.0 --port 8080 --workers 1
+   uv run uvicorn main:app --app-dir production/server --host 0.0.0.0 --port 8080
    ```
-2. Abre `excel_client/plantilla_prueba.xlsx`, guárdalo como `.xlsm`, importa `AI_Client.bas`
-   y añade los dos botones (pasos en `excel_client/README.md`).
-3. Pulsa "Enviar a IA" → "Validar y enviar" y comprueba `server/data/global_dataset.parquet`.
+2. Abre `http://localhost:8080/web/conexiones_tr.html` (interfaz web) o el Excel de
+   `excel_client/` (ver `excel_client/README.md`).
+3. Las predicciones devuelven la **tabla completa**: inputs enviados/imputados + campos
+   predichos.
 
-Detalles del servidor, contrato y activación en caliente: **`server/README.md`**.
+Detalles del servidor, contrato y multi-modelo: **`server/README.md`**.
 Documentación interactiva de la API: `http://localhost:8080/docs`.
 
-## Cambio de modelo
+## Añadir / recargar un modelo
 
 ```bash
 make install-model MODEL=V12
@@ -41,7 +42,7 @@ curl -X POST localhost:8080/model/activate \
      -H "Content-Type: application/json" -d '{"name":"V12"}'
 ```
 
-El servidor debe correr con `--workers 1` para que el modelo activo sea único.
+Tras recargar, ese modelo queda disponible para enrutar con `{"model":"V12", ...}`.
 
 ## Qué falta para producción real
 

@@ -28,7 +28,7 @@ nav button:hover{background:rgba(255,255,255,.07)}
 nav button[aria-current="page"]{background:rgba(255,255,255,.12);border-left-color:var(--tr-red);color:#fff;font-weight:600}
 .srv{padding:16px 22px;border-top:1px solid rgba(255,255,255,.15);font-size:12.5px}
 .srv label{display:block;margin:0 0 4px;color:#9DB7D5}
-.srv input{width:100%;margin-bottom:10px;padding:7px 8px;border:1px solid #3C5F8A;background:#0A3A73;color:#fff;border-radius:3px;font:inherit}
+.srv input,.srv select{width:100%;margin-bottom:10px;padding:7px 8px;border:1px solid #3C5F8A;background:#0A3A73;color:#fff;border-radius:3px;font:inherit}
 main{flex:1;min-width:0;padding:28px 34px 60px}
 h1{margin:0 0 4px;font-size:24px;color:var(--tr-navy)}
 .sub{margin:0 0 22px;color:var(--tr-muted)}
@@ -78,6 +78,8 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   <div class="srv">
     <label for="srvUrl">URL del servidor</label>
     <input id="srvUrl">
+    <label for="model">Modelo</label>
+    <select id="model"></select>
   </div>
 </aside>
 
@@ -127,35 +129,31 @@ const SERVER_URL = location.protocol.startsWith("http") ? location.origin : "htt
    `key` es el nombre exacto de la columna que se envía al servidor.
    Para añadir otra página de conexión, copia un bloque dentro de CONEXIONES.
    ===================================================================== */
-const PCT = Array.from({length: 21}, (_, i) => i * 5);   // 0, 5, ... 100
-// Lista de ejemplo: se sustituye por la completa de GET /options al cargar la página.
-const PERFILES_EJEMPLO = ["W610X195","W610X155","W690X152","HEA260","HEA300","HEB280","HEB320","IPE200","IPE300","IPE400"];
+// Listas de ejemplo: se sustituyen por las del modelo en GET /options al cargar la página.
+const PERFILES_EJEMPLO = ["IPE200","IPE300","HEA200","HEA300","HEB280","HEB320","W610X195","W690X152"];
+const GRADOS_EJEMPLO = ["S355JR"];
+const CLASES_EJEMPLO = ["10.9","A325M"];
 
 const CONEXIONES = [
   {
     id: "momento-atornillada",
     nombre: "Conexión a momento atornillada",
-    descripcion: "Viga–columna con unión atornillada resistente a momento.",
+    descripcion: "Viga–columna. Los campos no obligatorios pueden quedar en blanco: los completa el modelo.",
     endpoint: "/predict",
     campos: [
-      { key: "UNICODE",        label: "UNICODE",        type: "text", hint: "identificador, lo escribes tú" },
-      { key: "Standards",      label: "Standards",      type: "select", options: ["AISC-360-05/10"] },
-      { key: "BEAM",           label: "BEAM",           type: "combo", options: PERFILES_EJEMPLO.slice(), hint: "viga" },
-      { key: "COLUMN",         label: "COLUMN",         type: "combo", options: PERFILES_EJEMPLO.slice(), hint: "columna" },
-      { key: "MzEd_Porcen",    label: "MzEd_Porcen",    type: "select", options: PCT },
-      { key: "FyEd_Porcen",    label: "FyEd_Porcen",    type: "select", options: PCT },
-      { key: "FxEd_Porcen",    label: "FxEd_Porcen",    type: "select", options: PCT },
-      { key: "Pr_Porcen",      label: "Pr_Porcen",      type: "select", options: PCT },
-      { key: "Traccion",       label: "Traccion",       type: "select", options: [true, false] },
-      { key: "MzEd_PanelZone", label: "MzEd_PanelZone", type: "select", options: [0] },
-      { key: "Vgra",           label: "Vgra",           type: "select", options: [0] },
-      { key: "Havg",           label: "Havg",           type: "select", options: [0] },
-      { key: "grado_acero",    label: "grado_acero",    type: "select", options: ["S275JR", "S355JR"], default: "S355JR", hint: "acero" },
-      { key: "clase_tornillo", label: "clase_tornillo", type: "select", options: ["8.8", "10.9", "A325M"], default: "A325M", hint: "tornillo" },
+      { key: "UNICODE",        label: "UNICODE",        type: "text",   hint: "identificador" },
+      { key: "BEAM",           label: "BEAM",           type: "combo",  options: PERFILES_EJEMPLO.slice(), hint: "viga" },
+      { key: "COLUMN",         label: "COLUMN",         type: "combo",  options: PERFILES_EJEMPLO.slice(), hint: "columna" },
+      { key: "ratio_moment",   label: "ratio_moment",   type: "text",   hint: "0–1" },
+      { key: "ratio_shear",    label: "ratio_shear",    type: "text",   hint: "0–1" },
+      { key: "ratio_axial",    label: "ratio_axial",    type: "text",   hint: "0–1" },
+      { key: "grado_acero",    label: "grado_acero",    type: "select", options: GRADOS_EJEMPLO.slice(), required: false },
+      { key: "clase_tornillo", label: "clase_tornillo", type: "select", options: CLASES_EJEMPLO.slice(), required: false },
     ],
   },
   // { id: "...", nombre: "Otra conexión", descripcion: "...", endpoint: "/predict", campos: [ ... ] },
 ];
+
 
 /* =====================================================================
    3) LÓGICA (no hace falta tocar)
@@ -204,22 +202,21 @@ function renderForm(){
 
 function readForm(){
   let ok = true; const row = {};
-  const used = new Set(S().rows.map(r => String(r.UNICODE)));
   current.campos.forEach(c => {
     const box = $("form").querySelector(`[data-key="${c.key}"]`);
     const el = $("in_" + c.key); let msg = "";
     let val = el.value.trim();
+    const optional = c.required === false;
     if (c.type === "select"){
-      if (val === "") msg = (c.options || []).length ? "Elige una opción" : "Sin opciones: rellénalas en el código";
+      if (val === ""){ if (!optional) msg = "Elige una opción"; }
       else val = c.options[Number(val)];
     } else if (c.type === "combo"){
-      if (val === "") msg = "Obligatorio";
+      if (val === ""){ if (!optional) msg = "Obligatorio"; }
       else if ((c.options || []).length){
         const m = c.options.find(o => String(o).toLowerCase() === val.toLowerCase());
         if (m === undefined) msg = "No está en el catálogo"; else val = m;
       }
-    } else if (val === "") msg = "Obligatorio";
-    else if (c.key === "UNICODE" && used.has(val)) msg = "UNICODE ya añadido";
+    } else if (val === ""){ if (!optional) msg = "Obligatorio"; }
     box.classList.toggle("err", !!msg);
     box.querySelector(".msg").textContent = msg;
     if (msg) ok = false; else row[c.key] = val;
@@ -281,7 +278,7 @@ $("send").onclick = async () => {
     const r = await fetch($("srvUrl").value.replace(/\/$/, "") + current.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: st.rows }),
+      body: JSON.stringify({ model: $("model").value, rows: st.rows }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok){
@@ -301,29 +298,40 @@ $("send").onclick = async () => {
   btn.disabled = !st.rows.length;
 };
 
+async function loadModels(){
+  try{
+    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/models");
+    const o = await r.json();
+    const sel = $("model");
+    sel.innerHTML = (o.available_models || []).map(m => `<option value="${m}">${m}</option>`).join("");
+    if (o.default_model && (o.available_models || []).includes(o.default_model)) sel.value = o.default_model;
+  } catch(e){
+    /* sin modelos: los campos usan las listas de ejemplo */
+  }
+}
+
 async function loadOptions(){
   try{
-    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/options");
+    const model = $("model").value;
+    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/options?model=" + encodeURIComponent(model));
     if (!r.ok) throw new Error("HTTP " + r.status);
     const o = await r.json();
-    let n = 0;
     CONEXIONES.forEach(con => con.campos.forEach(c => {
-      if (Array.isArray(o[c.key])){
+      if ((c.type === "combo" || c.type === "select") && Array.isArray(o[c.key])){
         c.options = o[c.key].slice();
-        if (c.type === "combo") n = c.options.length;
       }
-      if (o.defaults && o.defaults[c.key] !== undefined) c.default = o.defaults[c.key];
     }));
     renderForm();
-    setStatus("ok", `Opciones cargadas del servidor (${n} perfiles).`);
+    setStatus("ok", `Opciones cargadas del modelo ${model}.`);
   } catch (e){
     setStatus("bad", "No se pudieron cargar las opciones del servidor; se usa la lista de ejemplo", e.message);
   }
 }
-$("srvUrl").onchange = $("srvKey").onchange = loadOptions;
+$("srvUrl").onchange = loadOptions;
+$("model").onchange = loadOptions;
 
 renderAll();
-loadOptions();
+loadModels().then(loadOptions);
 </script>
 </body>
 </html>

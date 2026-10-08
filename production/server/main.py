@@ -1,27 +1,29 @@
 """Servidor HTTP central de inferencia con modelos intercambiables.
 
-Cada modelo es un paquete autocontenido en `models/<NAME>/` (lo instala el Makefile
-del repositorio). El modelo activo se puede **cambiar en caliente**, sin reiniciar,
-con `POST /model/activate`; cada peticion termina con el modelo con el que empezo.
+Cada modelo es un paquete autocontenido en `models/<NAME>/` (lo instala el Makefile).
+Se cargan todos los modelos instalados y conviven en memoria; cada peticion se enruta
+al modelo indicado en el cuerpo o en la query. Se pueden recargar en caliente, sin
+reiniciar, con `POST /model/activate`.
 
 Endpoints:
-  GET  /health            Estado del servidor y del modelo activo
-  GET  /models            Modelos instalados y cual esta activo
-  GET  /model             Contrato del modelo activo
-  GET  /options           Valores validos para los desplegables (los publica el modelo)
-  POST /model/activate    Activa (o recarga) un modelo por nombre
-  POST /predict           Predicciones + dataset completo de inputs
-  POST /validate          Guarda filas validadas (sin reentreno)
-  GET  /dataset/summary   Resumen del dataset acumulado
+  GET  /health                  Estado del servidor
+  GET  /models                  Modelos instalados y cargados
+  GET  /model                   Contrato del modelo por defecto
+  GET  /options?model=...       Valores validos para los desplegables (del modelo)
+  POST /model/activate          Carga/recarga un modelo por nombre
+  POST /predict                 {"model": "...", "rows": [...]}
+  POST /validate                Guarda filas validadas (sin reentreno)
+  GET  /dataset/summary         Resumen del dataset acumulado
 """
 
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import config
@@ -40,10 +42,10 @@ log = logging.getLogger("ai-server")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        bundle = model_registry.activate_configured()
-        log.info("Modelo activo al arrancar: %s (%s)", bundle["name"], bundle["dir"])
+        model_registry.activate_configured()
+        log.info("Modelos cargados: %s", model_registry.loaded_models())
     except Exception as exc:  # noqa: BLE001
-        log.error("No se pudo activar el modelo configurado: %s", exc)
+        log.error("No se pudo cargar ningun modelo: %s", exc)
     yield
 
 
@@ -52,16 +54,15 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Servidor de inferencia para modelos de prediseno de uniones atornilladas. "
-        "Los modelos viven en `models/<NAME>/` y pueden intercambiarse en caliente. "
-        "El contrato de entrada de cada modelo lo define su `core/adapter.py`; si una "
-        "peticion no cumple el contrato se devuelve **HTTP 422** indicando los campos "
-        "que faltan."
+        "Los modelos viven en `models/<NAME>/` y conviven en memoria; cada peticion se "
+        "enruta al modelo indicado en `model`. El contrato de tabla de cada modelo lo "
+        "define su `core/adapter.py`; si una peticion no cumple el contrato se devuelve "
+        "**HTTP 422** indicando los campos que faltan. Las columnas de la respuesta son "
+        "los inputs enviados (o imputados) mas los campos predichos por el modelo."
     ),
     lifespan=lifespan,
 )
 
-# CORS: necesario para que el navegador pueda llamar al servidor desde la web.
-# Los origenes permitidos se configuran en config.CORS_ORIGINS (AI_CORS_ORIGINS).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
@@ -71,8 +72,11 @@ app.add_middleware(
 
 
 class RowsIn(BaseModel):
+    model: str | None = Field(
+        default=None, description="Modelo a usar (carpeta en models/). Si falta, el por defecto."
+    )
     rows: List[Dict[str, Any]] = Field(
-        ..., description="Filas recibidas desde Excel (inputs basicos del modelo)."
+        ..., description="Filas de la tabla (inputs del modelo; los predichos pueden ir en blanco)."
     )
 
 
@@ -86,18 +90,19 @@ async def _contract_error_handler(request: Request, exc: predictor.InputContract
         status_code=422,
         content={
             "detail": str(exc),
+            "model": exc.model,
             "missing": exc.missing,
             "expected": exc.expected,
         },
     )
 
 
-@app.get("/health", tags=["estado"], summary="Estado del servidor y del modelo activo")
+@app.get("/health", tags=["estado"], summary="Estado del servidor")
 def health() -> Dict[str, Any]:
-    """Devuelve el estado del servidor, el modelo activo y la lista de instalados."""
+    """Estado del servidor y modelos instalados/cargados."""
     return {
         "status": "ok",
-        "model_name": config.MODEL_NAME,
+        "default_model": config.MODEL_NAME,
         **predictor.model_status(),
         "dataset_rows": storage.summary()["total_rows"],
     }
@@ -106,65 +111,57 @@ def health() -> Dict[str, Any]:
 @app.get(
     "/models",
     tags=["modelos"],
-    summary="Lista los modelos instalados",
-    response_description="Modelos disponibles y el activo.",
+    summary="Lista los modelos instalados y cargados",
+    response_description="Modelos disponibles y cargados en memoria.",
 )
 def list_models() -> Dict[str, Any]:
-    """Modelos instalados en `models/` y el que esta activo en memoria."""
-    status = predictor.model_status()
-    return {"available_models": model_registry.list_models(), "active": status.get("model_name")}
+    """Modelos instalados en `models/` y los cargados actualmente."""
+    return {
+        "available_models": model_registry.list_models(),
+        "loaded_models": model_registry.loaded_models(),
+        "default_model": config.MODEL_NAME,
+    }
 
 
-@app.get("/model", tags=["modelos"], summary="Contrato del modelo activo")
-def active_model() -> Dict[str, Any]:
-    """Contrato (inputs basicos, features, outputs) del modelo en memoria."""
-    status = predictor.model_status()
-    if not status["model_loaded"]:
-        raise HTTPException(status_code=503, detail="No hay ningun modelo activo")
-    return status
+@app.get("/model", tags=["modelos"], summary="Contrato del modelo por defecto")
+def default_model() -> Dict[str, Any]:
+    """Contrato (inputs/opcionales/outputs) del modelo por defecto."""
+    try:
+        bundle = model_registry.get(config.MODEL_NAME)
+    except KeyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"name": bundle["name"], **bundle["contract"]}
 
-from fastapi.responses import RedirectResponse
-
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse("/web/conexiones_tr.html")
 
 @app.get(
     "/options",
     tags=["modelos"],
-    summary="Opciones validas para los desplegables",
-    response_description="Valores admitidos por campo, publicados por el modelo activo.",
+    summary="Valores validos para los desplegables",
+    response_description="Valores admitidos por campo, publicados por el modelo.",
     responses={
-        404: {"description": "El modelo activo no publica opciones"},
-        503: {"description": "No hay ningun modelo activo"},
+        404: {"description": "El modelo no esta disponible o no publica opciones"},
     },
 )
-def options():
-    """Devuelve las opciones validas (perfiles, materiales...) del modelo activo.
-
-    Cada adaptador define su propia `options()`, de modo que al cambiar de modelo en
-    caliente la web recibe automaticamente las opciones del nuevo contrato."""
+def options(model: str | None = Query(default=None, description="Modelo (por defecto, el configurado)")):
+    """Opciones (perfiles, materiales...) del modelo indicado."""
+    name = model or config.MODEL_NAME
     try:
-        bundle = model_registry.get()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    fn = getattr(bundle["adapter"], "options", None)
-    if fn is None:
-        raise HTTPException(status_code=404, detail="El modelo activo no publica opciones")
-    return fn()
+        return predictor.options(name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except predictor.InputContractError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post(
     "/model/activate",
     tags=["modelos"],
-    summary="Activa (o recarga) un modelo en caliente",
-    response_description="Modelo activado y su contrato.",
+    summary="Carga/recarga un modelo",
+    response_description="Modelo cargado y su contrato.",
     responses={404: {"description": "El modelo no esta instalado"}},
 )
 def activate_model(payload: ActivateIn):
-    """Carga desde disco el modelo `name` y lo deja activo, sin reiniciar el servidor.
-
-    Si ya estaba activo, lo recarga (util si se han actualizado sus pesos)."""
+    """Carga (o recarga desde disco) el modelo `name`, sin reiniciar el servidor."""
     try:
         bundle = model_registry.activate(payload.name)
     except FileNotFoundError as exc:
@@ -172,48 +169,45 @@ def activate_model(payload: ActivateIn):
     except Exception as exc:  # noqa: BLE001
         log.exception("Error activando modelo %s", payload.name)
         raise HTTPException(status_code=500, detail=f"Error activando modelo: {exc}")
-    log.info("Modelo activado: %s", bundle["name"])
-    return {"status": "ok", "model_name": bundle["name"], **bundle["contract"]}
+    log.info("Modelo cargado: %s", bundle["name"])
+    return {"status": "ok", "name": bundle["name"], **bundle["contract"]}
 
 
 @app.post(
     "/predict",
     tags=["inferencia"],
-    summary="Predice y devuelve inputs completos + predicciones",
-    response_description="Una fila por entrada con todas las columnas (inputs + outputs).",
+    summary="Predice y devuelve la tabla completa",
+    response_description="Una fila por entrada con inputs + campos predichos.",
     responses={
         422: {
             "description": (
-                "Los inputs no cumplen el contrato del modelo activo. "
-                "El cuerpo incluye `missing` (campos que faltan) y `expected` (contrato)."
+                "La peticion no cumple el contrato del modelo. El cuerpo incluye "
+                "`model`, `missing` (campos que faltan) y `expected` (contrato)."
             )
         },
-        503: {"description": "No hay ningun modelo activo"},
+        404: {"description": "El modelo indicado no esta disponible"},
     },
 )
 def predict(payload: RowsIn):
-    """Valida el contrato, preprocesa y predice con el modelo activo.
+    """Valida el contrato, preprocesa y predice con el modelo indicado.
 
-    La respuesta incluye, por fila, las entradas basicas, las features completas
-    calculadas por el adaptador y las predicciones del modelo."""
+    Devuelve, por fila, los inputs (enviados o imputados) y los campos predichos."""
     if not payload.rows:
         raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
-    log.info("/predict: %d filas recibidas", len(payload.rows))
+    name = payload.model or config.MODEL_NAME
+    log.info("/predict: modelo=%s, %d filas", name, len(payload.rows))
     try:
-        predictions = predictor.predict_rows(payload.rows)
+        predictions = predictor.predict_rows(name, payload.rows)
     except predictor.InputContractError:
         raise
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.exception("Error prediciendo")
         raise HTTPException(status_code=500, detail=f"Error al predecir: {exc}")
-    status = predictor.model_status()
     log.info("/predict: %d filas devueltas", len(predictions))
     return {
-        "model_name": status.get("model_name"),
-        "raw_inputs": status.get("raw_inputs", []),
-        "output_fields": status.get("outputs", []),
+        "model_name": name,
         "rows": predictions,
     }
 
@@ -245,7 +239,11 @@ def dataset_summary():
     return storage.summary()
 
 
-from fastapi.staticfiles import StaticFiles
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/web/conexiones_tr.html")
+
+
 app.mount("/web", StaticFiles(directory=config.BASE_DIR / "web", html=True), name="web")
 
 if __name__ == "__main__":

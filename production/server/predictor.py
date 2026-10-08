@@ -1,9 +1,9 @@
-"""Inferencia en produccion sobre el modelo activo.
+"""Inferencia en produccion sobre modelos intercambiables.
 
-El preproceso y la inferencia viven en el `adapter.py` de cada modelo (carpeta V).
-Aqui solo se valida el contrato de entrada, se delega en el adaptador activo y se
-compone la respuesta con TODAS las columnas: entradas basicas + features completas
-que se han calculado + predicciones del modelo.
+El preproceso y la inferencia viven en el `adapter.py` de cada modelo. Aqui se valida
+el contrato de tabla, se enruta al modelo pedido y se compone la respuesta con las
+columnas de la tabla: inputs enviados (o imputados) + campos predichos por el modelo.
+No se incluyen las features internas.
 """
 
 import logging
@@ -19,10 +19,11 @@ log = logging.getLogger("ai-server")
 
 
 class InputContractError(ValueError):
-    """Los inputs recibidos no cumplen el contrato del modelo activo."""
+    """Los inputs recibidos no cumplen el contrato del modelo seleccionado."""
 
-    def __init__(self, message: str, missing=None, expected=None):
+    def __init__(self, message: str, model: str = None, missing=None, expected=None):
         super().__init__(message)
+        self.model = model
         self.missing = missing
         self.expected = expected
 
@@ -64,9 +65,7 @@ def _clean_dict(data: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_rows(
     rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str]
 ) -> List[Dict[str, Any]]:
-    """Renombra las claves de cada fila a los nombres canonicos del contrato
-    (sin distinguir mayusculas ni espacios en los extremos: 'Unicode' -> 'UNICODE').
-    Las claves desconocidas se conservan tal cual."""
+    """Renombra alias (Unicode -> UNICODE...) sin distinguir mayusculas/espacios."""
     alias = {c.lower(): c for c in list(raw_inputs) + list(optional_inputs)}
     normalized = []
     for row in rows:
@@ -77,58 +76,67 @@ def _normalize_rows(
     return normalized
 
 
-def _validate_contract(rows: List[Dict[str, Any]], raw_inputs: List[str]) -> None:
+def _validate_contract(
+    rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str], model: str
+) -> None:
     if not rows:
-        raise InputContractError("La peticion no trae filas (rows vacio)", expected=raw_inputs)
+        raise InputContractError("La peticion no trae filas (rows vacio)", model=model, expected=raw_inputs)
+    optional = set(optional_inputs)
+    required = [c for c in raw_inputs if c not in optional]  # UNICODE siempre obligatorio
     missing = {}
     for i, row in enumerate(rows):
-        absent = [c for c in raw_inputs if _is_missing(row.get(c))]
+        absent = [c for c in required if _is_missing(row.get(c))]
         if absent:
             missing[f"fila {i + 1}"] = absent
     if missing:
         raise InputContractError(
-            "Faltan inputs requeridos por el modelo activo",
+            f"Faltan inputs requeridos por el modelo '{model}'",
+            model=model,
             missing=missing,
             expected=raw_inputs,
         )
 
 
-def predict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    bundle = model_registry.get()
+def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    bundle = model_registry.get(model_name)
     adapter = bundle["adapter"]
     contract = bundle["contract"]
     raw_inputs = contract["raw_inputs"]
     optional_inputs = contract.get("optional_inputs", [])
+    name = bundle["name"]
 
     rows = _normalize_rows(rows, raw_inputs, optional_inputs)
-    _validate_contract(rows, raw_inputs)
+    _validate_contract(rows, raw_inputs, optional_inputs, name)
 
     df = pd.DataFrame(rows)
     try:
-        features = adapter.preprocess(df)
+        features = adapter.to_internal(df)
         design = adapter.predict(features, bundle)
+        table_out = adapter.from_internal(design)
     except adapter.InputContractError as exc:
-        raise InputContractError(str(exc), expected=raw_inputs) from exc
+        raise InputContractError(str(exc), model=name, expected=raw_inputs) from exc
 
+    input_columns = [c for c in raw_inputs if c in features.columns]
     output: List[Dict[str, Any]] = []
     for i in range(len(df)):
-        merged: Dict[str, Any] = {}
-        for column in features.columns:
-            merged[column] = features.iloc[i][column]
-        merged.update(design.iloc[i].to_dict())
+        merged: Dict[str, Any] = {c: features.iloc[i][c] for c in input_columns}
+        merged.update(table_out.iloc[i].to_dict())
         output.append(_clean_dict(merged))
     return output
 
 
 def model_status() -> Dict[str, Any]:
-    available = model_registry.list_models()
-    try:
-        bundle = model_registry.get()
-    except RuntimeError:
-        return {"model_loaded": False, "model_name": None, "available_models": available}
     return {
-        "model_loaded": True,
-        "model_name": bundle["name"],
-        "available_models": available,
-        **bundle["contract"],
+        "available_models": model_registry.list_models(),
+        "loaded_models": model_registry.loaded_models(),
     }
+
+
+def options(model_name: str) -> Dict[str, Any]:
+    bundle = model_registry.get(model_name)
+    fn = getattr(bundle["adapter"], "options", None)
+    if fn is None:
+        raise InputContractError(
+            f"El modelo '{bundle['name']}' no publica opciones", model=bundle["name"]
+        )
+    return fn(bundle)

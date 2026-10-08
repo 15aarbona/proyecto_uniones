@@ -1,4 +1,4 @@
-"""Registro de modelos con activacion en caliente.
+"""Registro multi-modelo con carga simultanea y recarga en caliente.
 
 Cada modelo vive en `models/<NAME>/` como paquete autocontenido:
 
@@ -8,25 +8,29 @@ Cada modelo vive en `models/<NAME>/` como paquete autocontenido:
         preprocessor.joblib
         data/
 
-El adaptador se importa como submodulo del paquete `core` (nombre top-level) para
-que los preprocesadores serializados (`core.dataset.Preprocessor`) resuelvan. Solo
-puede haber un `core` registrado a la vez, lo que encaja con tener un unico modelo
-activo; `activate()` purga y re-registra bajo lock, de forma que las peticiones en
-vuelo terminan con el bundle con el que empezaron.
+Se cargan TODOS los modelos instalados y conviven en memoria. Para que los
+preprocesadores serializados (`core.dataset.Preprocessor`) resuelvan, cada paquete se
+importa con el nombre top-level `core` de forma secuencial; las referencias (modulos,
+clases y objetos) quedan capturadas en cada bundle, de modo que cargar el siguiente no
+afecta a los anteriores. Los adaptadores no deben hacer `import core.*` en tiempo de
+ejecucion (solo en el import del modulo).
 """
 
 import importlib
 import importlib.util
+import logging
 import sys
 import threading
 from pathlib import Path
 
 import config
 
+log = logging.getLogger("ai-server")
+
 MODELS_DIR: Path = config.MODELS_DIR
 
 _LOCK = threading.RLock()
-_BUNDLE = None  # dict con model/pre/device/adapter/name/contract/dir
+_BUNDLES: dict = {}
 
 
 def list_models() -> list:
@@ -36,6 +40,10 @@ def list_models() -> list:
     return sorted(
         p.name for p in MODELS_DIR.iterdir() if (p / "core" / "adapter.py").exists()
     )
+
+
+def loaded_models() -> list:
+    return sorted(_BUNDLES)
 
 
 def _purge_core():
@@ -54,9 +62,8 @@ def _register_core(model_dir: Path):
     return module
 
 
-def activate(name: str) -> dict:
-    """Carga (o recarga desde disco) el modelo `name` y lo deja como activo."""
-    global _BUNDLE
+def _load_one(name: str) -> dict:
+    """Carga el modelo `name` desde disco y lo registra. Devuelve su bundle."""
     model_dir = MODELS_DIR / name
     if not (model_dir / "core" / "adapter.py").exists():
         raise FileNotFoundError(
@@ -78,31 +85,46 @@ def activate(name: str) -> dict:
                 "contract": adapter.contract(),
             }
         )
-        _BUNDLE = bundle
+        _BUNDLES[name] = bundle
         return bundle
 
 
-def get() -> dict:
-    """Bundle activo (o error si aun no se ha activado ninguno)."""
-    if _BUNDLE is None:
-        raise RuntimeError(
-            "No hay ningun modelo activo. Activa uno con POST /model/activate "
-            f"o configura MODEL_NAME en config.py. Disponibles: {list_models()}"
+def load_all() -> dict:
+    """Carga todos los modelos instalados. Devuelve {nombre: bundle}."""
+    for name in list_models():
+        try:
+            _load_one(name)
+        except Exception as exc:  # noqa: BLE001
+            log.error("No se pudo cargar el modelo %s: %s", name, exc)
+    return dict(_BUNDLES)
+
+
+def activate(name: str) -> dict:
+    """Carga o recarga el modelo `name` (util tras `make install-model`)."""
+    return _load_one(name)
+
+
+def get(name: str = None) -> dict:
+    """Bundle del modelo pedido (o el configurado por defecto)."""
+    name = name or config.MODEL_NAME
+    if name not in _BUNDLES:
+        if name in list_models():
+            return _load_one(name)
+        raise KeyError(
+            f"Modelo '{name}' no disponible. Cargados: {loaded_models()}; "
+            f"instalados: {list_models()}."
         )
-    return _BUNDLE
+    return _BUNDLES[name]
 
 
 def activate_configured() -> dict:
-    """Activa el modelo indicado por config.MODEL_NAME (o el primero disponible)."""
-    name = config.MODEL_NAME
-    available = list_models()
-    if name not in available:
-        if not available:
-            raise RuntimeError(
-                f"No hay modelos instalados en {MODELS_DIR}. "
-                f"Ejecuta 'make install-model MODEL=V11'."
-            )
-        raise FileNotFoundError(
-            f"El modelo configurado '{name}' no esta instalado. Disponibles: {available}"
+    """Carga todos los modelos instalados (el configurado por defecto, como minimo)."""
+    load_all()
+    if config.MODEL_NAME not in _BUNDLES and _BUNDLES:
+        return next(iter(_BUNDLES.values()))
+    if config.MODEL_NAME not in _BUNDLES:
+        raise RuntimeError(
+            f"No hay modelos instalados en {MODELS_DIR}. "
+            f"Ejecuta 'make install-model MODEL=V11'."
         )
-    return activate(name)
+    return _BUNDLES[config.MODEL_NAME]

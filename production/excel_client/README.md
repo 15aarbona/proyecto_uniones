@@ -25,7 +25,6 @@ columnas reales) no tiene que tocar la macro — solo la hoja.
 4. Abre `AI_Client.bas` en el editor y ajusta, si hace falta, estas constantes al principio:
    - `SERVER_URL` → `http://localhost:8000` en pruebas; la URL del equipo central cuando
      toque (p.ej. `http://10.0.0.5:8000`).
-   - `API_KEY` → debe coincidir con `AI_API_KEY` del servidor (`testkey` por defecto).
    - `SHEET_NAME` → el nombre de la hoja con la tabla de entrada (`Datos_IA` por defecto).
 5. Vuelve a la hoja de Excel: **Programador → Insertar → Botón (control de formulario)**,
    dibuja un botón, y en el diálogo que aparece asígnale la macro `AI_Client.SendToAI`.
@@ -65,7 +64,7 @@ Con el servidor arrancado en local (ver `server/README.md`):
    `Estado_IA` pasar a `Validado y enviado (...)`.
 5. Comprueba en el servidor que las filas han llegado:
    ```bash
-   curl http://localhost:8000/dataset/summary -H "X-API-Key: testkey"
+   curl http://localhost:8000/dataset/summary
    ```
    o inspecciona `server/data/global_dataset.parquet` con pandas — el valor editado a mano
    debe verse reflejado ahí.
@@ -87,6 +86,6 @@ Con el servidor arrancado en local (ver `server/README.md`):
 - No hay control de qué usuario valida cada fila (dijiste que de momento pueden validar
   todos) — si más adelante hace falta, se puede mandar `Application.UserName` como un campo
   más de cada fila.
-- `SERVER_URL`/`API_KEY` están como constantes en el código; si el equipo central cambia de
-  IP/puerto a menudo, conviene moverlos a una celda de una hoja de configuración (p.ej. la
+- `SERVER_URL` está como constante en el código; si el equipo central cambia de
+  IP/puerto a menudo, conviene moverla a una celda de una hoja de configuración (p.ej. la
   hoja `PREFERENCES` del libro real) en vez de tener que reabrir el editor VBA cada vez.

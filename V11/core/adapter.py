@@ -1,27 +1,18 @@
 """Adaptador del modelo V11 (v4: p discretizada + topologia conjunta).
 
-Este modulo es la unica interfaz que necesita el servidor de produccion. Define:
-  - El CONTRATO de entrada (RAW_INPUT_COLUMNS): los 12 campos que envia Excel/web.
-  - Entradas opcionales (OPTIONAL_INPUT_COLUMNS): grado_acero y clase_tornillo,
-    con valores por defecto si no llegan.
-  - El preproceso que expande esos campos a las FEATURE_COLUMNS completas del
-    modelo (lookup de perfiles Tekla + tabla de materiales + porcentajes).
-  - La carga del bundle (pesos + preprocesador) y la inferencia.
-  - options(): valores validos para los desplegables (GET /options).
-
-Correspondencia con las features de V11:
-    Capacity_Moment <- MzEd_Porcen   (mismo valor, escala 0-100)
-    Capacity_Shear  <- FyEd_Porcen
-    Capacity_Axial  <- FxEd_Porcen
-    Standards, Pr_Porcen, Traccion, MzEd_PanelZone, Vgra, Havg: V11 no los usa
-    (se aceptan y se devuelven tal cual en la respuesta).
+Interfaz unica que consume el servidor de produccion:
+  - Contrato de tabla: los inputs que espera el modelo (ratio_* en escala 0-1).
+  - Entradas opcionales con default: grado_acero y clase_tornillo.
+  - Preproceso: input -> FEATURE_COLUMNS (lookup Tekla + materiales).
+  - to_internal / from_internal: parsing tabla <-> esquema interno.
+  - load() / predict() y options() (solo valores con los que se entreno).
 
 Estructura del paquete instalado:
 
     models/V11/
-        weights.pt              <- V11/artifacts_v4/model_final.pt
-        preprocessor.joblib     <- V11/artifacts_v4/preprocessor.joblib
-        data/                   <- V11/data (catalogos Tekla)
+        weights.pt
+        preprocessor.joblib
+        data/                   <- catalogos Tekla
         core/adapter.py         <- este archivo
 """
 
@@ -37,6 +28,7 @@ from .config import (
     CATEGORICAL_FEATURES,
     N_Y,
     NUMERIC_FEATURES,
+    RAW_INPUT_COLUMNS as MODEL_RAW_INPUTS,
 )
 from .dataset import Preprocessor
 from .model import ConnectionDesignNetV4
@@ -44,24 +36,13 @@ from .postprocess import decode_predictions, derive_dependent_columns
 
 MODEL_NAME = "V11"
 
-<<<<<<< HEAD
+log = logging.getLogger("model-adapter")
+
 # ---------------------------------------------------------------------------
-# Contrato de entrada
+# Contrato de tabla (lo que envia/recibe la app)
 # ---------------------------------------------------------------------------
-RAW_INPUT_COLUMNS = [
-    "UNICODE",
-    "Standards",
-    "BEAM",
-    "COLUMN",
-    "MzEd_Porcen",
-    "FyEd_Porcen",
-    "FxEd_Porcen",
-    "Pr_Porcen",
-    "Traccion",
-    "MzEd_PanelZone",
-    "Vgra",
-    "Havg",
-]
+# Inputs que espera el modelo; ratio_* en escala 0-1 (igual que en entrenamiento).
+RAW_INPUT_COLUMNS = list(MODEL_RAW_INPUTS)
 
 # Opcionales: si no llegan (o llegan vacias) se usan los valores por defecto.
 OPTIONAL_INPUT_COLUMNS = ["grado_acero", "clase_tornillo"]
@@ -69,19 +50,7 @@ OPTIONAL_INPUT_COLUMNS = ["grado_acero", "clase_tornillo"]
 DEFAULT_GRADO_ACERO = "S355JR"
 DEFAULT_CLASE_TORNILLO = "A325M"
 
-PERCENT_COLUMNS = ["MzEd_Porcen", "FyEd_Porcen", "FxEd_Porcen", "Pr_Porcen"]
-
-# Capacity_X de V11 <- columna de porcentaje del contrato (mismo valor, sin escalar).
-PERCENT_TO_CAPACITY = {
-    "ratio_moment": "MzEd_Porcen",
-    "ratio_shear": "FyEd_Porcen",
-    "ratio_axial": "FxEd_Porcen",
-}
-=======
-log = logging.getLogger("model-adapter")
->>>>>>> 2f1411c82f5753e8be416d285f7d9dd229662ff3
-
-# Columnas completas que consume el modelo (V11 no las define en config.py).
+# Columnas completas que consume el modelo internamente (no forman parte de la tabla).
 FEATURE_COLUMNS = list(CATEGORICAL_FEATURES) + list(NUMERIC_FEATURES)
 
 # Directorios y artefactos relativos al paquete del modelo (models/V11/ o V11/).
@@ -111,8 +80,6 @@ OUTPUT_FIELDS = (
     + ["Hole", "num_filas_tornillos", "tiene_cantonera"]
 )
 
-_PROFILE_LOOKUP = None
-
 
 class InputContractError(ValueError):
     """La fila recibida no encaja con el contrato de entrada del modelo."""
@@ -121,8 +88,11 @@ class InputContractError(ValueError):
 # ---------------------------------------------------------------------------
 # Catalogo de perfiles
 # ---------------------------------------------------------------------------
+_PROFILE_LOOKUP = None
+
+
 def _profile_lookup() -> pd.DataFrame:
-    """Tabla perfil -> (type, d_mm), indexada por nombre en MAYUSCULAS (sin espacios)."""
+    """Tabla perfil -> geometria, indexada por nombre en MAYUSCULAS (sin espacios)."""
     global _PROFILE_LOOKUP
     if _PROFILE_LOOKUP is None:
         frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
@@ -189,21 +159,7 @@ def _to_number(series: pd.Series, column: str) -> pd.Series:
     try:
         return pd.to_numeric(cleaned, errors="raise").astype(float)
     except (ValueError, TypeError) as exc:
-        raise InputContractError(f"{column} debe ser numerico (escala 0-100): {exc}") from exc
-
-
-def _add_capacities(df: pd.DataFrame) -> pd.DataFrame:
-    for pct in PERCENT_COLUMNS:
-        df[pct] = _to_number(df[pct], pct)
-
-    # Rango 0-100 solo en los porcentajes que alimentan el modelo.
-    for pct in PERCENT_TO_CAPACITY.values():
-        if ((df[pct] < 0) | (df[pct] > 100)).any():
-            raise InputContractError(f"{pct} fuera de rango 0-100")
-
-    for cap, pct_col in PERCENT_TO_CAPACITY.items():
-        df[cap] = df[pct_col].astype(float)
-    return df
+        raise InputContractError(f"{column} debe ser numerico: {exc}") from exc
 
 
 def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -211,9 +167,9 @@ def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = _canonicalize(raw_df.copy())
     df = _add_profiles(df)
     df = _add_materials(df)
-    df = _add_capacities(df)
+    for col in ("ratio_moment", "ratio_shear", "ratio_axial"):
+        df[col] = _to_number(df[col], col)
 
-    # Se conservan los identificadores crudos + las features que usa el modelo.
     keep = list(
         dict.fromkeys(
             [c for c in RAW_INPUT_COLUMNS if c in df.columns] + list(FEATURE_COLUMNS)
@@ -222,68 +178,26 @@ def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df[keep]
 
 
-<<<<<<< HEAD
+# ---------------------------------------------------------------------------
+# Mapeo tabla <-> interno
+# ---------------------------------------------------------------------------
+def to_internal(table_df: pd.DataFrame) -> pd.DataFrame:
+    """Esquema de tabla (inputs) -> features internas que consume el modelo."""
+    return preprocess(table_df)
+
+
+def from_internal(design_df: pd.DataFrame) -> pd.DataFrame:
+    """Salidas internas -> columnas de la tabla; rellena con 0 lo que falte."""
+    out = design_df.copy()
+    for column in OUTPUT_FIELDS:
+        if column not in out.columns:
+            out[column] = 0
+    return out[OUTPUT_FIELDS].reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # Carga e inferencia
 # ---------------------------------------------------------------------------
-=======
-def _nearest_known(value: str, table: dict, known: list, keys: tuple) -> str:
-    """Clase conocida con propiedades mas parecidas (distancia relativa al cuadrado)."""
-    target = table.get(value)
-    if target is None:
-        return known[0]
-    best, best_dist = known[0], None
-    for candidate in known:
-        props = table.get(candidate)
-        if not props:
-            continue
-        dist = sum(((target[k] - props[k]) / (props[k] + 1e-9)) ** 2 for k in keys)
-        if best_dist is None or dist < best_dist:
-            best, best_dist = candidate, dist
-    return best
-
-
-# Categorias de material -> (tabla, propiedades) para aproximar valores no vistos.
-_MATERIAL_FALLBACK = {
-    "grado_acero": (ACERO_TABLE, ("fy_acero_mpa", "fu_acero_mpa")),
-    "clase_tornillo": (
-        TORNILLO_TABLE,
-        ("fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa"),
-    ),
-}
-
-
-def _coerce_categories(df: pd.DataFrame, pre: Preprocessor) -> pd.DataFrame:
-    """Mapea categorias no vistas en entrenamiento a una clase conocida.
-
-    `grado_acero`/`clase_tornillo` son redundantes con `fy/fu/fv`, que si entran como
-    features numericas; por eso un valor no visto no impide predecir: se aproxima a la
-    clase conocida de propiedades mas parecidas. El resto (BEAM_type/COLUMN_type) cae a
-    la primera clase conocida. Se registra un aviso en el log."""
-    df = df.copy()
-    for feature in CATEGORICAL_FEATURES:
-        known = [str(c) for c in pre.cat_encoders[feature].classes_]
-        known_set = set(known)
-        values = df[feature].astype(str)
-        unknown = sorted(set(values) - known_set)
-        if not unknown:
-            continue
-        table, keys = _MATERIAL_FALLBACK.get(feature, (None, None))
-        if table is not None:
-            mapping = {u: _nearest_known(u, table, known, keys) for u in unknown}
-        else:
-            mapping = {u: known[0] for u in unknown}
-        log.warning(
-            "Categorias de '%s' no vistas en entrenamiento %s -> %s",
-            feature,
-            unknown,
-            mapping,
-        )
-        df[feature] = [mapping.get(v, v) for v in values]
-    return df
-
-
->>>>>>> 2f1411c82f5753e8be416d285f7d9dd229662ff3
 def load() -> dict:
     """Carga pesos + preprocesador y devuelve el bundle de inferencia."""
     if not WEIGHTS_PATH.exists() or not PREPROCESSOR_PATH.exists():
@@ -330,10 +244,9 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     device = bundle["device"]
 
     try:
-        features_df = _coerce_categories(features_df, pre)
         x_cat, x_num = pre.transform_features(features_df)
     except ValueError as exc:
-        # Categorias (perfil/grado/clase) que el preprocesador no vio en entrenamiento.
+        # Categorias (perfil/grado/clase) que el modelo no vio en entrenamiento.
         raise InputContractError(f"Valores no admitidos por el modelo: {exc}") from exc
 
     outputs = model(
@@ -362,26 +275,29 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 # Contrato y opciones publicadas
 # ---------------------------------------------------------------------------
 def contract() -> dict:
-    """Descripcion del contrato de entrada/salida del modelo."""
+    """Descripcion del contrato de tabla del modelo (inputs + outputs)."""
     return {
         "name": MODEL_NAME,
         "raw_inputs": list(RAW_INPUT_COLUMNS),
         "optional_inputs": list(OPTIONAL_INPUT_COLUMNS),
-        "features": list(FEATURE_COLUMNS),
         "outputs": list(OUTPUT_FIELDS),
     }
 
 
-def options() -> dict:
-    """Valores validos para los desplegables de la web (GET /options)."""
+def options(bundle: dict = None) -> dict:
+    """Valores validos para los desplegables: solo los vistos en entrenamiento."""
+    pre = (bundle or {}).get("pre")
+    if pre is None:
+        pre = joblib.load(PREPROCESSOR_PATH)
+
     perfiles = sorted(
         _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
     )
     return {
         "BEAM": perfiles,
         "COLUMN": perfiles,
-        "grado_acero": sorted(ACERO_TABLE),
-        "clase_tornillo": sorted(TORNILLO_TABLE),
+        "grado_acero": [str(c) for c in pre.cat_encoders["grado_acero"].classes_],
+        "clase_tornillo": [str(c) for c in pre.cat_encoders["clase_tornillo"].classes_],
         "defaults": {
             "grado_acero": DEFAULT_GRADO_ACERO,
             "clase_tornillo": DEFAULT_CLASE_TORNILLO,

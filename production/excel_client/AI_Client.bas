@@ -6,7 +6,6 @@ Option Explicit
 
 ' --- Configuración: EDITAR AQUÍ --------------------------------------------------------
 Private Const SERVER_URL As String = "http://127.0.0.1:8080"   ' URL y puerto del servidor
-Private Const API_KEY As String = "changeme"                     ' Clave de seguridad (AI_API_KEY)
 Private Const HEADER_ROW As Long = 1                             ' Fila de cabecera para rangos simples
 Private Const FIRST_DATA_ROW As Long = 2                         ' Fila inicial de datos para rangos simples
 Private Const STATUS_COLUMN_NAME As String = "Estado_IA"        ' Columna de seguimiento
@@ -602,7 +601,6 @@ Private Function HttpPostJson(url As String, jsonBody As String, ByRef outRespon
     Set http = CreateObject("MSXML2.XMLHTTP")
     http.Open "POST", url, False
     http.setRequestHeader "Content-Type", "application/json; charset=utf-8"
-    http.setRequestHeader "X-API-Key", API_KEY
     http.send jsonBody
 
     outStatus = http.Status
@@ -616,7 +614,6 @@ TryServerXMLHTTP:
     http.setTimeouts TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS
     http.Open "POST", url, False
     http.setRequestHeader "Content-Type", "application/json; charset=utf-8"
-    http.setRequestHeader "X-API-Key", API_KEY
     http.send jsonBody
 
     outStatus = http.Status

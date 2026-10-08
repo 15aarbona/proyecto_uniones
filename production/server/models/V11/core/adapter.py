@@ -1,19 +1,18 @@
 """Adaptador del modelo V11 (v4: p discretizada + topologia conjunta).
 
-Este modulo es la unica interfaz que necesita el servidor de produccion. Define:
-  - El CONTRATO de entrada (RAW_INPUT_COLUMNS): los 8 campos basicos que envia Excel.
-  - El preproceso que expande esos campos basicos a las FEATURE_COLUMNS completas
-    (lookup de perfiles Tekla + tabla de materiales).
-  - La carga del bundle (pesos + preprocesador) y la inferencia.
+Interfaz unica que consume el servidor de produccion:
+  - Contrato de tabla: los inputs que espera el modelo (ratio_* en escala 0-1).
+  - Entradas opcionales con default: grado_acero y clase_tornillo.
+  - Preproceso: input -> FEATURE_COLUMNS (lookup Tekla + materiales).
+  - to_internal / from_internal: parsing tabla <-> esquema interno.
+  - load() / predict() y options() (solo valores con los que se entreno).
 
-El servidor copia toda la carpeta `core/` (incluido este archivo) y los artefactos
-a `production/server/models/V11/` mediante el Makefile. Aqui se asume por tanto la
-estructura del paquete instalado:
+Estructura del paquete instalado:
 
     models/V11/
-        weights.pt              <- V11/artifacts_v4/model_final.pt
-        preprocessor.joblib     <- V11/artifacts_v4/preprocessor.joblib
-        data/                   <- V11/data (catalogos Tekla)
+        weights.pt
+        preprocessor.joblib
+        data/                   <- catalogos Tekla
         core/adapter.py         <- este archivo
 """
 
@@ -29,7 +28,7 @@ from .config import (
     CATEGORICAL_FEATURES,
     N_Y,
     NUMERIC_FEATURES,
-    RAW_INPUT_COLUMNS,
+    RAW_INPUT_COLUMNS as MODEL_RAW_INPUTS,
 )
 from .dataset import Preprocessor
 from .model import ConnectionDesignNetV4
@@ -39,7 +38,19 @@ MODEL_NAME = "V11"
 
 log = logging.getLogger("model-adapter")
 
-# Columnas completas que consume el modelo (V11 no las define en config.py).
+# ---------------------------------------------------------------------------
+# Contrato de tabla (lo que envia/recibe la app)
+# ---------------------------------------------------------------------------
+# Inputs que espera el modelo; ratio_* en escala 0-1 (igual que en entrenamiento).
+RAW_INPUT_COLUMNS = list(MODEL_RAW_INPUTS)
+
+# Opcionales: si no llegan (o llegan vacias) se usan los valores por defecto.
+OPTIONAL_INPUT_COLUMNS = ["grado_acero", "clase_tornillo"]
+
+DEFAULT_GRADO_ACERO = "S355JR"
+DEFAULT_CLASE_TORNILLO = "A325M"
+
+# Columnas completas que consume el modelo internamente (no forman parte de la tabla).
 FEATURE_COLUMNS = list(CATEGORICAL_FEATURES) + list(NUMERIC_FEATURES)
 
 # Directorios y artefactos relativos al paquete del modelo (models/V11/ o V11/).
@@ -50,8 +61,7 @@ DATA_DIR = MODEL_DIR / "data"
 
 _TEKLA_FILES = ("tekla_eu.csv", "tekla_cad.csv", "tekla_faltante.csv")
 
-# Catalogos de materiales (referencia: V7/variables.py). Se aceptan de mas para no
-# limitar el adaptador; el preprocesador validara luego las clases que conoce.
+# Catalogos de materiales (referencia: V7/variables.py).
 ACERO_TABLE = {
     "S275JR": {"fy_acero_mpa": 275.0, "fu_acero_mpa": 430.0},
     "S355JR": {"fy_acero_mpa": 355.0, "fu_acero_mpa": 490.0},
@@ -70,31 +80,31 @@ OUTPUT_FIELDS = (
     + ["Hole", "num_filas_tornillos", "tiene_cantonera"]
 )
 
-_PROFILE_LOOKUP = None
-
 
 class InputContractError(ValueError):
     """La fila recibida no encaja con el contrato de entrada del modelo."""
 
 
+# ---------------------------------------------------------------------------
+# Catalogo de perfiles
+# ---------------------------------------------------------------------------
+_PROFILE_LOOKUP = None
+
+
 def _profile_lookup() -> pd.DataFrame:
-    """Tabla perfil -> (type, d_mm) construida una vez desde los csv de Tekla."""
+    """Tabla perfil -> geometria, indexada por nombre en MAYUSCULAS (sin espacios)."""
     global _PROFILE_LOOKUP
     if _PROFILE_LOOKUP is None:
         frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
         union = pd.concat(frames, ignore_index=True)
-        union = (
-            union[["tekla_nomenclature_1", "type", "d_mm"]]
-            .drop_duplicates(subset="tekla_nomenclature_1")
-            .set_index("tekla_nomenclature_1")
-        )
-        _PROFILE_LOOKUP = union
+        union["_key"] = union["tekla_nomenclature_1"].astype(str).str.strip().str.upper()
+        _PROFILE_LOOKUP = union.drop_duplicates(subset="_key").set_index("_key")
     return _PROFILE_LOOKUP
 
 
 def _canonicalize(df: pd.DataFrame) -> pd.DataFrame:
     """Renombra alias (Unicode, beam, ...) a los nombres canonicos del contrato."""
-    alias = {c.lower(): c for c in RAW_INPUT_COLUMNS}
+    alias = {c.lower(): c for c in RAW_INPUT_COLUMNS + OPTIONAL_INPUT_COLUMNS}
     return df.rename(
         columns={c: alias.get(str(c).strip().lower(), c) for c in df.columns}
     )
@@ -102,39 +112,54 @@ def _canonicalize(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_profiles(df: pd.DataFrame) -> pd.DataFrame:
     lookup = _profile_lookup()
-    known = set(lookup.index)
-    for profile_col in ("BEAM", "COLUMN"):
-        values = df[profile_col].astype(str).str.strip()
-        unknown = sorted(set(values) - known)
+    for col in ("BEAM", "COLUMN"):
+        keys = df[col].astype(str).str.strip().str.upper()
+        unknown = sorted(set(df.loc[~keys.isin(lookup.index), col].astype(str)))
         if unknown:
             raise InputContractError(
-                f"Perfiles no reconocidos en {profile_col} (no estan en los catalogos "
+                f"Perfiles no reconocidos en {col} (no estan en los catalogos "
                 f"Tekla): {unknown}"
             )
-        geom = lookup.loc[values].reset_index(drop=True)
-        df[f"{profile_col}_type"] = geom["type"].to_numpy()
-        df[f"{profile_col}_d_mm"] = pd.to_numeric(
-            geom["d_mm"].to_numpy(), errors="coerce"
-        )
+        geom = lookup.loc[keys].reset_index(drop=True)
+        df[f"{col}_type"] = geom["type"].to_numpy()
+        df[f"{col}_d_mm"] = pd.to_numeric(geom["d_mm"].to_numpy(), errors="coerce")
     return df
 
 
 def _add_materials(df: pd.DataFrame) -> pd.DataFrame:
-    for column, table in (
-        ("grado_acero", ACERO_TABLE),
-        ("clase_tornillo", TORNILLO_TABLE),
+    for column, table, default in (
+        ("grado_acero", ACERO_TABLE, DEFAULT_GRADO_ACERO),
+        ("clase_tornillo", TORNILLO_TABLE, DEFAULT_CLASE_TORNILLO),
     ):
-        values = df[column].astype(str).str.strip()
+        if column not in df.columns:
+            df[column] = default
+        values = (
+            df[column]
+            .replace(r"^\s*$", np.nan, regex=True)
+            .fillna(default)
+            .astype(str)
+            .str.strip()
+        )
         unknown = sorted({v for v in values if v not in table})
         if unknown:
             raise InputContractError(
                 f"Valores no reconocidos en {column}: {unknown}. "
                 f"Admitidos: {sorted(table)}"
             )
-        props = values.map(table).apply(pd.Series)
-        for name, series in props.items():
-            df[name] = series.to_numpy()
+        df[column] = values.to_numpy()
+        props = pd.DataFrame([table[v] for v in values], index=df.index)
+        for name in props.columns:
+            df[name] = props[name].to_numpy()
     return df
+
+
+def _to_number(series: pd.Series, column: str) -> pd.Series:
+    """Convierte a numero aceptando coma decimal; error de contrato si no es posible."""
+    cleaned = series.map(lambda v: v.replace(",", ".") if isinstance(v, str) else v)
+    try:
+        return pd.to_numeric(cleaned, errors="raise").astype(float)
+    except (ValueError, TypeError) as exc:
+        raise InputContractError(f"{column} debe ser numerico: {exc}") from exc
 
 
 def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -142,11 +167,9 @@ def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = _canonicalize(raw_df.copy())
     df = _add_profiles(df)
     df = _add_materials(df)
+    for col in ("ratio_moment", "ratio_shear", "ratio_axial"):
+        df[col] = _to_number(df[col], col)
 
-    for column in ("Capacity_Moment", "Capacity_Shear", "Capacity_Axial"):
-        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
-
-    # Se conservan los identificadores crudos + las features que usa el modelo.
     keep = list(
         dict.fromkeys(
             [c for c in RAW_INPUT_COLUMNS if c in df.columns] + list(FEATURE_COLUMNS)
@@ -155,62 +178,26 @@ def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df[keep]
 
 
-def _nearest_known(value: str, table: dict, known: list, keys: tuple) -> str:
-    """Clase conocida con propiedades mas parecidas (distancia relativa al cuadrado)."""
-    target = table.get(value)
-    if target is None:
-        return known[0]
-    best, best_dist = known[0], None
-    for candidate in known:
-        props = table.get(candidate)
-        if not props:
-            continue
-        dist = sum(((target[k] - props[k]) / (props[k] + 1e-9)) ** 2 for k in keys)
-        if best_dist is None or dist < best_dist:
-            best, best_dist = candidate, dist
-    return best
+# ---------------------------------------------------------------------------
+# Mapeo tabla <-> interno
+# ---------------------------------------------------------------------------
+def to_internal(table_df: pd.DataFrame) -> pd.DataFrame:
+    """Esquema de tabla (inputs) -> features internas que consume el modelo."""
+    return preprocess(table_df)
 
 
-# Categorias de material -> (tabla, propiedades) para aproximar valores no vistos.
-_MATERIAL_FALLBACK = {
-    "grado_acero": (ACERO_TABLE, ("fy_acero_mpa", "fu_acero_mpa")),
-    "clase_tornillo": (
-        TORNILLO_TABLE,
-        ("fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa"),
-    ),
-}
+def from_internal(design_df: pd.DataFrame) -> pd.DataFrame:
+    """Salidas internas -> columnas de la tabla; rellena con 0 lo que falte."""
+    out = design_df.copy()
+    for column in OUTPUT_FIELDS:
+        if column not in out.columns:
+            out[column] = 0
+    return out[OUTPUT_FIELDS].reset_index(drop=True)
 
 
-def _coerce_categories(df: pd.DataFrame, pre: Preprocessor) -> pd.DataFrame:
-    """Mapea categorias no vistas en entrenamiento a una clase conocida.
-
-    `grado_acero`/`clase_tornillo` son redundantes con `fy/fu/fv`, que si entran como
-    features numericas; por eso un valor no visto no impide predecir: se aproxima a la
-    clase conocida de propiedades mas parecidas. El resto (BEAM_type/COLUMN_type) cae a
-    la primera clase conocida. Se registra un aviso en el log."""
-    df = df.copy()
-    for feature in CATEGORICAL_FEATURES:
-        known = [str(c) for c in pre.cat_encoders[feature].classes_]
-        known_set = set(known)
-        values = df[feature].astype(str)
-        unknown = sorted(set(values) - known_set)
-        if not unknown:
-            continue
-        table, keys = _MATERIAL_FALLBACK.get(feature, (None, None))
-        if table is not None:
-            mapping = {u: _nearest_known(u, table, known, keys) for u in unknown}
-        else:
-            mapping = {u: known[0] for u in unknown}
-        log.warning(
-            "Categorias de '%s' no vistas en entrenamiento %s -> %s",
-            feature,
-            unknown,
-            mapping,
-        )
-        df[feature] = [mapping.get(v, v) for v in values]
-    return df
-
-
+# ---------------------------------------------------------------------------
+# Carga e inferencia
+# ---------------------------------------------------------------------------
 def load() -> dict:
     """Carga pesos + preprocesador y devuelve el bundle de inferencia."""
     if not WEIGHTS_PATH.exists() or not PREPROCESSOR_PATH.exists():
@@ -257,10 +244,9 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     device = bundle["device"]
 
     try:
-        features_df = _coerce_categories(features_df, pre)
         x_cat, x_num = pre.transform_features(features_df)
     except ValueError as exc:
-        # Categorias (perfil/grado/clase) que el preprocesador no vio en entrenamiento.
+        # Categorias (perfil/grado/clase) que el modelo no vio en entrenamiento.
         raise InputContractError(f"Valores no admitidos por el modelo: {exc}") from exc
 
     outputs = model(
@@ -285,11 +271,35 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     return design.drop(columns=["_bolt_nominal_mm"], errors="ignore")
 
 
+# ---------------------------------------------------------------------------
+# Contrato y opciones publicadas
+# ---------------------------------------------------------------------------
 def contract() -> dict:
-    """Descripcion del contrato de entrada/salida del modelo."""
+    """Descripcion del contrato de tabla del modelo (inputs + outputs)."""
     return {
         "name": MODEL_NAME,
         "raw_inputs": list(RAW_INPUT_COLUMNS),
-        "features": list(FEATURE_COLUMNS),
+        "optional_inputs": list(OPTIONAL_INPUT_COLUMNS),
         "outputs": list(OUTPUT_FIELDS),
+    }
+
+
+def options(bundle: dict = None) -> dict:
+    """Valores validos para los desplegables: solo los vistos en entrenamiento."""
+    pre = (bundle or {}).get("pre")
+    if pre is None:
+        pre = joblib.load(PREPROCESSOR_PATH)
+
+    perfiles = sorted(
+        _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
+    )
+    return {
+        "BEAM": perfiles,
+        "COLUMN": perfiles,
+        "grado_acero": [str(c) for c in pre.cat_encoders["grado_acero"].classes_],
+        "clase_tornillo": [str(c) for c in pre.cat_encoders["clase_tornillo"].classes_],
+        "defaults": {
+            "grado_acero": DEFAULT_GRADO_ACERO,
+            "clase_tornillo": DEFAULT_CLASE_TORNILLO,
+        },
     }

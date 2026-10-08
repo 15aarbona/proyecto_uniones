@@ -1,14 +1,15 @@
-# Servidor de inferencia — modelos intercambiables (en caliente)
+# Servidor de inferencia — modelos intercambiables por petición
 
 Servidor HTTP (FastAPI) que sirve modelos de prediseño de uniones. Los modelos son
-**paquetes autocontenidos** dentro de `models/<NAME>/`, se instalan con el `Makefile`
-del repositorio y se pueden **activar/cambiar sin reiniciar** el servidor.
+**paquetes autocontenidos** dentro de `models/<NAME>/`, se instalan con el `Makefile` del
+repositorio y **todos los instalados se cargan a la vez** (conviven en memoria). Cada
+petición se **enruta al modelo** que se indique en `model`.
 
 ```
 production/server/
 ├── main.py             Endpoints FastAPI (docs interactivas en /docs)
-├── model_registry.py   Carga dinámica de modelos + activación en caliente
-├── predictor.py        Validación de contrato, preproceso e inferencia
+├── model_registry.py   Carga simultánea de modelos + recarga en caliente
+├── predictor.py        Validación de contrato, routing e inferencia
 ├── storage.py          Dataset acumulado (validaciones; sin reentreno por ahora)
 ├── config.py           Ajustes del servidor + MODEL_NAME por defecto
 ├── models/             Paquetes de modelo instalados (generado por `make`)
@@ -24,15 +25,15 @@ production/server/
 
 ```bash
 make install-model MODEL=V11          # copia el modelo a production/server/models/V11
-uv run uvicorn main:app --app-dir production/server --host 0.0.0.0 --port 8080 --workers 1
+uv run uvicorn main:app --app-dir production/server --host 0.0.0.0 --port 8080
 ```
-
-> `--workers 1` es **obligatorio** para el cambio en caliente: el modelo activo vive en
-> memoria de cada proceso; con varios workers cada uno tendría su propio modelo activo.
 
 `uv` toma las dependencias del `pyproject.toml` de la raíz (fastapi, uvicorn, torch,
 scikit-learn, joblib, pandas, pyarrow). Si prefieres el flujo antiguo con `pip`:
 `pip install -r production/server/requirements.txt`.
+
+> Recomendado **1 worker**. Con varios, cada proceso carga su propia copia de todos los
+> modelos y una recarga (`POST /model/activate`) solo afectaría al worker que la atiende.
 
 ## Instalar / actualizar un modelo
 
@@ -59,42 +60,23 @@ WEIGHTS = artifacts_v4/model_final.pt
 PREPROC = artifacts_v4/preprocessor.joblib
 ```
 
-También se pueden sobreescribir por línea de comandos:
+Tras instalar/actualizar, recarga sin reiniciar:
 
 ```bash
-make install-model MODEL=V11
-make install-model MODEL=V12 WEIGHTS=V12/otra/best.pt PREPROC=V12/otra/preprocessor.joblib
+curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -d '{"name":"V11"}'
 ```
-
-Si faltan artefactos, el Makefile **avisa** y copia solo lo que exista (el modelo no
-podrá activarse hasta que haya `weights.pt` y `preprocessor.joblib`).
-
-## Cambio de modelo en caliente
-
-Puedes copiar un modelo nuevo **con el servidor en marcha**; el servidor no mantiene
-abiertos los ficheros del modelo (los abre y cierra al cargar):
-
-```bash
-make install-model MODEL=V12
-curl -X POST localhost:8080/model/activate \
-     -H "Content-Type: application/json" -d '{"name":"V12"}'
-```
-
-`activate` **relee siempre desde disco**, así que también sirve para recargar los pesos
-de un modelo ya activo tras actualizarlos. Las peticiones en vuelo terminan con el
-modelo con el que empezaron.
 
 ## Endpoints
 
 | Método | Ruta | Qué hace |
 |---|---|---|
-| GET | `/health` | Estado, modelo activo y nº de filas del dataset |
-| GET | `/models` | Modelos instalados y cuál está activo |
-| GET | `/model` | Contrato del modelo activo (inputs/features/outputs) |
-| GET | `/options` | Valores admitidos para desplegables (los publica el modelo; 404 si no) |
+| GET | `/health` | Estado, modelos instalados/cargados y nº de filas del dataset |
+| GET | `/models` | Modelos instalados y cargados; modelo por defecto |
+| GET | `/model` | Contrato del modelo por defecto (inputs/opcionales/outputs) |
+| GET | `/options?model=...` | Valores admitidos para desplegables (del modelo) |
 | GET | `/` y `/web/...` | Interfaz web (`web/conexiones_tr.html`) |
-| POST | `/model/activate` | `{"name":"V11"}` → activa/recarga un modelo |
-| POST | `/predict` | Valida contrato, preprocesa y predice |
+| POST | `/model/activate` | `{"name":"V11"}` → carga/recarga un modelo |
+| POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve la tabla |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
 | GET | `/dataset/summary` | Resumen del dataset acumulado |
 
@@ -103,74 +85,91 @@ Sin autenticación (API abierta en la red interna). Documentación interactiva e
 
 ## `POST /predict`
 
-Cuerpo: las **entradas básicas** que define el modelo (contrato del adaptador).
+Cuerpo: el **esquema de tabla** = inputs que espera el modelo (`raw_inputs`) + campos
+opcionales. Los no obligatorios pueden ir en blanco (se aplican defaults/0).
 
 ```json
-{"rows":[{"UNICODE":"U1","BEAM":"IPE200","COLUMN":"HEA100",
-          "Capacity_Moment":120.0,"Capacity_Shear":80.0,"Capacity_Axial":50.0,
+{"model":"V11",
+ "rows":[{"UNICODE":"U1","BEAM":"IPE200","COLUMN":"HEA100",
+          "ratio_moment":0.82,"ratio_shear":0.25,"ratio_axial":0.03,
           "grado_acero":"S355JR","clase_tornillo":"10.9"}]}
 ```
 
-Respuesta `200`: por cada fila, **todas** las columnas = entradas básicas + features
-completas calculadas por el preproceso + predicciones del modelo.
+- `UNICODE` es **obligatorio** (trazabilidad); el resto de `raw_inputs` también, salvo
+  los declarados `optional_inputs` (en V11: `grado_acero`, `clase_tornillo`, con
+  defaults `S355JR` / `A325M`).
+- `ratio_*` se dan en la **escala con la que se entrenó** el modelo (0–1).
+
+Respuesta `200`: por cada fila, **columnas de tabla** = inputs enviados (o defaults) +
+campos predichos. **No** se incluyen features internas.
 
 ```json
 {"model_name":"V11",
- "raw_inputs":["UNICODE","BEAM","COLUMN", "..."],
- "output_fields":["standard","Bolt","n_alma","n_cantonera","g","e","d","Bp","tp","p1","..."],
- "rows":[{"UNICODE":"U1","BEAM":"IPE200","BEAM_type":"IPE","BEAM_d_mm":200.0,
-          "...":"...","Bolt":20,"n_alma":2,"n_cantonera":2,"g":105.0,"p1":85.0}]}
+ "rows":[{"UNICODE":"U1","BEAM":"IPE200","COLUMN":"HEA100","ratio_moment":0.82,
+          "grado_acero":"S355JR","clase_tornillo":"A325M",
+          "standard":"AISC-360-05/10","Bolt":20,"n_alma":2,"n_cantonera":1,
+          "g":90.0,"e":40.0,"p1":85.0,"Hole":22,"num_filas_tornillos":5}]}
 ```
 
 ### Error de contrato → HTTP 422
 
-Si a alguna fila le falta alguno de los inputs requeridos por el modelo activo:
+Si a alguna fila le falta un input requerido del modelo seleccionado:
 
 ```json
-{"detail":"Faltan inputs requeridos por el modelo activo",
- "missing":{"fila 1":["COLUMN","grado_acero","clase_tornillo"]},
- "expected":["UNICODE","BEAM","COLUMN","Capacity_Moment","Capacity_Shear",
-             "Capacity_Axial","grado_acero","clase_tornillo"]}
+{"detail":"Faltan inputs requeridos por el modelo 'V11'",
+ "model":"V11",
+ "missing":{"fila 1":["UNICODE","ratio_moment"]},
+ "expected":["UNICODE","BEAM","COLUMN","ratio_moment","ratio_shear","ratio_axial",
+             "grado_acero","clase_tornillo"]}
 ```
 
-También devuelve 422 si un perfil no está en los catálogos Tekla o si un valor de
-material no está en las tablas del adaptador.
+También devuelve 422 si el perfil no está en los catálogos Tekla o si un valor de
+material **no es uno de los vistos en entrenamiento** (V11: `S355JR`; `10.9`/`A325M`).
+Otros códigos: `400` filas vacías, `404` modelo no disponible, `503` sin modelos.
 
-Los **grados de acero y clases de tornillo válidos que el modelo no vio en
-entrenamiento** (p. ej. `S275JR` o `8.8` si el modelo solo se entrenó con `S355JR` y
-`10.9/A325M`) **no dan error**: `fy/fu/fv` entran como features numéricas, así que la
-categoría se aproxima a la clase conocida de propiedades más parecidas y se registra un
-aviso en `data/server.log`.
+## Opciones para los desplegables (`GET /options?model=V11`)
 
-Otros códigos: `400` filas vacías, `503` sin modelo activo.
+El adaptador publica los valores válidos; se usan tal cual en la web:
+
+```json
+{"BEAM":["HEA100","IPE200","..."],"COLUMN":["HEA100","IPE200","..."],
+ "grado_acero":["S355JR"],"clase_tornillo":["10.9","A325M"],
+ "defaults":{"grado_acero":"S355JR","clase_tornillo":"A325M"}}
+```
 
 ## Añadir un modelo nuevo (carpeta V)
 
-1. Crea `<V>/core/adapter.py` con la interfaz del contrato:
+1. Crea `<V>/core/adapter.py` con la interfaz:
 
    ```python
    MODEL_NAME = "V12"
-   RAW_INPUT_COLUMNS = [...]        # entradas básicas que enviará el cliente
-   OUTPUT_FIELDS = [...]
+   RAW_INPUT_COLUMNS = [...]        # inputs requeridos (esquema de tabla)
+   OPTIONAL_INPUT_COLUMNS = [...]   # opcionales con default
+   OUTPUT_FIELDS = [...]            # campos que predice
    class InputContractError(ValueError): ...
-   def preprocess(raw_df) -> pd.DataFrame: ...   # básico -> features completas
-   def load() -> dict: ...                       # {"model", "pre", "device"}
+
+   def to_internal(table_df) -> pd.DataFrame: ...   # tabla -> features internas
+   def from_internal(design_df) -> pd.DataFrame: ...# salidas -> columnas de tabla
+   def load() -> dict: ...                          # {"model","pre","device"}
    def predict(features_df, bundle) -> pd.DataFrame: ...
-   def contract() -> dict: ...                   # {"name","raw_inputs","features","outputs"}
+   def contract() -> dict: ...   # {"name","raw_inputs","optional_inputs","outputs"}
+   def options(bundle=None) -> dict: ...            # valores válidos (opcional)
    ```
 
-2. `make install-model MODEL=V12 WEIGHTS=<...> PREPROC=<...> DATA=<...>`
-3. `POST /model/activate {"name":"V12"}`.
+2. `make install-model MODEL=V12 [WEIGHTS=... PREPROC=... DATA=...]`
+3. `POST /model/activate {"name":"V12"}` (o reiniciar).
 
-No hace falta tocar `main.py` ni `predictor.py`: el servidor sólo conoce la interfaz
-del `adapter.py`.
+No hace falta tocar `main.py` ni `predictor.py`: el servidor sólo conoce la interfaz del
+`adapter.py`.
 
 ## Notas técnicas
 
 - El `preprocessor.joblib` de los modelos está serializado como
-  `core.dataset.Preprocessor`; el registro importa el `core/` de cada paquete con el
-  nombre top-level `core` para que resuelva. Solo hay un `core` activo a la vez.
+  `core.dataset.Preprocessor`. El registro importa el `core/` de cada paquete con el
+  nombre top-level `core` de forma **secuencial**, capturando las referencias en cada
+  bundle; así varios modelos conviven. El código del modelo no debe hacer `import core.*`
+  en tiempo de ejecución (solo en el import del módulo).
 - Los checkpoints se cargan con `torch.load(..., weights_only=False)` porque los
   metadatos incluyen arrays numpy (`p_mean_mm`/`p_std_mm`). Son artefactos propios.
-- Cada modelo puede tener su propia arquitectura y su propio preproceso: todo vive en
-  su `core/`.
+- Cada modelo puede tener su propia arquitectura y su propio preproceso: todo vive en su
+  `core/`.
