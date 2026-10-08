@@ -22,12 +22,13 @@ API_KEY = os.environ.get("AI_API_KEY", "changeme")
 HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8080"))
 
-MODEL_VERSION = "resnet-tabular-uniones-v4"
+# Modelo activo por defecto (carpeta dentro de MODELS_DIR). Puede cambiarse en
+# caliente con POST /model/activate sin reiniciar. El Makefile instala los paquetes
+# de modelo en models/<NAME>/.
+MODEL_NAME = "V11"
 
 # Definición de rutas absolutas relativas a la carpeta 'server/'
 MODELS_DIR = BASE_DIR / "models"
-MODEL_PATH = MODELS_DIR / "model.pt"
-PREPROCESSOR_PATH = MODELS_DIR / "preprocessor.pkl"
 
 # ============================================================================
 # 2. DEFINICIÓN DE ENTRADAS Y CARACTERÍSTICAS DE PRODUCCIÓN

@@ -220,3 +220,5 @@ __marimo__/
 data/
 
 V1/
+# Paquetes de modelo instalados en el servidor (generados por 'make install-model')
+production/server/models/
