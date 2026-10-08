@@ -2,9 +2,9 @@ RAW_INPUT_COLUMNS = [
     "UNICODE",
     "BEAM",
     "COLUMN",
-    "Capacity_Moment",
-    "Capacity_Shear",
-    "Capacity_Axial",
+    "ratio_moment",
+    "ratio_shear",
+    "ratio_axial",
     "grado_acero",
     "clase_tornillo",
 ]
@@ -17,9 +17,9 @@ NUMERIC_FEATURES = [
     "fy_tornillo_mpa",
     "fu_tornillo_mpa",
     "fv_tornillo_mpa",
-    "Capacity_Moment",
-    "Capacity_Shear",
-    "Capacity_Axial",
+    "ratio_moment",
+    "ratio_shear",
+    "ratio_axial",
 ]
 TARGET_CLS_N_ALMA = "n_alma"
 TARGET_CLS_N_CANTONERA = "n_cantonera"
