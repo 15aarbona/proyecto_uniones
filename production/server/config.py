@@ -20,7 +20,7 @@ HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8080"))
 
 # Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
-# se sirve fuera de la red interna (la API key viaja en una cabecera).
+# se sirve fuera de la red interna.
 # Para abrir el HTML con doble clic (file://) añadir "null" solo para pruebas.
 CORS_ORIGINS = [
     o.strip()

@@ -91,6 +91,8 @@ modelo con el que empezaron.
 | GET | `/health` | Estado, modelo activo y nº de filas del dataset |
 | GET | `/models` | Modelos instalados y cuál está activo |
 | GET | `/model` | Contrato del modelo activo (inputs/features/outputs) |
+| GET | `/options` | Valores admitidos para desplegables (los publica el modelo; 404 si no) |
+| GET | `/` y `/web/...` | Interfaz web (`web/conexiones_tr.html`) |
 | POST | `/model/activate` | `{"name":"V11"}` → activa/recarga un modelo |
 | POST | `/predict` | Valida contrato, preprocesa y predice |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |

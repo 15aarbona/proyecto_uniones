@@ -78,8 +78,6 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   <div class="srv">
     <label for="srvUrl">URL del servidor</label>
     <input id="srvUrl">
-    <label for="srvKey">API key (X-API-Key)</label>
-    <input id="srvKey" type="password" autocomplete="off">
   </div>
 </aside>
 
@@ -117,7 +115,6 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
    1) CONFIGURACIÓN DEL SERVIDOR
    ===================================================================== */
 const SERVER_URL = location.protocol.startsWith("http") ? location.origin : "http://localhost:8080";   // URL base de tu servidor FastAPI
-const API_KEY    = "changeme";                // Misma que AI_API_KEY en el servidor
 
 /* =====================================================================
    2) CONEXIONES Y OPCIONES DE LOS DESPLEGABLES
@@ -167,7 +164,6 @@ let current = CONEXIONES[0];
 const S = () => state[current.id] ||= { rows: [], results: [] };
 
 $("srvUrl").value = SERVER_URL;
-$("srvKey").value = API_KEY;
 
 function renderMenu(){
   $("menu").innerHTML = "";
@@ -282,7 +278,7 @@ $("send").onclick = async () => {
   try {
     const r = await fetch($("srvUrl").value.replace(/\/$/, "") + current.endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": $("srvKey").value },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rows: st.rows }),
     });
     const data = await r.json().catch(() => ({}));
@@ -305,7 +301,7 @@ $("send").onclick = async () => {
 
 async function loadOptions(){
   try{
-    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/options", { headers: { "X-API-Key": $("srvKey").value } });
+    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/options");
     if (!r.ok) throw new Error("HTTP " + r.status);
     const o = await r.json();
     let n = 0;

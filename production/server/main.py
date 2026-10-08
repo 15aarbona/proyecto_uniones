@@ -19,7 +19,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -66,7 +66,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
     allow_methods=["GET", "POST"],
-    allow_headers=["X-API-Key", "Content-Type"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -139,12 +139,11 @@ def root():
         503: {"description": "No hay ningun modelo activo"},
     },
 )
-def options(x_api_key: str | None = Header(default=None)):
+def options():
     """Devuelve las opciones validas (perfiles, materiales...) del modelo activo.
 
     Cada adaptador define su propia `options()`, de modo que al cambiar de modelo en
     caliente la web recibe automaticamente las opciones del nuevo contrato."""
-    _check_api_key(x_api_key)
     try:
         bundle = model_registry.get()
     except RuntimeError as exc:
