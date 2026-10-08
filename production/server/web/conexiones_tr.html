@@ -153,6 +153,8 @@ const CONEXIONES = [
       { key: "MzEd_PanelZone", label: "MzEd_PanelZone", type: "select", options: [0] },
       { key: "Vgra",           label: "Vgra",           type: "select", options: [0] },
       { key: "Havg",           label: "Havg",           type: "select", options: [0] },
+      { key: "grado_acero",    label: "grado_acero",    type: "select", options: ["S275JR", "S355JR"], default: "S355JR", hint: "acero" },
+      { key: "clase_tornillo", label: "clase_tornillo", type: "select", options: ["8.8", "10.9", "A325M"], default: "A325M", hint: "tornillo" },
     ],
   },
   // { id: "...", nombre: "Otra conexión", descripcion: "...", endpoint: "/predict", campos: [ ... ] },
@@ -190,7 +192,7 @@ function renderForm(){
     const lab = `<label for="${id}">${c.label}${c.hint ? ` <small>· ${c.hint}</small>` : ""}</label>`;
     let ctl;
     if (c.type === "select"){
-      const opts = (c.options || []).map((o, i) => `<option value="${i}">${o}</option>`).join("");
+      const opts = (c.options || []).map((o, i) => `<option value="${i}"${o === c.default ? " selected" : ""}>${o}</option>`).join("");
       ctl = `<select id="${id}"><option value="">— Selecciona —</option>${opts}</select>`;
     } else if (c.type === "combo"){
       const dl = "dl_" + c.key;
@@ -310,7 +312,11 @@ async function loadOptions(){
     const o = await r.json();
     let n = 0;
     CONEXIONES.forEach(con => con.campos.forEach(c => {
-      if (c.type === "combo" && Array.isArray(o[c.key])){ c.options = o[c.key].slice(); n = c.options.length; }
+      if (Array.isArray(o[c.key])){
+        c.options = o[c.key].slice();
+        if (c.type === "combo") n = c.options.length;
+      }
+      if (o.defaults && o.defaults[c.key] !== undefined) c.default = o.defaults[c.key];
     }));
     renderForm();
     setStatus("ok", `Opciones cargadas del servidor (${n} perfiles).`);

@@ -55,7 +55,7 @@ NUMERIC_FEATURES = [
     "BEAM_d_mm", "BEAM_bf_mm", "BEAM_tw_mm", "BEAM_tf_mm",
     "COLUMN_d_mm", "COLUMN_bf_mm", "COLUMN_tw_mm", "COLUMN_tf_mm",
     "fy_acero_mpa", "fu_acero_mpa", "fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa",
-    "Capacity_Moment", "Capacity_Shear", "Capacity_Axial",
+    "ratio_moment", "ratio_shear", "ratio_axial",
 ]
 
 FEATURE_COLUMNS = CATEGORICAL_FEATURES + NUMERIC_FEATURES
