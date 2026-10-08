@@ -61,6 +61,22 @@ def _clean_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     return {k: _clean_value(v) for k, v in data.items()}
 
 
+def _normalize_rows(
+    rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str]
+) -> List[Dict[str, Any]]:
+    """Renombra las claves de cada fila a los nombres canonicos del contrato
+    (sin distinguir mayusculas ni espacios en los extremos: 'Unicode' -> 'UNICODE').
+    Las claves desconocidas se conservan tal cual."""
+    alias = {c.lower(): c for c in list(raw_inputs) + list(optional_inputs)}
+    normalized = []
+    for row in rows:
+        new_row: Dict[str, Any] = {}
+        for key, value in row.items():
+            new_row[alias.get(str(key).strip().lower(), key)] = value
+        normalized.append(new_row)
+    return normalized
+
+
 def _validate_contract(rows: List[Dict[str, Any]], raw_inputs: List[str]) -> None:
     if not rows:
         raise InputContractError("La peticion no trae filas (rows vacio)", expected=raw_inputs)
@@ -80,8 +96,11 @@ def _validate_contract(rows: List[Dict[str, Any]], raw_inputs: List[str]) -> Non
 def predict_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     bundle = model_registry.get()
     adapter = bundle["adapter"]
-    raw_inputs = bundle["contract"]["raw_inputs"]
+    contract = bundle["contract"]
+    raw_inputs = contract["raw_inputs"]
+    optional_inputs = contract.get("optional_inputs", [])
 
+    rows = _normalize_rows(rows, raw_inputs, optional_inputs)
     _validate_contract(rows, raw_inputs)
 
     df = pd.DataFrame(rows)

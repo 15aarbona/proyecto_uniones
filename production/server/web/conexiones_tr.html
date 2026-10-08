@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cálculo de conexiones · Técnicas Reunidas</title>
+<style>
+:root{
+  /* ===== COLORES CORPORATIVOS (ajústalos aquí) ===== */
+  --tr-navy:#002B5C;
+  --tr-blue:#0066B3;
+  --tr-red:#D52B1E;
+  --tr-bg:#F2F5F9;
+  --tr-line:#D5DDE8;
+  --tr-text:#1B2733;
+  --tr-muted:#5E6E80;
+}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 "Segoe UI",Helvetica,Arial,sans-serif;color:var(--tr-text);background:var(--tr-bg);display:flex;min-height:100vh}
+aside{width:272px;flex:none;background:var(--tr-navy);color:#fff;display:flex;flex-direction:column}
+.brand{padding:22px 22px 18px;border-bottom:3px solid var(--tr-red)}
+.brand b{display:block;font-size:19px;letter-spacing:.3px}
+.brand span{font-size:12.5px;color:#9DB7D5}
+nav{padding:14px 0;flex:1}
+nav .grp{padding:8px 22px;font-size:12.5px;color:#9DB7D5}
+nav button{display:block;width:100%;text-align:left;background:none;border:0;border-left:4px solid transparent;color:#DCE7F4;padding:11px 22px 11px 18px;font:inherit;cursor:pointer}
+nav button:hover{background:rgba(255,255,255,.07)}
+nav button[aria-current="page"]{background:rgba(255,255,255,.12);border-left-color:var(--tr-red);color:#fff;font-weight:600}
+.srv{padding:16px 22px;border-top:1px solid rgba(255,255,255,.15);font-size:12.5px}
+.srv label{display:block;margin:0 0 4px;color:#9DB7D5}
+.srv input{width:100%;margin-bottom:10px;padding:7px 8px;border:1px solid #3C5F8A;background:#0A3A73;color:#fff;border-radius:3px;font:inherit}
+main{flex:1;min-width:0;padding:28px 34px 60px}
+h1{margin:0 0 4px;font-size:24px;color:var(--tr-navy)}
+.sub{margin:0 0 22px;color:var(--tr-muted)}
+section{background:#fff;border:1px solid var(--tr-line);border-top:3px solid var(--tr-blue);padding:20px 22px;margin-bottom:22px}
+h2{margin:0 0 14px;font-size:16px;color:var(--tr-navy)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px 16px}
+.f label{display:block;font-size:13px;font-weight:600;margin-bottom:4px;color:var(--tr-navy)}
+.f small{font-weight:400;color:var(--tr-muted)}
+.f input,.f select{width:100%;padding:8px 9px;border:1px solid #B7C3D2;border-radius:3px;background:#fff;font:inherit;color:var(--tr-text)}
+.f input:focus,.f select:focus,button:focus-visible{outline:2px solid var(--tr-blue);outline-offset:1px}
+.f.err input,.f.err select{border-color:var(--tr-red);background:#FFF4F3}
+.f .msg{display:none;font-size:12px;color:var(--tr-red);margin-top:3px}
+.f.err .msg{display:block}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;align-items:center}
+.btn{padding:10px 20px;border:0;border-radius:3px;font:inherit;font-weight:600;cursor:pointer;color:#fff;background:var(--tr-blue)}
+.btn:hover{filter:brightness(.92)}
+.btn.red{background:var(--tr-red)}
+.btn.ghost{background:#fff;color:var(--tr-navy);border:1px solid #B7C3D2}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:var(--tr-navy);color:#fff;text-align:left;padding:8px 10px;white-space:nowrap;font-weight:600}
+td{padding:7px 10px;border-bottom:1px solid var(--tr-line);white-space:nowrap}
+tr:nth-child(even) td{background:#F7F9FC}
+td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-size:17px}
+.empty{color:var(--tr-muted);padding:6px 0}
+#status{margin-top:14px;padding:10px 14px;border-left:4px solid var(--tr-blue);background:#EAF3FB;display:none}
+#status.bad{border-color:var(--tr-red);background:#FDEDEB}
+#status.ok{border-color:#2E8B57;background:#EAF6EF}
+#status pre{margin:6px 0 0;white-space:pre-wrap;font-size:12.5px}
+@media(max-width:820px){
+  body{flex-direction:column}
+  aside{width:auto}
+  nav{padding:6px 0}
+  main{padding:20px 14px 50px}
+}
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="brand"><b>TÉCNICAS REUNIDAS</b><span>Cálculo de conexiones</span></div>
+  <nav aria-label="Tipos de conexión">
+    <div class="grp">Conexiones</div>
+    <div id="menu"></div>
+  </nav>
+  <div class="srv">
+    <label for="srvUrl">URL del servidor</label>
+    <input id="srvUrl">
+    <label for="srvKey">API key (X-API-Key)</label>
+    <input id="srvKey" type="password" autocomplete="off">
+  </div>
+</aside>
+
+<main>
+  <h1 id="title"></h1>
+  <p class="sub" id="sub"></p>
+
+  <section>
+    <h2>Nueva combinación</h2>
+    <div class="grid" id="form"></div>
+    <div class="actions">
+      <button class="btn" id="add">Añadir a la tabla</button>
+      <button class="btn ghost" id="reset">Limpiar campos</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Combinaciones a calcular (<span id="count">0</span>)</h2>
+    <div class="tablewrap" id="tbl"></div>
+    <div class="actions">
+      <button class="btn red" id="send" disabled>Enviar al servidor</button>
+      <button class="btn ghost" id="clear" disabled>Vaciar tabla</button>
+    </div>
+    <div id="status" role="status"></div>
+  </section>
+
+  <section id="resSec" style="display:none">
+    <h2>Resultados del servidor</h2>
+    <div class="tablewrap" id="res"></div>
+  </section>
+</main>
+
+<script>
+/* =====================================================================
+   1) CONFIGURACIÓN DEL SERVIDOR
+   ===================================================================== */
+const SERVER_URL = location.protocol.startsWith("http") ? location.origin : "http://localhost:8080";   // URL base de tu servidor FastAPI
+const API_KEY    = "changeme";                // Misma que AI_API_KEY en el servidor
+
+/* =====================================================================
+   2) CONEXIONES Y OPCIONES DE LOS DESPLEGABLES
+   ---------------------------------------------------------------------
+   >>> AQUÍ RELLENAS LAS OPCIONES. <<<
+   Cada campo con type:"select" tiene una lista  options: [ ]  vacía.
+   Mete los valores que quieras que se puedan elegir, por ejemplo:
+       options: ["IPE200", "IPE240", "HEA200"]
+       options: [0, 25, 50, 75, 100]      (los números se envían como número)
+   `key` es el nombre exacto de la columna que se envía al servidor.
+   Para añadir otra página de conexión, copia un bloque dentro de CONEXIONES.
+   ===================================================================== */
+const PCT = Array.from({length: 21}, (_, i) => i * 5);   // 0, 5, ... 100
+// Lista de ejemplo: se sustituye por la completa de GET /options al cargar la página.
+const PERFILES_EJEMPLO = ["W610X195","W610X155","W690X152","HEA260","HEA300","HEB280","HEB320","IPE200","IPE300","IPE400"];
+
+const CONEXIONES = [
+  {
+    id: "momento-atornillada",
+    nombre: "Conexión a momento atornillada",
+    descripcion: "Viga–columna con unión atornillada resistente a momento.",
+    endpoint: "/predict",
+    campos: [
+      { key: "UNICODE",        label: "UNICODE",        type: "text", hint: "identificador, lo escribes tú" },
+      { key: "Standards",      label: "Standards",      type: "select", options: ["AISC-360-05/10"] },
+      { key: "BEAM",           label: "BEAM",           type: "combo", options: PERFILES_EJEMPLO.slice(), hint: "viga" },
+      { key: "COLUMN",         label: "COLUMN",         type: "combo", options: PERFILES_EJEMPLO.slice(), hint: "columna" },
+      { key: "MzEd_Porcen",    label: "MzEd_Porcen",    type: "select", options: PCT },
+      { key: "FyEd_Porcen",    label: "FyEd_Porcen",    type: "select", options: PCT },
+      { key: "FxEd_Porcen",    label: "FxEd_Porcen",    type: "select", options: PCT },
+      { key: "Pr_Porcen",      label: "Pr_Porcen",      type: "select", options: PCT },
+      { key: "Traccion",       label: "Traccion",       type: "select", options: [true, false] },
+      { key: "MzEd_PanelZone", label: "MzEd_PanelZone", type: "select", options: [0] },
+      { key: "Vgra",           label: "Vgra",           type: "select", options: [0] },
+      { key: "Havg",           label: "Havg",           type: "select", options: [0] },
+    ],
+  },
+  // { id: "...", nombre: "Otra conexión", descripcion: "...", endpoint: "/predict", campos: [ ... ] },
+];
+
+/* =====================================================================
+   3) LÓGICA (no hace falta tocar)
+   ===================================================================== */
+const $ = id => document.getElementById(id);
+const state = {};                       // id conexión -> { rows: [], results: [] }
+let current = CONEXIONES[0];
+const S = () => state[current.id] ||= { rows: [], results: [] };
+
+$("srvUrl").value = SERVER_URL;
+$("srvKey").value = API_KEY;
+
+function renderMenu(){
+  $("menu").innerHTML = "";
+  CONEXIONES.forEach(c => {
+    const b = document.createElement("button");
+    b.textContent = c.nombre;
+    if (c.id === current.id) b.setAttribute("aria-current", "page");
+    b.onclick = () => { current = c; renderAll(); };
+    $("menu").appendChild(b);
+  });
+}
+
+function renderForm(){
+  const form = $("form");
+  form.innerHTML = "";
+  current.campos.forEach(c => {
+    const d = document.createElement("div");
+    d.className = "f"; d.dataset.key = c.key;
+    const id = "in_" + c.key;
+    const lab = `<label for="${id}">${c.label}${c.hint ? ` <small>· ${c.hint}</small>` : ""}</label>`;
+    let ctl;
+    if (c.type === "select"){
+      const opts = (c.options || []).map((o, i) => `<option value="${i}">${o}</option>`).join("");
+      ctl = `<select id="${id}"><option value="">— Selecciona —</option>${opts}</select>`;
+    } else if (c.type === "combo"){
+      const dl = "dl_" + c.key;
+      ctl = `<input id="${id}" list="${dl}" autocomplete="off" placeholder="Escribe para buscar">` +
+            `<datalist id="${dl}">${(c.options || []).map(o => `<option value="${o}">`).join("")}</datalist>`;
+    } else {
+      ctl = `<input id="${id}" type="text" autocomplete="off">`;
+    }
+    d.innerHTML = lab + ctl + `<div class="msg"></div>`;
+    form.appendChild(d);
+  });
+}
+
+function readForm(){
+  let ok = true; const row = {};
+  const used = new Set(S().rows.map(r => String(r.UNICODE)));
+  current.campos.forEach(c => {
+    const box = $("form").querySelector(`[data-key="${c.key}"]`);
+    const el = $("in_" + c.key); let msg = "";
+    let val = el.value.trim();
+    if (c.type === "select"){
+      if (val === "") msg = (c.options || []).length ? "Elige una opción" : "Sin opciones: rellénalas en el código";
+      else val = c.options[Number(val)];
+    } else if (c.type === "combo"){
+      if (val === "") msg = "Obligatorio";
+      else if ((c.options || []).length){
+        const m = c.options.find(o => String(o).toLowerCase() === val.toLowerCase());
+        if (m === undefined) msg = "No está en el catálogo"; else val = m;
+      }
+    } else if (val === "") msg = "Obligatorio";
+    else if (c.key === "UNICODE" && used.has(val)) msg = "UNICODE ya añadido";
+    box.classList.toggle("err", !!msg);
+    box.querySelector(".msg").textContent = msg;
+    if (msg) ok = false; else row[c.key] = val;
+  });
+  return ok ? row : null;
+}
+
+function table(rows, cols, withDelete){
+  if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario y pulsa “Añadir a la tabla”.</div>`;
+  const head = cols.map(c => `<th>${c}</th>`).join("") + (withDelete ? "<th></th>" : "");
+  const body = rows.map((r, i) =>
+    "<tr>" + cols.map(c => `<td>${r[c] ?? ""}</td>`).join("") +
+    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila" aria-label="Quitar fila ${i+1}">✕</button></td>` : "") + "</tr>"
+  ).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderTable(){
+  const rows = S().rows;
+  $("tbl").innerHTML = table(rows, current.campos.map(c => c.key), true);
+  $("count").textContent = rows.length;
+  $("send").disabled = $("clear").disabled = !rows.length;
+  $("tbl").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { rows.splice(+b.dataset.del, 1); renderTable(); });
+}
+
+function renderResults(){
+  const res = S().results;
+  $("resSec").style.display = res.length ? "" : "none";
+  if (!res.length) return;
+  const cols = [...new Set(res.flatMap(r => Object.keys(r)))];
+  $("res").innerHTML = table(res, cols, false);
+}
+
+function setStatus(kind, text, detail){
+  const s = $("status");
+  s.className = kind; s.style.display = text ? "block" : "none";
+  s.innerHTML = `<b>${text}</b>` + (detail ? `<pre></pre>` : "");
+  if (detail) s.querySelector("pre").textContent = detail;
+}
+
+function renderAll(){
+  $("title").textContent = current.nombre;
+  $("sub").textContent = current.descripcion;
+  renderMenu(); renderForm(); renderTable(); renderResults(); setStatus("", "");
+}
+
+$("add").onclick = () => {
+  const row = readForm(); if (!row) return;
+  S().rows.push(row); renderTable(); renderForm();
+  $("in_" + current.campos[0].key).focus();
+};
+$("reset").onclick = renderForm;
+$("clear").onclick = () => { S().rows = []; S().results = []; renderTable(); renderResults(); setStatus("", ""); };
+
+$("send").onclick = async () => {
+  const st = S(); const btn = $("send");
+  btn.disabled = true; setStatus("", "Enviando " + st.rows.length + " combinaciones…");
+  try {
+    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + current.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": $("srvKey").value },
+      body: JSON.stringify({ rows: st.rows }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok){
+      let detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data, null, 2);
+      if (data.missing) detail += "\n\nFaltan:\n" + JSON.stringify(data.missing, null, 2);
+      if (data.expected) detail += "\n\nEl modelo espera:\n" + data.expected.join(", ");
+      setStatus("bad", `El servidor respondió ${r.status}`, detail);
+    } else {
+      st.results = data.rows || [];
+      renderResults();
+      setStatus("ok", `Cálculo completado con el modelo ${data.model_name ?? ""}: ${st.results.length} filas devueltas.`);
+    }
+  } catch (e){
+    setStatus("bad", "No se pudo conectar con el servidor",
+      "Comprueba la URL y que el servidor esté en marcha. Si abres este archivo desde otro origen, el servidor debe permitir CORS.\n\n" + e.message);
+  }
+  btn.disabled = !st.rows.length;
+};
+
+async function loadOptions(){
+  try{
+    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/options", { headers: { "X-API-Key": $("srvKey").value } });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const o = await r.json();
+    let n = 0;
+    CONEXIONES.forEach(con => con.campos.forEach(c => {
+      if (c.type === "combo" && Array.isArray(o[c.key])){ c.options = o[c.key].slice(); n = c.options.length; }
+    }));
+    renderForm();
+    setStatus("ok", `Opciones cargadas del servidor (${n} perfiles).`);
+  } catch (e){
+    setStatus("bad", "No se pudieron cargar las opciones del servidor; se usa la lista de ejemplo", e.message);
+  }
+}
+$("srvUrl").onchange = $("srvKey").onchange = loadOptions;
+
+renderAll();
+loadOptions();
+</script>
+</body>
+</html>

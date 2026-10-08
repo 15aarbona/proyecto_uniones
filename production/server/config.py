@@ -22,6 +22,15 @@ API_KEY = os.environ.get("AI_API_KEY", "changeme")
 HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8080"))
 
+# Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
+# se sirve fuera de la red interna (la API key viaja en una cabecera).
+# Para abrir el HTML con doble clic (file://) añadir "null" solo para pruebas.
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("AI_CORS_ORIGINS", "http://localhost:8000").split(",")
+    if o.strip()
+]
+
 # Modelo activo por defecto (carpeta dentro de MODELS_DIR). Puede cambiarse en
 # caliente con POST /model/activate sin reiniciar. El Makefile instala los paquetes
 # de modelo en models/<NAME>/.

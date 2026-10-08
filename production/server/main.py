@@ -7,6 +7,8 @@ con `POST /model/activate`; cada peticion termina con el modelo con el que empez
 Endpoints:
   GET  /health            Estado del servidor y del modelo activo
   GET  /models            Modelos instalados y cual esta activo
+  GET  /model             Contrato del modelo activo
+  GET  /options           Valores validos para los desplegables (los publica el modelo)
   POST /model/activate    Activa (o recarga) un modelo por nombre
   POST /predict           Predicciones + dataset completo de inputs
   POST /validate          Guarda filas validadas (sin reentreno)
@@ -18,6 +20,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -55,6 +58,15 @@ app = FastAPI(
         "que faltan."
     ),
     lifespan=lifespan,
+)
+
+# CORS: necesario para que el navegador pueda llamar al servidor desde la web.
+# Los origenes permitidos se configuran en config.CORS_ORIGINS (AI_CORS_ORIGINS).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
 
@@ -117,6 +129,37 @@ def active_model() -> Dict[str, Any]:
     if not status["model_loaded"]:
         raise HTTPException(status_code=503, detail="No hay ningun modelo activo")
     return status
+
+from fastapi.responses import RedirectResponse
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/web/conexiones_tr.html")
+
+@app.get(
+    "/options",
+    tags=["modelos"],
+    summary="Opciones validas para los desplegables",
+    response_description="Valores admitidos por campo, publicados por el modelo activo.",
+    responses={
+        404: {"description": "El modelo activo no publica opciones"},
+        503: {"description": "No hay ningun modelo activo"},
+    },
+)
+def options(x_api_key: str | None = Header(default=None)):
+    """Devuelve las opciones validas (perfiles, materiales...) del modelo activo.
+
+    Cada adaptador define su propia `options()`, de modo que al cambiar de modelo en
+    caliente la web recibe automaticamente las opciones del nuevo contrato."""
+    _check_api_key(x_api_key)
+    try:
+        bundle = model_registry.get()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    fn = getattr(bundle["adapter"], "options", None)
+    if fn is None:
+        raise HTTPException(status_code=404, detail="El modelo activo no publica opciones")
+    return fn()
 
 
 @app.post(
@@ -214,6 +257,9 @@ def dataset_summary(x_api_key: str | None = Header(default=None)):
     _check_api_key(x_api_key)
     return storage.summary()
 
+
+from fastapi.staticfiles import StaticFiles
+app.mount("/web", StaticFiles(directory=config.BASE_DIR / "web", html=True), name="web")
 
 if __name__ == "__main__":
     import uvicorn
