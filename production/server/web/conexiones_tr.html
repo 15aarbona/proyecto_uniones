@@ -23,9 +23,6 @@ aside{width:272px;flex:none;background:var(--tr-navy);color:#fff;display:flex;fl
 .brand span{font-size:12.5px;color:#9DB7D5}
 nav{padding:14px 0;flex:1}
 nav .grp{padding:8px 22px;font-size:12.5px;color:#9DB7D5}
-nav button{display:block;width:100%;text-align:left;background:none;border:0;border-left:4px solid transparent;color:#DCE7F4;padding:11px 22px 11px 18px;font:inherit;cursor:pointer}
-nav button:hover{background:rgba(255,255,255,.07)}
-nav button[aria-current="page"]{background:rgba(255,255,255,.12);border-left-color:var(--tr-red);color:#fff;font-weight:600}
 .srv{padding:16px 22px;border-top:1px solid rgba(255,255,255,.15);font-size:12.5px}
 .srv label{display:block;margin:0 0 4px;color:#9DB7D5}
 .srv input,.srv select{width:100%;margin-bottom:10px;padding:7px 8px;border:1px solid #3C5F8A;background:#0A3A73;color:#fff;border-radius:3px;font:inherit}
@@ -68,7 +65,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
 #status pre{margin:6px 0 0;white-space:pre-wrap;font-size:12.5px}
 @media(max-width:820px){
   body{flex-direction:column}
-  aside{width:auto}
+  aside{width:auto;position:static;height:auto;overflow:visible}
   nav{padding:6px 0}
   main{padding:20px 14px 50px}
 }
@@ -83,16 +80,14 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div id="menu"></div>
   </nav>
   <div class="srv">
-    <label for="srvUrl">URL del servidor</label>
-    <input id="srvUrl">
     <label for="model">Modelo</label>
     <select id="model"></select>
   </div>
 </aside>
 
 <main>
-  <h1 id="title"></h1>
-  <p class="sub" id="sub"></p>
+  <h1 id="title">Conexión a momento atornillada</h1>
+  <p class="sub" id="sub">Los campos se generan según el modelo seleccionado.</p>
 
   <section>
     <h2>Nueva combinación</h2>
@@ -114,10 +109,10 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   </section>
 
   <section id="resSec" style="display:none">
-    <h2>Resultados del servidor</h2>
+    <h2>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· editable</small></h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
-      <button class="btn green" id="checkBtn">2. Comprobar AISC 360-10 (/check)</button>
+      <button class="btn green" id="checkBtn" disabled>2. Comprobar AISC 360-10 (/check)</button>
     </div>
   </section>
 
@@ -129,186 +124,147 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
 
 <script>
 /* =====================================================================
-   1) CONFIGURACIÓN DEL SERVIDOR
-   ===================================================================== */
-const SERVER_URL = location.protocol.startsWith("http") ? location.origin : "http://localhost:8080";   // URL base de tu servidor FastAPI
-
-/* =====================================================================
-   2) CONEXIONES Y OPCIONES DE LOS DESPLEGABLES
-   ---------------------------------------------------------------------
-   >>> AQUÍ RELLENAS LAS OPCIONES. <<<
-   Cada campo con type:"select" tiene una lista  options: [ ]  vacía.
-   Mete los valores que quieras que se puedan elegir, por ejemplo:
-       options: ["IPE200", "IPE240", "HEA200"]
-       options: [0, 25, 50, 75, 100]      (los números se envían como número)
-   `key` es el nombre exacto de la columna que se envía al servidor.
-   Para añadir otra página de conexión, copia un bloque dentro de CONEXIONES.
-   ===================================================================== */
-// Listas de ejemplo: se sustituyen por las del modelo en GET /options al cargar la página.
-const PERFILES_EJEMPLO = ["IPE200","IPE300","HEA200","HEA300","HEB280","HEB320","W610X195","W690X152"];
-const GRADOS_EJEMPLO = ["S355JR"];
-const CLASES_EJEMPLO = ["10.9","A325M"];
-
-const CONEXIONES = [
-  {
-    id: "momento-atornillada",
-    nombre: "Conexión a momento atornillada",
-    descripcion: "Predicción inteligente por IA y comprobación estructural AISC 360-10.",
-    endpoint: "/predict",
-    campos: [
-      { key: "UNICODE",        label: "UNICODE",        type: "text",   hint: "identificador" },
-      { key: "BEAM",           label: "BEAM",           type: "combo",  options: PERFILES_EJEMPLO.slice(), hint: "viga" },
-      { key: "COLUMN",         label: "COLUMN",         type: "combo",  options: PERFILES_EJEMPLO.slice(), hint: "columna" },
-      { key: "ratio_moment",   label: "ratio_moment",   type: "text",   hint: "0–1" },
-      { key: "ratio_shear",    label: "ratio_shear",    type: "text",   hint: "0–1" },
-      { key: "ratio_axial",    label: "ratio_axial",    type: "text",   hint: "0–1" },
-      { key: "grado_acero",    label: "grado_acero",    type: "select", options: GRADOS_EJEMPLO.slice(), required: false },
-      { key: "clase_tornillo", label: "clase_tornillo", type: "select", options: CLASES_EJEMPLO.slice(), required: false },
-    ],
-  },
-];
-
-
-/* =====================================================================
-   3) LÓGICA (no hace falta tocar)
+   Estado
    ===================================================================== */
 const $ = id => document.getElementById(id);
-const state = {};
-let current = CONEXIONES[0];
-const S = () => state[current.id] ||= { rows: [], results: [] };
+let SCHEMA = { model: null, inputs: [], result_columns: [] };
+const state = { rows: [], results: [], checked: [] };
+const escHtml = v => String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
 
-$("srvUrl").value = SERVER_URL;
-
-function renderMenu(){
-  $("menu").innerHTML = "";
-  CONEXIONES.forEach(c => {
-    const b = document.createElement("button");
-    b.textContent = c.nombre;
-    if (c.id === current.id) b.setAttribute("aria-current", "page");
-    b.onclick = () => { current = c; renderAll(); };
-    $("menu").appendChild(b);
-  });
-}
-
+/* =====================================================================
+   Formulario dinámico (desde GET /schema)
+   ===================================================================== */
 function renderForm(){
   const form = $("form");
   form.innerHTML = "";
-  current.campos.forEach(c => {
-    const d = document.createElement("div");
-    d.className = "f"; d.dataset.key = c.key;
+  if (!SCHEMA.inputs.length){
+    form.innerHTML = `<div class="empty">Sin esquema: no hay modelo cargado.</div>`;
+    return;
+  }
+  SCHEMA.inputs.forEach(c => {
+    const box = document.createElement("div");
+    box.className = "f"; box.dataset.key = c.key;
     const id = "in_" + c.key;
-    const lab = `<label for="${id}">${c.label}${c.hint ? ` <small>· ${c.hint}</small>` : ""}</label>`;
+    const desc = c.description ? ` <small>· ${escHtml(c.description)}</small>` : "";
+    const lab = `<label for="${id}">${escHtml(c.key)}${desc}</label>`;
     let ctl;
-    if (c.type === "select"){
-      const opts = (c.options || []).map((o, i) => `<option value="${i}"${o === c.default ? " selected" : ""}>${o}</option>`).join("");
-      ctl = `<select id="${id}"><option value="">— Selecciona —</option>${opts}</select>`;
-    } else if (c.type === "combo"){
-      const dl = "dl_" + c.key;
-      ctl = `<input id="${id}" list="${dl}" autocomplete="off" placeholder="Escribe para buscar">` +
-            `<datalist id="${dl}">${(c.options || []).map(o => `<option value="${o}">`).join("")}</datalist>`;
+    if (c.type === "categorical"){
+      const opts = c.options || [];
+      if (opts.length > 25){
+        const dl = "dl_" + c.key;
+        ctl = `<input id="${id}" list="${dl}" autocomplete="off" placeholder="Escribe para buscar">` +
+              `<datalist id="${dl}">${opts.map(o => `<option value="${escAttr(o)}">`).join("")}</datalist>`;
+      } else {
+        ctl = `<select id="${id}"><option value="">— Selecciona —</option>` +
+              opts.map(o => `<option value="${escAttr(o)}">${escHtml(o)}</option>`).join("") + `</select>`;
+      }
+    } else if (c.type === "bool"){
+      ctl = `<select id="${id}"><option value="">—</option><option value="true">true</option><option value="false">false</option></select>`;
+    } else if (c.type === "number"){
+      ctl = `<input id="${id}" type="number" step="any" autocomplete="off">`;
     } else {
       ctl = `<input id="${id}" type="text" autocomplete="off">`;
     }
-    d.innerHTML = lab + ctl + `<div class="msg"></div>`;
-    form.appendChild(d);
+    box.innerHTML = lab + ctl + `<div class="msg"></div>`;
+    form.appendChild(box);
   });
 }
 
 function readForm(){
   let ok = true; const row = {};
-  current.campos.forEach(c => {
+  SCHEMA.inputs.forEach(c => {
     const box = $("form").querySelector(`[data-key="${c.key}"]`);
-    const el = $("in_" + c.key); let msg = "";
-    let val = el.value.trim();
-    const optional = c.required === false;
-    if (c.type === "select"){
-      if (val === ""){ if (!optional) msg = "Elige una opción"; }
-      else val = c.options[Number(val)];
-    } else if (c.type === "combo"){
-      if (val === ""){ if (!optional) msg = "Obligatorio"; }
-      else if ((c.options || []).length){
-        const m = c.options.find(o => String(o).toLowerCase() === val.toLowerCase());
-        if (m === undefined) msg = "No está en el catálogo"; else val = m;
-      }
-    } else if (val === ""){ if (!optional) msg = "Obligatorio"; }
+    const el = $("in_" + c.key);
+    const val = (el && el.value != null ? el.value : "").trim();
+    let msg = "";
+    if (val !== "" && c.type === "categorical" && Array.isArray(c.options) && c.options.length){
+      const m = c.options.find(o => String(o).toLowerCase() === val.toLowerCase());
+      if (m === undefined) msg = "No está en el catálogo"; else row[c.key] = m;
+    } else if (val !== ""){
+      row[c.key] = (c.type === "number") ? Number(val) : val;
+    }
     box.classList.toggle("err", !!msg);
     box.querySelector(".msg").textContent = msg;
-    if (msg) ok = false; else row[c.key] = val;
+    if (msg) ok = false;
   });
   return ok ? row : null;
 }
 
+/* =====================================================================
+   Tablas
+   ===================================================================== */
 function table(rows, cols, withDelete){
-  if (!rows.length) return `<div class="empty">No hay combinaciones en la tabla.</div>`;
-  const head = cols.map(c => `<th>${c}</th>`).join("") + (withDelete ? "<th></th>" : "");
+  if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario y pulsa “Añadir a la tabla”.</div>`;
+  const head = cols.map(c => `<th>${escHtml(c)}</th>`).join("") + (withDelete ? "<th></th>" : "");
   const body = rows.map((r, i) =>
-    "<tr>" + cols.map(c => `<td>${r[c] ?? ""}</td>`).join("") +
-    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila">✕</button></td>` : "") + "</tr>"
+    "<tr>" + cols.map(c => `<td>${escHtml(r[c] ?? "")}</td>`).join("") +
+    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila" aria-label="Quitar fila ${i+1}">✕</button></td>` : "") + "</tr>"
   ).join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function renderTable(){
-  const rows = S().rows;
-  $("tbl").innerHTML = table(rows, current.campos.map(c => c.key), true);
-  $("count").textContent = rows.length;
-  $("send").disabled = $("clear").disabled = !rows.length;
-  $("tbl").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { rows.splice(+b.dataset.del, 1); renderTable(); });
+  const cols = SCHEMA.inputs.map(c => c.key);
+  $("tbl").innerHTML = table(state.rows, cols, true);
+  $("count").textContent = state.rows.length;
+  $("send").disabled = $("clear").disabled = !state.rows.length;
+  $("tbl").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { state.rows.splice(+b.dataset.del, 1); renderTable(); });
 }
 
 function renderResults(){
-  const res = S().results;
+  const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
+  $("checkBtn").disabled = !res.length;
   if (!res.length) return;
-  const cols = [...new Set(res.flatMap(r => Object.keys(r)))];
-  const head = cols.map(c => `<th>${c}</th>`).join("");
+  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns
+                                            : [...new Set(res.flatMap(r => Object.keys(r)))];
+  const head = cols.map(c => `<th>${escHtml(c)}</th>`).join("");
   const body = res.map((r, i) =>
     "<tr>" + cols.map(c => {
       const v = r[c] ?? "";
-      const esc = String(v).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
-      return `<td><input class="cell" data-row="${i}" data-col="${c}" value="${esc}"></td>`;
+      return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
     }).join("") + "</tr>"
   ).join("");
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-  // Los valores editados se guardan en el estado (para reutilizarlos más adelante).
+  // Los valores editados se guardan en el estado (los usa /check).
   $("res").querySelectorAll("input.cell").forEach(inp => {
     inp.addEventListener("input", () => {
-      S().results[+inp.dataset.row][inp.dataset.col] = inp.value;
+      state.results[+inp.dataset.row][inp.dataset.col] = inp.value;
     });
   });
 }
 
 function renderCheckResults(){
-  const res = S().checkedResults;
+  const res = state.checked;
   $("checkSec").style.display = res.length ? "" : "none";
   if (!res.length) return;
 
   let html = `<table><thead><tr>
-    <th>UNICODE</th><th>Estado</th><th>Ratio Pésimo</th><th>Chequeo Crítico</th><th>Detalle Comprobaciones</th>
+    <th>Unicode</th><th>Estado</th><th>Ratio pésimo</th><th>Chequeo crítico</th><th>Detalle</th>
   </tr></thead><tbody>`;
 
   res.forEach((r, i) => {
-    const badge = r.cumple ? `<span class="badge ok">CUMPLE</span>` : `<span class="badge bad">NO CUMPLE</span>`;
-    
-    let ratiosList = (r.ratios || []).map(f => `<li><b>${f.descripcion}:</b> ${f.ratio !== null ? f.ratio.toFixed(3) : 'N/A'}</li>`).join("");
-    let compList = (r.complementarios || []).map(c => `<li><b>${c.descripcion}:</b> ${c.resultado}</li>`).join("");
+    const badge = r.cumple ? `<span class="badge ok">CUMPLE</span>`
+                           : `<span class="badge bad">NO CUMPLE</span>`;
+    const ratiosList = (r.ratios || []).map(f =>
+      `<li><b>${escHtml(f.descripcion)}:</b> ${f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A'}</li>`).join("");
+    const compList = (r.complementarios || []).map(c =>
+      `<li><b>${escHtml(c.descripcion)}:</b> ${escHtml(c.resultado)}</li>`).join("");
+    const label = r.Unicode || r.UNICODE || (i + 1);
 
     html += `<tr>
-      <td>${r.UNICODE || (i+1)}</td>
+      <td>${escHtml(label)}</td>
       <td>${badge}</td>
       <td><b>${r.ratio_pesimo ?? 'N/A'}</b></td>
-      <td>${r.descripcion_ratio_pesimo || 'N/A'}</td>
-      <td>
-        <details>
-          <summary>Ver 18 Ratios y 33 Geométricos</summary>
-          <div style="padding:8px 0;">
-            <p style="margin:4px 0;"><b>Resistencias y Ratios:</b></p>
-            <ul style="margin:0;padding-left:18px;">${ratiosList}</ul>
-            <p style="margin:8px 0 4px;"><b>Geometría y Complementarias:</b></p>
-            <ul style="margin:0;padding-left:18px;">${compList}</ul>
-          </div>
-        </details>
-      </td>
+      <td>${escHtml(r.descripcion_ratio_pesimo || 'N/A')}</td>
+      <td><details><summary>Ver ratios y geométricos</summary>
+        <div style="padding:8px 0;">
+          <p style="margin:4px 0;"><b>Resistencias y ratios:</b></p>
+          <ul style="margin:0;padding-left:18px;">${ratiosList}</ul>
+          <p style="margin:8px 0 4px;"><b>Geometría y complementarias:</b></p>
+          <ul style="margin:0;padding-left:18px;">${compList}</ul>
+        </div></details></td>
     </tr>`;
   });
 
@@ -319,99 +275,108 @@ function renderCheckResults(){
 function setStatus(kind, text, detail){
   const s = $("status");
   s.className = kind; s.style.display = text ? "block" : "none";
-  s.innerHTML = `<b>${text}</b>` + (detail ? `<pre></pre>` : "");
+  s.innerHTML = `<b>${escHtml(text)}</b>` + (detail ? `<pre></pre>` : "");
   if (detail) s.querySelector("pre").textContent = detail;
 }
 
-function renderAll(){
-  $("title").textContent = current.nombre;
-  $("sub").textContent = current.descripcion;
-  renderMenu(); renderForm(); renderTable(); renderResults(); renderCheckResults(); setStatus("", "");
-}
-
+/* =====================================================================
+   Acciones
+   ===================================================================== */
 $("add").onclick = () => {
   const row = readForm(); if (!row) return;
-  S().rows.push(row); renderTable(); renderForm();
-  $("in_" + current.campos[0].key).focus();
+  state.rows.push(row); renderTable(); renderForm();
+  const first = SCHEMA.inputs[0];
+  if (first) $("in_" + first.key).focus();
 };
 $("reset").onclick = renderForm;
-$("clear").onclick = () => { S().rows = []; S().results = []; S().checkedResults = []; renderTable(); renderResults(); renderCheckResults(); setStatus("", ""); };
+$("clear").onclick = () => {
+  state.rows = []; state.results = []; state.checked = [];
+  renderTable(); renderResults(); renderCheckResults(); setStatus("", "");
+};
 
 $("send").onclick = async () => {
-  const st = S(); const btn = $("send");
-  btn.disabled = true; setStatus("", "Enviando predicción " + st.rows.length + " combinaciones…");
+  const btn = $("send");
+  btn.disabled = true; setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones…");
   try {
-    const r = await fetch(current.endpoint, {
+    const r = await fetch("/predict", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: $("model").value, rows: st.rows }),
+      body: JSON.stringify({ model: $("model").value, rows: state.rows }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok){
       let detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data, null, 2);
+      if (data.missing) detail += "\n\nFaltan:\n" + JSON.stringify(data.missing, null, 2);
+      if (data.expected) detail += "\n\nEl modelo espera:\n" + data.expected.join(", ");
       setStatus("bad", `El servidor respondió ${r.status}`, detail);
     } else {
-      st.results = data.rows || [];
-      renderResults();
-      setStatus("ok", `Predicción completada con el modelo ${data.model_name ?? ""}: ${st.results.length} uniones pre-diseñadas.`);
+      state.results = data.rows || [];
+      state.checked = [];
+      renderResults(); renderCheckResults();
+      setStatus("ok", `Predicción completada con el modelo ${data.model_name ?? ""}: ${state.results.length} uniones. Edita si quieres y pulsa "Comprobar".`);
     }
   } catch (e){
     setStatus("bad", "No se pudo conectar con el servidor", e.message);
   }
-  btn.disabled = !st.rows.length;
+  btn.disabled = !state.rows.length;
 };
 
 $("checkBtn").onclick = async () => {
-  const st = S(); const btn = $("checkBtn");
-  btn.disabled = true; setStatus("", "Comprobando " + st.results.length + " uniones con AISC 360-10…");
+  const btn = $("checkBtn");
+  btn.disabled = true; setStatus("", "Comprobando " + state.results.length + " uniones con AISC 360-10…");
   try {
-    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/check", {
+    const r = await fetch("/check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: st.results }),
+      body: JSON.stringify({ rows: state.results }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok){
       setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2));
     } else {
-      st.checkedResults = data.rows || [];
+      state.checked = data.rows || [];
       renderCheckResults();
-      setStatus("ok", `Comprobación AISC 360-10 finalizada con éxito.`);
+      setStatus("ok", "Comprobación AISC 360-10 finalizada.");
     }
   } catch (e){
     setStatus("bad", "Error enviando la comprobación", e.message);
   }
-  btn.disabled = false;
+  btn.disabled = !state.results.length;
 };
 
+/* =====================================================================
+   Carga de modelos y esquema
+   ===================================================================== */
 async function loadModels(){
   try{
     const r = await fetch("/models");
     const o = await r.json();
     const sel = $("model");
-    sel.innerHTML = (o.available_models || []).map(m => `<option value="${m}">${m}</option>`).join("");
-    if (o.default_model && (o.available_models || []).includes(o.default_model)) sel.value = o.default_model;
-  } catch(e){}
+    const models = o.available_models || [];
+    sel.innerHTML = models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
+    if (o.default_model && models.includes(o.default_model)) sel.value = o.default_model;
+  } catch(e){ /* sin modelos */ }
 }
 
-async function loadOptions(){
+async function loadSchema(){
+  const model = $("model").value;
+  if (!model) return;
   try{
-    const model = $("model").value;
-    const r = await fetch("/options?model=" + encodeURIComponent(model));
+    const r = await fetch("/schema?model=" + encodeURIComponent(model));
     if (!r.ok) throw new Error("HTTP " + r.status);
-    const o = await r.json();
-    CONEXIONES.forEach(con => con.campos.forEach(c => {
-      if ((c.type === "combo" || c.type === "select") && Array.isArray(o[c.key])){
-        c.options = o[c.key].slice();
-      }
-    }));
-    renderForm();
-  } catch (e){}
+    SCHEMA = await r.json();
+    renderForm(); renderTable();
+    $("sub").textContent = `Modelo: ${SCHEMA.model}. Los campos se generan según el modelo.`;
+  } catch (e){
+    setStatus("bad", "No se pudo cargar el esquema del modelo", e.message);
+  }
 }
-$("model").onchange = loadOptions;
+$("model").onchange = () => {
+  state.rows = []; state.results = []; state.checked = [];
+  renderTable(); renderResults(); renderCheckResults(); loadSchema();
+};
 
-renderAll();
-loadModels().then(loadOptions);
+loadModels().then(loadSchema);
 </script>
 </body>
 </html>

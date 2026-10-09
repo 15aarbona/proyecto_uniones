@@ -1,4 +1,11 @@
-"""Inferencia y comprobación estructural en producción sobre modelos intercambiables."""
+"""Inferencia y comprobacion estructural en produccion sobre modelos intercambiables.
+
+Cada modelo expone su `input_schema()` y su diseno en claves canonicas. El servidor:
+  - valida el contrato de entrada y enruta al modelo,
+  - mapea input + diseno a las 63 columnas de CODAME (`codame.to_codame`, catalogo del
+    servidor) e imputa lo que falte (nunca responde 500 por culpa del modelo),
+  - ejecuta la comprobacion AISC 360-10 (`checker`) sobre el esquema CODAME.
+"""
 
 import logging
 import math
@@ -7,13 +14,17 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
+import codame
 import model_registry
+from codame_schema import CODAME_COLUMNS, fill_missing
 from checker import check_rows as perform_check
 
 log = logging.getLogger("ai-server")
 
 
 class InputContractError(ValueError):
+    """Los inputs recibidos no cumplen el contrato del modelo seleccionado."""
+
     def __init__(self, message: str, model: str = None, missing=None, expected=None):
         super().__init__(message)
         self.model = model
@@ -32,16 +43,21 @@ def _is_missing(value: Any) -> bool:
 
 
 def _clean_value(value: Any) -> Any:
+    """Garantiza compatibilidad JSON (sin NaN/inf)."""
     if value is None:
         return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
     if isinstance(value, (float, np.floating)):
         return None if (math.isnan(value) or math.isinf(value)) else float(value)
     if isinstance(value, (int, np.integer)):
         return int(value)
-    if isinstance(value, (bool, np.bool_)):
-        return bool(value)
-    if isinstance(value, (np.ndarray, list, tuple)):
-        return value
+    if isinstance(value, (list, tuple)):
+        return [_clean_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _clean_value(v) for k, v in value.items()}
+    if isinstance(value, np.ndarray):
+        return value.tolist()
     try:
         if pd.isna(value):
             return None
@@ -57,6 +73,7 @@ def _clean_dict(data: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_rows(
     rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str]
 ) -> List[Dict[str, Any]]:
+    """Renombra alias (Unicode -> UNICODE...) sin distinguir mayusculas/espacios."""
     alias = {c.lower(): c for c in list(raw_inputs) + list(optional_inputs)}
     normalized = []
     for row in rows:
@@ -71,9 +88,9 @@ def _validate_contract(
     rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str], model: str
 ) -> None:
     if not rows:
-        raise InputContractError("La petición no trae filas (rows vacío)", model=model, expected=raw_inputs)
+        raise InputContractError("La peticion no trae filas (rows vacio)", model=model, expected=raw_inputs)
     optional = set(optional_inputs)
-    required = [c for c in raw_inputs if c not in optional]
+    required = [c for c in raw_inputs if c not in optional]  # UNICODE siempre obligatorio
     missing = {}
     for i, row in enumerate(rows):
         absent = [c for c in required if _is_missing(row.get(c))]
@@ -103,22 +120,60 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
     try:
         features = adapter.to_internal(df)
         design = adapter.predict(features, bundle)
-        table_out = adapter.from_internal(design)
     except adapter.InputContractError as exc:
         raise InputContractError(str(exc), model=name, expected=raw_inputs) from exc
 
-    input_columns = [c for c in raw_inputs if c in features.columns]
     output: List[Dict[str, Any]] = []
     for i in range(len(df)):
-        merged: Dict[str, Any] = {c: features.iloc[i][c] for c in input_columns}
-        merged.update(table_out.iloc[i].to_dict())
-        output.append(_clean_dict(merged))
+        input_row = features.iloc[i].to_dict()
+        design_row = design.iloc[i].to_dict()
+        try:
+            partial = codame.to_codame(input_row, design_row)
+            if not isinstance(partial, dict):
+                raise TypeError("codame.to_codame no devolvio un dict")
+        except Exception:  # noqa: BLE001  (nunca fallar por culpa del modelo)
+            log.exception(
+                "codame.to_codame fallo (modelo=%s, fila=%d); se devuelven valores por defecto",
+                name,
+                i,
+            )
+            partial = {}
+        output.append(_clean_dict(fill_missing(partial)))
     return output
 
 
 def check_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    results = perform_check(rows)
-    return [_clean_dict(r) for r in results]
+    """Comprobacion AISC 360-10 sobre filas del esquema CODAME (editadas)."""
+    output: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        try:
+            output.append(_clean_dict(perform_check([row])[0]))
+        except Exception as exc:  # noqa: BLE001  (informe de error por entrada)
+            log.exception("check_rows fallo (fila=%d)", i)
+            output.append(
+                {
+                    "Unicode": row.get("Unicode", row.get("UNICODE", "")),
+                    "cumple": False,
+                    "ratio_pesimo": None,
+                    "descripcion_ratio_pesimo": f"Error en la comprobacion: {exc}",
+                    "ratios": [],
+                    "complementarios": [],
+                }
+            )
+    return output
+
+
+def schema(model_name: str) -> Dict[str, Any]:
+    """Inputs del modelo + columnas de resultado (comunes)."""
+    bundle = model_registry.get(model_name)
+    adapter = bundle["adapter"]
+    fn = getattr(adapter, "input_schema", None)
+    inputs = fn(bundle) if fn is not None else []
+    return {
+        "model": bundle["name"],
+        "inputs": inputs,
+        "result_columns": list(CODAME_COLUMNS),
+    }
 
 
 def model_status() -> Dict[str, Any]:
@@ -126,13 +181,3 @@ def model_status() -> Dict[str, Any]:
         "available_models": model_registry.list_models(),
         "loaded_models": model_registry.loaded_models(),
     }
-
-
-def options(model_name: str) -> Dict[str, Any]:
-    bundle = model_registry.get(model_name)
-    fn = getattr(bundle["adapter"], "options", None)
-    if fn is None:
-        raise InputContractError(
-            f"El modelo '{bundle['name']}' no publica opciones", model=bundle["name"]
-        )
-    return fn(bundle)

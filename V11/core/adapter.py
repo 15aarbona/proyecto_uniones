@@ -1,18 +1,20 @@
 """Adaptador del modelo V11 (v4: p discretizada + topologia conjunta).
 
 Interfaz unica que consume el servidor de produccion:
-  - Contrato de tabla: los inputs que espera el modelo (ratio_* en escala 0-1).
-  - Entradas opcionales con default: grado_acero y clase_tornillo.
-  - Preproceso: input -> FEATURE_COLUMNS (lookup Tekla + materiales).
-  - to_internal / from_internal: parsing tabla <-> esquema interno.
-  - load() / predict() y options() (solo valores con los que se entreno).
+  - input_schema(): campos de entrada del modelo (tipo, descripcion y opciones).
+  - preprocess()/to_internal(): input -> FEATURE_COLUMNS (lookup Tekla + materiales).
+  - from_internal(): salidas internas -> claves canonicas del diseno.
+  - load() / predict(): pesos + preprocesador e inferencia.
+
+La traduccion a las 63 columnas de CODAME la hace el SERVIDOR (`codame.py`), que es la
+fuente unica para todos los modelos.
 
 Estructura del paquete instalado:
 
     models/V11/
         weights.pt
         preprocessor.joblib
-        data/                   <- catalogos Tekla
+        data/                   <- catalogos Tekla (para construir features)
         core/adapter.py         <- este archivo
 """
 
@@ -28,7 +30,6 @@ from .config import (
     CATEGORICAL_FEATURES,
     N_Y,
     NUMERIC_FEATURES,
-    RAW_INPUT_COLUMNS as MODEL_RAW_INPUTS,
 )
 from .dataset import Preprocessor
 from .model import ConnectionDesignNetV4
@@ -39,13 +40,24 @@ MODEL_NAME = "V11"
 log = logging.getLogger("model-adapter")
 
 # ---------------------------------------------------------------------------
-# Contrato de tabla (lo que envia/recibe la app)
+# Contrato de entrada (lo define el modelo): sus inputs + UNICODE.
 # ---------------------------------------------------------------------------
-# Inputs que espera el modelo; ratio_* en escala 0-1 (igual que en entrenamiento).
-RAW_INPUT_COLUMNS = list(MODEL_RAW_INPUTS)
+# `ratio_*` en escala 0-1 (igual que en entrenamiento). `Normativas` alimenta la
+# columna `Standards` de CODAME (la `standard` predicha NO se mapea a `Standards`).
+RAW_INPUT_COLUMNS = [
+    "UNICODE",
+    "Normativas",
+    "BEAM",
+    "COLUMN",
+    "ratio_moment",
+    "ratio_shear",
+    "ratio_axial",
+    "grado_acero",
+    "clase_tornillo",
+]
 
-# Opcionales: si no llegan (o llegan vacias) se usan los valores por defecto.
-OPTIONAL_INPUT_COLUMNS = ["grado_acero", "clase_tornillo"]
+# Opcionales (con default): si no llegan, no bloquean la prediccion.
+OPTIONAL_INPUT_COLUMNS = ["Normativas", "grado_acero", "clase_tornillo"]
 
 DEFAULT_GRADO_ACERO = "S355JR"
 DEFAULT_CLASE_TORNILLO = "A325M"
@@ -178,16 +190,13 @@ def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df[keep]
 
 
-# ---------------------------------------------------------------------------
-# Mapeo tabla <-> interno
-# ---------------------------------------------------------------------------
 def to_internal(table_df: pd.DataFrame) -> pd.DataFrame:
     """Esquema de tabla (inputs) -> features internas que consume el modelo."""
     return preprocess(table_df)
 
 
 def from_internal(design_df: pd.DataFrame) -> pd.DataFrame:
-    """Salidas internas -> columnas de la tabla; rellena con 0 lo que falte."""
+    """Salidas internas -> claves canonicas del diseno; rellena con 0 lo que falte."""
     out = design_df.copy()
     for column in OUTPUT_FIELDS:
         if column not in out.columns:
@@ -246,7 +255,6 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
     try:
         x_cat, x_num = pre.transform_features(features_df)
     except ValueError as exc:
-        # Categorias (perfil/grado/clase) que el modelo no vio en entrenamiento.
         raise InputContractError(f"Valores no admitidos por el modelo: {exc}") from exc
 
     outputs = model(
@@ -272,10 +280,10 @@ def predict(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Contrato y opciones publicadas
+# Contrato, schema de entrada y opciones
 # ---------------------------------------------------------------------------
 def contract() -> dict:
-    """Descripcion del contrato de tabla del modelo (inputs + outputs)."""
+    """Contrato de tabla del modelo (inputs + opcionales + outputs)."""
     return {
         "name": MODEL_NAME,
         "raw_inputs": list(RAW_INPUT_COLUMNS),
@@ -284,15 +292,49 @@ def contract() -> dict:
     }
 
 
-def options(bundle: dict = None) -> dict:
-    """Valores validos para los desplegables: solo los vistos en entrenamiento."""
+def _pre(bundle: dict = None) -> Preprocessor:
     pre = (bundle or {}).get("pre")
-    if pre is None:
-        pre = joblib.load(PREPROCESSOR_PATH)
+    return pre if pre is not None else joblib.load(PREPROCESSOR_PATH)
 
-    perfiles = sorted(
+
+def _profile_names() -> list:
+    return sorted(
         _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
     )
+
+
+def input_schema(bundle: dict = None) -> list:
+    """Campos de entrada del modelo: key, descripcion, tipo y opciones si categorico."""
+    pre = _pre(bundle)
+    perfiles = _profile_names()
+    return [
+        {"key": "UNICODE", "description": "Identificador unico",
+         "type": "text"},
+        {"key": "Normativas", "description": "Normativa aplicable",
+         "type": "categorical",
+         "options": [str(c) for c in pre.standard_encoder.classes_]},
+        {"key": "BEAM", "description": "Perfil de la viga", "type": "categorical",
+         "options": perfiles},
+        {"key": "COLUMN", "description": "Perfil de la columna", "type": "categorical",
+         "options": perfiles},
+        {"key": "ratio_moment", "description": "(0-1)",
+         "type": "number"},
+        {"key": "ratio_shear", "description": "(0-1)",
+         "type": "number"},
+        {"key": "ratio_axial", "description": "(0-1)",
+         "type": "number"},
+        {"key": "grado_acero", "description": "Grado del acero", "type": "categorical",
+         "options": [str(c) for c in pre.cat_encoders["grado_acero"].classes_]},
+        {"key": "clase_tornillo", "description": "Clase del tornillo",
+         "type": "categorical",
+         "options": [str(c) for c in pre.cat_encoders["clase_tornillo"].classes_]},
+    ]
+
+
+def options(bundle: dict = None) -> dict:
+    """Valores validos (compatibilidad). El servidor usa input_schema()."""
+    pre = _pre(bundle)
+    perfiles = _profile_names()
     return {
         "BEAM": perfiles,
         "COLUMN": perfiles,

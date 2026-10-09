@@ -28,8 +28,10 @@ production/
    ```
 2. Abre `http://localhost:8080/web/conexiones_tr.html` (interfaz web) o el Excel de
    `excel_client/` (ver `excel_client/README.md`).
-3. Las predicciones devuelven la **tabla completa**: inputs enviados/imputados + campos
-   predichos.
+3. Las predicciones devuelven siempre las **63 columnas de CODAME** (`Tabla_MOMENT_M1`):
+   el servidor las traduce, imputa y ordena (catálogo en `server/data`).
+4. En la web, tras pre-diseñar, la tabla es **editable**; el botón **2. Comprobar AISC**
+   (`POST /check`) devuelve el informe por fila (cumple/no cumple + ratios).
 
 Detalles del servidor, contrato y multi-modelo: **`server/README.md`**.
 Documentación interactiva de la API: `http://localhost:8080/docs`.

@@ -73,42 +73,56 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | GET | `/health` | Estado, modelos instalados/cargados y nº de filas del dataset |
 | GET | `/models` | Modelos instalados y cargados; modelo por defecto |
 | GET | `/model` | Contrato del modelo por defecto (inputs/opcionales/outputs) |
-| GET | `/options?model=...` | Valores admitidos para desplegables (del modelo) |
+| GET | `/schema?model=...` | Inputs del modelo (tipo/descripción/opciones) + columnas de resultado |
 | GET | `/` y `/web/...` | Interfaz web (`web/conexiones_tr.html`) |
 | POST | `/model/activate` | `{"name":"V11"}` → carga/recarga un modelo |
-| POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve la tabla |
+| POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve las 63 columnas CODAME |
+| POST | `/check` | `{"rows":[...]}` (filas CODAME editadas) → comprobación AISC 360-10 |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
 | GET | `/dataset/summary` | Resumen del dataset acumulado |
 
 Sin autenticación (API abierta en la red interna). Documentación interactiva en `/docs`
 (Swagger) y `/redoc`.
 
-## `POST /predict`
+## `GET /schema?model=...`
 
-Cuerpo: el **esquema de tabla** = inputs que espera el modelo (`raw_inputs`) + campos
-opcionales. Los no obligatorios pueden ir en blanco (se aplican defaults/0).
+Esquema del modelo: los **inputs** (cada uno con `key`, `description`, `type` y `options`
+si es categórico) y las **columnas de resultado** (fijas). El input lo define cada modelo
+(lo puede transformar o no) **+ `UNICODE`** siempre.
 
 ```json
 {"model":"V11",
- "rows":[{"UNICODE":"U1","BEAM":"IPE200","COLUMN":"HEA100",
+ "inputs":[{"key":"UNICODE","description":"Identificador unico de la union","type":"text"},
+           {"key":"Normativas","description":"Normativa aplicable (columna Standards)","type":"categorical","options":["AISC-360-05/10"]},
+           {"key":"BEAM","description":"Perfil de la viga","type":"categorical","options":["HEA100","..."]},
+           {"key":"ratio_moment","description":"Relacion momento/demanda (0-1)","type":"number"}],
+ "result_columns":["Unicode","Standards","...","Estado_IA"]}
+```
+
+La web construye el formulario dinámicamente a partir de este esquema.
+
+## `POST /predict`
+
+Cuerpo: `{"model":"V11","rows":[{...inputs del /schema...}]}`. Los campos vacíos se
+omiten; `UNICODE` y los inputs de predicción son obligatorios.
+
+```json
+{"model":"V11",
+ "rows":[{"UNICODE":"U1","Normativas":"AISC-360-05/10","BEAM":"IPE200","COLUMN":"HEA100",
           "ratio_moment":0.82,"ratio_shear":0.25,"ratio_axial":0.03,
           "grado_acero":"S355JR","clase_tornillo":"10.9"}]}
 ```
 
-- `UNICODE` es **obligatorio** (trazabilidad); el resto de `raw_inputs` también, salvo
-  los declarados `optional_inputs` (en V11: `grado_acero`, `clase_tornillo`, con
-  defaults `S355JR` / `A325M`).
-- `ratio_*` se dan en la **escala con la que se entrenó** el modelo (0–1).
-
-Respuesta `200`: por cada fila, **columnas de tabla** = inputs enviados (o defaults) +
-campos predichos. **No** se incluyen features internas.
+Respuesta `200`: por cada fila, **las 63 columnas de CODAME** (`Tabla_MOMENT_M1`),
+idénticas para cualquier modelo. La traducción la hace el **servidor** (`codame.to_codame`,
+usando el catálogo de `server/data`) e **imputa** lo que el modelo no predice (0/vacío/
+constantes).
 
 ```json
 {"model_name":"V11",
- "rows":[{"UNICODE":"U1","BEAM":"IPE200","COLUMN":"HEA100","ratio_moment":0.82,
-          "grado_acero":"S355JR","clase_tornillo":"A325M",
-          "standard":"AISC-360-05/10","Bolt":20,"n_alma":2,"n_cantonera":1,
-          "g":90.0,"e":40.0,"p1":85.0,"Hole":22,"num_filas_tornillos":5}]}
+ "rows":[{"Unicode":"U1","Standards":"AISC-360-05/10","BoltName_ep":"M20",
+          "MzEd_Porcen":82.0,"pfi":52.38,"ThicknessName_t_ep":"15mm",
+          "ntensionrows":2,"BoltThreads":true}]}
 ```
 
 ### Error de contrato → HTTP 422
@@ -116,26 +130,47 @@ campos predichos. **No** se incluyen features internas.
 Si a alguna fila le falta un input requerido del modelo seleccionado:
 
 ```json
-{"detail":"Faltan inputs requeridos por el modelo 'V11'",
- "model":"V11",
+{"detail":"Faltan inputs requeridos por el modelo 'V11'","model":"V11",
  "missing":{"fila 1":["UNICODE","ratio_moment"]},
- "expected":["UNICODE","BEAM","COLUMN","ratio_moment","ratio_shear","ratio_axial",
-             "grado_acero","clase_tornillo"]}
+ "expected":["UNICODE","Normativas","BEAM","COLUMN","ratio_moment","ratio_shear",
+             "ratio_axial","grado_acero","clase_tornillo"]}
 ```
 
-También devuelve 422 si el perfil no está en los catálogos Tekla o si un valor de
-material **no es uno de los vistos en entrenamiento** (V11: `S355JR`; `10.9`/`A325M`).
-Otros códigos: `400` filas vacías, `404` modelo no disponible, `503` sin modelos.
+También 422 si el perfil no está en el catálogo Tekla o si el material no es uno de los
+vistos en entrenamiento (V11: `S355JR`; `10.9`/`A325M`). Otros códigos: `400` filas
+vacías, `404` modelo no disponible, `503` sin modelos. **El servidor nunca devuelve 500
+por culpa del modelo**: si la traducción a CODAME falla o no cubre alguna columna, esa
+columna vuelve con su valor simbólico por defecto.
 
-## Opciones para los desplegables (`GET /options?model=V11`)
+## Resultados CODAME (63 columnas)
 
-El adaptador publica los valores válidos; se usan tal cual en la web:
+`production/server/codame_schema.py` define `CODAME_COLUMNS` (orden canónico) y
+`CODAME_DEFAULTS` (valores simbólicos de la red de seguridad). El mapeo
+`input + diseño → CODAME` vive en `production/server/codame.py` y usa el catálogo de
+`production/server/data` (`catalogo.py`). Referencia del mapeo:
+`doc/codame/mapeo_columnas_codame.md`.
+
+## `POST /check` — comprobación AISC 360-10
+
+Recibe las filas del esquema **CODAME** (la tabla predicha, ya editada por el revisor) y
+devuelve, por fila: `cumple`, `ratio_pesimo`, `descripcion_ratio_pesimo` y el detalle
+(`ratios`, `complementarios`). No depende del modelo (usa el catálogo del servidor).
 
 ```json
-{"BEAM":["HEA100","IPE200","..."],"COLUMN":["HEA100","IPE200","..."],
- "grado_acero":["S355JR"],"clase_tornillo":["10.9","A325M"],
- "defaults":{"grado_acero":"S355JR","clase_tornillo":"A325M"}}
+{"rows":[{"Unicode":"U1","Standards":"AISC-360-05/10","b_ep":155.0,"p2_ep":80.0,
+          "pfo":39.1,"pfi":52.4,"pb":90.0,"p3":105.0,"ThicknessName_t_ep":"15mm",
+          "BoltName_ep":"M20","MzEd_Porcen":82.0,"fy":355.0,"fu":490.0}]}
 ```
+
+Respuesta `200`: `{"status":"ok","rows":[{...,"cumple":true,"ratio_pesimo":0.62,
+"descripcion_ratio_pesimo":"...","ratios":[...],"complementarios":[...]}]}`. Si una fila
+no se puede comprobar, se devuelve un informe con `cumple:false` y el error (sin 500).
+
+## Flujo de la web
+
+1. Formulario dinámico (`/schema`) → **1. Pre-diseñar** (`/predict`) → tabla CODAME
+   **editable** (el revisor corrige lo que haga falta).
+2. **2. Comprobar AISC 360-10** (`/check`) sobre la tabla editada → informe por fila.
 
 ## Añadir un modelo nuevo (carpeta V)
 
@@ -143,24 +178,26 @@ El adaptador publica los valores válidos; se usan tal cual en la web:
 
    ```python
    MODEL_NAME = "V12"
-   RAW_INPUT_COLUMNS = [...]        # inputs requeridos (esquema de tabla)
+   RAW_INPUT_COLUMNS = [...]        # inputs del modelo (+ UNICODE)
    OPTIONAL_INPUT_COLUMNS = [...]   # opcionales con default
    OUTPUT_FIELDS = [...]            # campos que predice
    class InputContractError(ValueError): ...
 
+   def input_schema(bundle=None) -> list: ...       # [{key,description,type,options?}]
    def to_internal(table_df) -> pd.DataFrame: ...   # tabla -> features internas
-   def from_internal(design_df) -> pd.DataFrame: ...# salidas -> columnas de tabla
+   def from_internal(design_df) -> pd.DataFrame: ...# salidas -> claves canonicas del diseno
    def load() -> dict: ...                          # {"model","pre","device"}
    def predict(features_df, bundle) -> pd.DataFrame: ...
    def contract() -> dict: ...   # {"name","raw_inputs","optional_inputs","outputs"}
-   def options(bundle=None) -> dict: ...            # valores válidos (opcional)
    ```
 
 2. `make install-model MODEL=V12 [WEIGHTS=... PREPROC=... DATA=...]`
 3. `POST /model/activate {"name":"V12"}` (o reiniciar).
 
 No hace falta tocar `main.py` ni `predictor.py`: el servidor sólo conoce la interfaz del
-`adapter.py`.
+`adapter.py`. La traducción a las 63 columnas CODAME (y la comprobación) las hace el
+servidor con su catálogo (`production/server/data`), así el resultado es idéntico entre
+modelos.
 
 ## Notas técnicas
 
