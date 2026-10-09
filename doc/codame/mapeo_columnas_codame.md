@@ -8,8 +8,8 @@ que asumimos**.
 ## Inventario de las 54 columnas
 
 **Mapeadas de datos (fiables):**
-`Unicode, Standards, BEAM, COLUMN, MzEd_Porcen*, FyEd_Porcen*, FxEd_Porcen*, BoltName_ep,
-p2_ep(g), b_ep(Bp), Lp, ThicknessName_t_ep(tp), dev(e), Lh, pfo(d), pfi, p2..p12,
+`Unicode, Standards(Normativas), BEAM, COLUMN, MzEd_Porcen*, FyEd_Porcen*, FxEd_Porcen*, BoltName_ep,
+p2_ep(g), b_ep(Bp), Lp, ThicknessName_t_ep(tp), dev(e), Lh, pfo(d), pfi(p1-d-BEAM_tf_mm), p2..p12,
 espesores (tws/ts/tbs/tst), fy/fu/fyp/fup, BoltGrade`
 
 **Rellenadas con 0 (NO las tenemos):**
