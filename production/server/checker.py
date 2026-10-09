@@ -1,7 +1,7 @@
 """
 Modulo de comprobacion estructural (AISC 360-10, calculador Python).
 
-Convierte una fila del esquema **CODAME** (Tabla_MOMENT_M1, editada por el revisor) a
+Convierte una fila del esquema CODAME (Tabla_MOMENT_M1, editada por el revisor) a
 `ConexionInput` y ejecuta `CalculadorAISC36010`. Usa el catalogo del servidor
 (`catalogo.py`, datos en `production/server/data`); no depende de ningun modelo.
 """
@@ -51,17 +51,41 @@ def _get_perfil(nombre: str, is_column: bool = False) -> Perfil:
         except (TypeError, ValueError):
             return default
 
+    h = g("d_mm")
+    b = g("bf_mm")
+    tf = g("tf_mm")
+    tw = g("tw_mm")
+    r = g("r1_mm")
+    # OJO: los catalogos Tekla traen A en cm2 y wply en cm3 (pese al sufijo _mm).
+    A = g("A_mm") * 100.0       # cm2 -> mm2
+    Z = g("wply_mm") * 1000.0   # cm3 -> mm3
+
+    prmin = 0.0
+    prmax = 0.0
+
+    if is_column:
+        prmin = g("prmin")
+        prmax = g("prmax")
+
+        # Si el catalogo no define prmin/prmax (o valen 0), se derivan de la geometria:
+        # Prmin: espacio libre minimo entre tornillos dada la garganta del alma (tw + 2r + holguras)
+        # Prmax: ancho del ala menos las distancias minimas al borde exterior
+        if prmin <= 0:
+            prmin = max(50.0, tw + 2.0 * r + 60.0)
+        if prmax <= 0 or prmax <= prmin:
+            prmax = max(prmin + 30.0, b - 2.0 * 30.0)
+
     return Perfil(
         nombre=str(nombre),
-        h=g("d_mm"),
-        b=g("bf_mm"),
-        tf=g("tf_mm"),
-        tw=g("tw_mm"),
-        r=g("r1_mm"),
-        A=g("A_mm"),       # mm²
-        Z=g("wply_mm"),    # mm³
-        Prmin=0.0,
-        Prmax=0.0,
+        h=h,
+        b=b,
+        tf=tf,
+        tw=tw,
+        r=r,
+        A=A,
+        Z=Z,
+        Prmin=prmin,
+        Prmax=prmax,
     )
 
 

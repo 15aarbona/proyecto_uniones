@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cálculo de conexiones · Técnicas Reunidas</title>
+<!-- Librería SheetJS para lectura y exportación de Excel/CSV localmente -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --tr-navy:#002B5C;
@@ -46,6 +48,8 @@ h2{margin:0 0 14px;font-size:16px;color:var(--tr-navy)}
 .btn.red{background:var(--tr-red)}
 .btn.ghost{background:#fff;color:var(--tr-navy);border:1px solid #B7C3D2}
 .btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-icon{background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:3px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:6px;font-weight:normal}
+.btn-icon:hover{background:rgba(255,255,255,.35)}
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:13.5px}
 th{background:var(--tr-navy);color:#fff;text-align:left;padding:8px 10px;white-space:nowrap;font-weight:600}
@@ -94,6 +98,8 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="grid" id="form"></div>
     <div class="actions">
       <button class="btn" id="add">Añadir a la tabla</button>
+      <button class="btn ghost" id="btnUploadExcel">📥 Cargar Excel / CSV</button>
+      <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" style="display:none">
       <button class="btn ghost" id="reset">Limpiar campos</button>
     </div>
   </section>
@@ -119,6 +125,9 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   <section id="checkSec" style="display:none">
     <h2>Resultados de la comprobación AISC 360-10</h2>
     <div class="tablewrap" id="checkRes"></div>
+    <div class="actions" style="margin-top:14px;">
+      <button class="btn green" id="exportCheckExcel">📊 Descargar comprobaciones en Excel</button>
+    </div>
   </section>
 </main>
 
@@ -192,10 +201,74 @@ function readForm(){
 }
 
 /* =====================================================================
+   Carga de archivos Excel / CSV (SheetJS)
+   ===================================================================== */
+$("btnUploadExcel").onclick = () => $("excelFileInput").click();
+
+$("excelFileInput").onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const data = new Uint8Array(evt.target.result);
+      const workbook = XLSX.read(data, { type: "array" });
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      const json = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+
+      if (!json.length) {
+        setStatus("bad", "El archivo Excel está vacío o no se pudo leer.");
+        return;
+      }
+
+      if (!SCHEMA.inputs.length) {
+        setStatus("bad", "No hay un esquema de modelo cargado.");
+        return;
+      }
+
+      let count = 0;
+      json.forEach(rawRow => {
+        const rowNorm = {};
+        Object.keys(rawRow).forEach(k => {
+          rowNorm[k.trim().toLowerCase()] = rawRow[k];
+        });
+
+        const newRow = {};
+        SCHEMA.inputs.forEach(c => {
+          const keyLower = c.key.toLowerCase();
+          if (rowNorm[keyLower] !== undefined && rowNorm[keyLower] !== "") {
+            let val = rowNorm[keyLower];
+            if (c.type === "number" && typeof val !== "number") {
+              const num = Number(String(val).replace(",", "."));
+              if (!isNaN(num)) val = num;
+            }
+            newRow[c.key] = val;
+          }
+        });
+
+        if (Object.keys(newRow).length > 0) {
+          state.rows.push(newRow);
+          count++;
+        }
+      });
+
+      renderTable();
+      setStatus("ok", `Se han cargado ${count} filas desde "${file.name}".`);
+    } catch (err) {
+      setStatus("bad", "Error procesando el archivo Excel/CSV", err.message);
+    }
+    $("excelFileInput").value = "";
+  };
+  reader.readAsArrayBuffer(file);
+};
+
+/* =====================================================================
    Tablas
    ===================================================================== */
 function table(rows, cols, withDelete){
-  if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario y pulsa “Añadir a la tabla”.</div>`;
+  if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario o carga un Excel.</div>`;
   const head = cols.map(c => `<th>${escHtml(c)}</th>`).join("") + (withDelete ? "<th></th>" : "");
   const body = rows.map((r, i) =>
     "<tr>" + cols.map(c => `<td>${escHtml(r[c] ?? "")}</td>`).join("") +
@@ -212,6 +285,19 @@ function renderTable(){
   $("tbl").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { state.rows.splice(+b.dataset.del, 1); renderTable(); });
 }
 
+/* Rellena unívocamente una columna para todas las filas de los resultados */
+function bulkFillColumn(colName){
+  if (!state.results.length) return;
+  const sampleVal = state.results[0][colName] ?? "";
+  const newVal = prompt(`Introduce el nuevo valor para la columna '${colName}' en TODAS las filas (${state.results.length} filas):`, sampleVal);
+  if (newVal === null) return; // Cancelado por el usuario
+
+  state.results.forEach(r => {
+    r[colName] = newVal;
+  });
+  renderResults();
+}
+
 function renderResults(){
   const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
@@ -219,15 +305,26 @@ function renderResults(){
   if (!res.length) return;
   const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns
                                             : [...new Set(res.flatMap(r => Object.keys(r)))];
-  const head = cols.map(c => `<th>${escHtml(c)}</th>`).join("");
+  
+  // Encabezados con botón de Rellenar todo
+  const head = cols.map(c => `
+    <th>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
+        <span>${escHtml(c)}</span>
+        <button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna '${escAttr(c)}'">⚡ Rellenar</button>
+      </div>
+    </th>
+  `).join("");
+
   const body = res.map((r, i) =>
     "<tr>" + cols.map(c => {
       const v = r[c] ?? "";
       return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
     }).join("") + "</tr>"
   ).join("");
+
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-  // Los valores editados se guardan en el estado (los usa /check).
+  
   $("res").querySelectorAll("input.cell").forEach(inp => {
     inp.addEventListener("input", () => {
       state.results[+inp.dataset.row][inp.dataset.col] = inp.value;
@@ -271,6 +368,59 @@ function renderCheckResults(){
   html += `</tbody></table>`;
   $("checkRes").innerHTML = html;
 }
+
+/* =====================================================================
+   Exportación de Comprobaciones a Excel
+   ===================================================================== */
+$("exportCheckExcel").onclick = () => {
+  const res = state.checked;
+  if (!res.length) {
+    setStatus("bad", "No hay comprobaciones para exportar.");
+    return;
+  }
+
+  const exportRows = res.map((r, idx) => {
+    const rowObj = {
+      "UNICODE": r.Unicode || r.UNICODE || (idx + 1),
+      "Estado Global": r.cumple ? "CUMPLE" : "NO CUMPLE",
+      "Ratio Pésimo": r.ratio_pesimo ?? "",
+      "Chequeo Crítico": r.descripcion_ratio_pesimo || ""
+    };
+
+    // Agregar campos base de geometría/materiales
+    Object.keys(r).forEach(k => {
+      if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo"].includes(k)) {
+        rowObj[k] = r[k];
+      }
+    });
+
+    // Agregar los 18 ratios de resistencia como columnas individuales
+    if (Array.isArray(r.ratios)) {
+      r.ratios.forEach(ratioItem => {
+        const keyName = `Ratio: ${ratioItem.descripcion}`;
+        rowObj[keyName] = (ratioItem.ratio !== null && ratioItem.ratio !== undefined) ? ratioItem.ratio : "N/A";
+      });
+    }
+
+    // Agregar las 33 comprobaciones geométricas como columnas individuales
+    if (Array.isArray(r.complementarios)) {
+      r.complementarios.forEach(compItem => {
+        const keyName = `Geometría: ${compItem.descripcion}`;
+        rowObj[keyName] = compItem.resultado;
+      });
+    }
+
+    return rowObj;
+  });
+
+  const worksheet = XLSX.utils.json_to_sheet(exportRows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Comprobaciones AISC360");
+  
+  const dateStr = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `Comprobaciones_AISC36010_${dateStr}.xlsx`);
+  setStatus("ok", "Exportación a Excel completada con éxito.");
+};
 
 function setStatus(kind, text, detail){
   const s = $("status");

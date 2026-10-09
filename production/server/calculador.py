@@ -247,11 +247,11 @@ class CalculadorAISC36010:
         if self.inp.MzEd_Porcen is not None:
             self.MzEd = self.inp.MzEd_Porcen / 100.0 * mod_aux.momentores_AME(self.viga.Z, self.fy) / 1000.0
         if self.inp.FyEd_Porcen is not None:
-            self.FyEd = self.inp.FyEd_Porcen / 100.0 * mod_aux.ResisCortanteEjeFuerte_AME(self.viga.h, self.viga.tw, self.fy) / 1000.0
+            self.FyEd = self.inp.FyEd_Porcen / 100.0 * mod_aux.ResisCortanteEjeFuerte_AME(self.viga.h, self.viga.tw, self.fy)  # ya en kN
         if self.inp.FxEd_Porcen is not None:
-            self.FxEd = self.inp.FxEd_Porcen / 100.0 * mod_aux.traccionres_AME(self.viga.A, self.fy) / 1000.0
+            self.FxEd = self.inp.FxEd_Porcen / 100.0 * mod_aux.traccionres_AME(self.viga.A, self.fy)  # ya en kN
         if self.inp.FzEd_Porcen is not None:
-            self.FzEd = self.inp.FzEd_Porcen / 100.0 * mod_aux.ResisCortanteEjeDebil_AME(self.viga.b, self.viga.tf, self.fy) / 1000.0
+            self.FzEd = self.inp.FzEd_Porcen / 100.0 * mod_aux.ResisCortanteEjeDebil_AME(self.viga.b, self.viga.tf, self.fy)  # ya en kN
 
     def calcular_conexion(self) -> ResultadoConexion:
         self._cargar_perfiles()

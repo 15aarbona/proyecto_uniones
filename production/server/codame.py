@@ -6,9 +6,16 @@ formato correctos; `codame_schema.fill_missing` actua como red de seguridad.
 
 Referencia: `doc/codame/mapeo_columnas_codame.md`.
 """
+import logging
 import math
 
 from catalogo import ACERO_TABLE, DEFAULT_GRADO_ACERO, DEFAULT_CLASE_TORNILLO, get_profile
+
+log = logging.getLogger("ai-server")
+
+# Red de seguridad: pfi minimo (mm) que se garantiza aqui si el modelo entrega un
+# p1 incoherente. El minimo "de diseno" lo aplica el adaptador del modelo (PFI_MIN_MM).
+PFI_MIN_SEGURIDAD = 5.0
 
 
 def _num(v, default=0.0):
@@ -61,7 +68,6 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     beam_d = _num(geom.get("d_mm")) if geom is not None else 0.0
 
     e = _num(d.get("e"))
-    p1 = _num(d.get("p1"))
     p = {n: _num(d.get(f"p{n}")) for n in range(1, _n_years() + 1)}
 
     grado = str(inp.get("grado_acero") or DEFAULT_GRADO_ACERO).strip()
@@ -77,6 +83,18 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
 
     lh = _num(d.get("Lh"))  # V11 no predice Lh -> 0
     pfo = _num(d.get("d"))
+
+    # pfi = p1 - pfo - tf debe ser siempre positivo. Si el modelo entrega un p1
+    # incoherente se corrige aqui (red de seguridad) y se deja constancia en el log.
+    if p[1] <= 0:
+        log.error("p1 ausente o 0 en el diseno (UNICODE=%s): pfi no es fiable",
+                  inp.get("UNICODE"))
+    elif p[1] - pfo - tf < PFI_MIN_SEGURIDAD:
+        nuevo_p1 = math.ceil((pfo + tf + PFI_MIN_SEGURIDAD) / 5.0) * 5.0
+        log.warning("pfi=%.1f < %.1f; p1 %.1f -> %.1f (UNICODE=%s)",
+                    p[1] - pfo - tf, PFI_MIN_SEGURIDAD, p[1], nuevo_p1, inp.get("UNICODE"))
+        p[1] = nuevo_p1
+    p1 = p[1]
     pfi = p1 - pfo - tf
     lp = 2.0 * e + sum(p.values())
 
@@ -117,7 +135,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
         "w4": 0.0,
         "wh": 0.0,
         "FactorCantoCantonera": 0.7 if lh != 0 else 0.0,
-        "ntensionrows": _tension_rows(d, beam_d),
+        "ntensionrows": _tension_rows({**d, "p1": p1}, beam_d),
         "fy": fy,
         "fu": fu,
         "fyp": fy,
