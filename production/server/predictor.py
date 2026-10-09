@@ -1,10 +1,4 @@
-"""Inferencia en produccion sobre modelos intercambiables.
-
-El preproceso y la inferencia viven en el `adapter.py` de cada modelo. Aqui se valida
-el contrato de tabla, se enruta al modelo pedido y se compone la respuesta con las
-columnas de la tabla: inputs enviados (o imputados) + campos predichos por el modelo.
-No se incluyen las features internas.
-"""
+"""Inferencia y comprobación estructural en producción sobre modelos intercambiables."""
 
 import logging
 import math
@@ -14,13 +8,12 @@ import numpy as np
 import pandas as pd
 
 import model_registry
+from checker import check_rows as perform_check
 
 log = logging.getLogger("ai-server")
 
 
 class InputContractError(ValueError):
-    """Los inputs recibidos no cumplen el contrato del modelo seleccionado."""
-
     def __init__(self, message: str, model: str = None, missing=None, expected=None):
         super().__init__(message)
         self.model = model
@@ -39,7 +32,6 @@ def _is_missing(value: Any) -> bool:
 
 
 def _clean_value(value: Any) -> Any:
-    """Garantiza compatibilidad JSON (sin NaN/inf)."""
     if value is None:
         return None
     if isinstance(value, (float, np.floating)):
@@ -65,7 +57,6 @@ def _clean_dict(data: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_rows(
     rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str]
 ) -> List[Dict[str, Any]]:
-    """Renombra alias (Unicode -> UNICODE...) sin distinguir mayusculas/espacios."""
     alias = {c.lower(): c for c in list(raw_inputs) + list(optional_inputs)}
     normalized = []
     for row in rows:
@@ -80,9 +71,9 @@ def _validate_contract(
     rows: List[Dict[str, Any]], raw_inputs: List[str], optional_inputs: List[str], model: str
 ) -> None:
     if not rows:
-        raise InputContractError("La peticion no trae filas (rows vacio)", model=model, expected=raw_inputs)
+        raise InputContractError("La petición no trae filas (rows vacío)", model=model, expected=raw_inputs)
     optional = set(optional_inputs)
-    required = [c for c in raw_inputs if c not in optional]  # UNICODE siempre obligatorio
+    required = [c for c in raw_inputs if c not in optional]
     missing = {}
     for i, row in enumerate(rows):
         absent = [c for c in required if _is_missing(row.get(c))]
@@ -123,6 +114,11 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
         merged.update(table_out.iloc[i].to_dict())
         output.append(_clean_dict(merged))
     return output
+
+
+def check_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    results = perform_check(rows)
+    return [_clean_dict(r) for r in results]
 
 
 def model_status() -> Dict[str, Any]:

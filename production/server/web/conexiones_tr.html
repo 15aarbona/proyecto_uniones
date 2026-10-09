@@ -6,10 +6,10 @@
 <title>Cálculo de conexiones · Técnicas Reunidas</title>
 <style>
 :root{
-  /* ===== COLORES CORPORATIVOS (ajústalos aquí) ===== */
   --tr-navy:#002B5C;
   --tr-blue:#0066B3;
   --tr-red:#D52B1E;
+  --tr-green:#2E8B57;
   --tr-bg:#F2F5F9;
   --tr-line:#D5DDE8;
   --tr-text:#1B2733;
@@ -45,6 +45,7 @@ h2{margin:0 0 14px;font-size:16px;color:var(--tr-navy)}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px;align-items:center}
 .btn{padding:10px 20px;border:0;border-radius:3px;font:inherit;font-weight:600;cursor:pointer;color:#fff;background:var(--tr-blue)}
 .btn:hover{filter:brightness(.92)}
+.btn.green{background:var(--tr-green)}
 .btn.red{background:var(--tr-red)}
 .btn.ghost{background:#fff;color:var(--tr-navy);border:1px solid #B7C3D2}
 .btn:disabled{opacity:.45;cursor:not-allowed}
@@ -55,16 +56,15 @@ td{padding:7px 10px;border-bottom:1px solid var(--tr-line);white-space:nowrap}
 tr:nth-child(even) td{background:#F7F9FC}
 td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-size:17px}
 .empty{color:var(--tr-muted);padding:6px 0}
+.badge{display:inline-block;padding:3px 8px;border-radius:3px;font-weight:600;font-size:12px;color:#fff}
+.badge.ok{background:var(--tr-green)}
+.badge.bad{background:var(--tr-red)}
 #status{margin-top:14px;padding:10px 14px;border-left:4px solid var(--tr-blue);background:#EAF3FB;display:none}
 #status.bad{border-color:var(--tr-red);background:#FDEDEB}
-#status.ok{border-color:#2E8B57;background:#EAF6EF}
+#status.ok{border-color:var(--tr-green);background:#EAF6EF}
 #status pre{margin:6px 0 0;white-space:pre-wrap;font-size:12.5px}
-@media(max-width:820px){
-  body{flex-direction:column}
-  aside{width:auto}
-  nav{padding:6px 0}
-  main{padding:20px 14px 50px}
-}
+details{margin-top:8px}
+summary{cursor:pointer;font-weight:600;color:var(--tr-blue)}
 </style>
 </head>
 <body>
@@ -78,7 +78,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   <div class="srv">
     <label for="srvUrl">URL del servidor</label>
     <input id="srvUrl">
-    <label for="model">Modelo</label>
+    <label for="model">Modelo de IA</label>
     <select id="model"></select>
   </div>
 </aside>
@@ -97,39 +97,32 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   </section>
 
   <section>
-    <h2>Combinaciones a calcular (<span id="count">0</span>)</h2>
+    <h2>Combinaciones a pre-diseñar (<span id="count">0</span>)</h2>
     <div class="tablewrap" id="tbl"></div>
     <div class="actions">
-      <button class="btn red" id="send" disabled>Enviar al servidor</button>
+      <button class="btn red" id="send" disabled>1. Pre-diseñar con IA (/predict)</button>
       <button class="btn ghost" id="clear" disabled>Vaciar tabla</button>
     </div>
     <div id="status" role="status"></div>
   </section>
 
   <section id="resSec" style="display:none">
-    <h2>Resultados del servidor</h2>
+    <h2>Predicción del modelo (revisar/editar)</h2>
     <div class="tablewrap" id="res"></div>
+    <div class="actions">
+      <button class="btn green" id="checkBtn">2. Comprobar AISC 360-10 (/check)</button>
+    </div>
+  </section>
+
+  <section id="checkSec" style="display:none">
+    <h2>Resultados de la comprobación AISC 360-10</h2>
+    <div class="tablewrap" id="checkRes"></div>
   </section>
 </main>
 
 <script>
-/* =====================================================================
-   1) CONFIGURACIÓN DEL SERVIDOR
-   ===================================================================== */
-const SERVER_URL = location.protocol.startsWith("http") ? location.origin : "http://localhost:8080";   // URL base de tu servidor FastAPI
+const SERVER_URL = location.protocol.startsWith("http") ? location.origin : "http://localhost:8080";
 
-/* =====================================================================
-   2) CONEXIONES Y OPCIONES DE LOS DESPLEGABLES
-   ---------------------------------------------------------------------
-   >>> AQUÍ RELLENAS LAS OPCIONES. <<<
-   Cada campo con type:"select" tiene una lista  options: [ ]  vacía.
-   Mete los valores que quieras que se puedan elegir, por ejemplo:
-       options: ["IPE200", "IPE240", "HEA200"]
-       options: [0, 25, 50, 75, 100]      (los números se envían como número)
-   `key` es el nombre exacto de la columna que se envía al servidor.
-   Para añadir otra página de conexión, copia un bloque dentro de CONEXIONES.
-   ===================================================================== */
-// Listas de ejemplo: se sustituyen por las del modelo en GET /options al cargar la página.
 const PERFILES_EJEMPLO = ["IPE200","IPE300","HEA200","HEA300","HEB280","HEB320","W610X195","W690X152"];
 const GRADOS_EJEMPLO = ["S355JR"];
 const CLASES_EJEMPLO = ["10.9","A325M"];
@@ -138,7 +131,7 @@ const CONEXIONES = [
   {
     id: "momento-atornillada",
     nombre: "Conexión a momento atornillada",
-    descripcion: "Viga–columna. Los campos no obligatorios pueden quedar en blanco: los completa el modelo.",
+    descripcion: "Predicción inteligente por IA y comprobación estructural AISC 360-10.",
     endpoint: "/predict",
     campos: [
       { key: "UNICODE",        label: "UNICODE",        type: "text",   hint: "identificador" },
@@ -151,17 +144,12 @@ const CONEXIONES = [
       { key: "clase_tornillo", label: "clase_tornillo", type: "select", options: CLASES_EJEMPLO.slice(), required: false },
     ],
   },
-  // { id: "...", nombre: "Otra conexión", descripcion: "...", endpoint: "/predict", campos: [ ... ] },
 ];
 
-
-/* =====================================================================
-   3) LÓGICA (no hace falta tocar)
-   ===================================================================== */
 const $ = id => document.getElementById(id);
-const state = {};                       // id conexión -> { rows: [], results: [] }
+const state = {};
 let current = CONEXIONES[0];
-const S = () => state[current.id] ||= { rows: [], results: [] };
+const S = () => state[current.id] ||= { rows: [], results: [], checkedResults: [] };
 
 $("srvUrl").value = SERVER_URL;
 
@@ -225,11 +213,11 @@ function readForm(){
 }
 
 function table(rows, cols, withDelete){
-  if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario y pulsa “Añadir a la tabla”.</div>`;
+  if (!rows.length) return `<div class="empty">No hay combinaciones en la tabla.</div>`;
   const head = cols.map(c => `<th>${c}</th>`).join("") + (withDelete ? "<th></th>" : "");
   const body = rows.map((r, i) =>
     "<tr>" + cols.map(c => `<td>${r[c] ?? ""}</td>`).join("") +
-    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila" aria-label="Quitar fila ${i+1}">✕</button></td>` : "") + "</tr>"
+    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila">✕</button></td>` : "") + "</tr>"
   ).join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
@@ -250,6 +238,44 @@ function renderResults(){
   $("res").innerHTML = table(res, cols, false);
 }
 
+function renderCheckResults(){
+  const res = S().checkedResults;
+  $("checkSec").style.display = res.length ? "" : "none";
+  if (!res.length) return;
+
+  let html = `<table><thead><tr>
+    <th>UNICODE</th><th>Estado</th><th>Ratio Pésimo</th><th>Chequeo Crítico</th><th>Detalle Comprobaciones</th>
+  </tr></thead><tbody>`;
+
+  res.forEach((r, i) => {
+    const badge = r.cumple ? `<span class="badge ok">CUMPLE</span>` : `<span class="badge bad">NO CUMPLE</span>`;
+    
+    let ratiosList = (r.ratios || []).map(f => `<li><b>${f.descripcion}:</b> ${f.ratio !== null ? f.ratio.toFixed(3) : 'N/A'}</li>`).join("");
+    let compList = (r.complementarios || []).map(c => `<li><b>${c.descripcion}:</b> ${c.resultado}</li>`).join("");
+
+    html += `<tr>
+      <td>${r.UNICODE || (i+1)}</td>
+      <td>${badge}</td>
+      <td><b>${r.ratio_pesimo ?? 'N/A'}</b></td>
+      <td>${r.descripcion_ratio_pesimo || 'N/A'}</td>
+      <td>
+        <details>
+          <summary>Ver 18 Ratios y 33 Geométricos</summary>
+          <div style="padding:8px 0;">
+            <p style="margin:4px 0;"><b>Resistencias y Ratios:</b></p>
+            <ul style="margin:0;padding-left:18px;">${ratiosList}</ul>
+            <p style="margin:8px 0 4px;"><b>Geometría y Complementarias:</b></p>
+            <ul style="margin:0;padding-left:18px;">${compList}</ul>
+          </div>
+        </details>
+      </td>
+    </tr>`;
+  });
+
+  html += `</tbody></table>`;
+  $("checkRes").innerHTML = html;
+}
+
 function setStatus(kind, text, detail){
   const s = $("status");
   s.className = kind; s.style.display = text ? "block" : "none";
@@ -260,7 +286,7 @@ function setStatus(kind, text, detail){
 function renderAll(){
   $("title").textContent = current.nombre;
   $("sub").textContent = current.descripcion;
-  renderMenu(); renderForm(); renderTable(); renderResults(); setStatus("", "");
+  renderMenu(); renderForm(); renderTable(); renderResults(); renderCheckResults(); setStatus("", "");
 }
 
 $("add").onclick = () => {
@@ -269,11 +295,11 @@ $("add").onclick = () => {
   $("in_" + current.campos[0].key).focus();
 };
 $("reset").onclick = renderForm;
-$("clear").onclick = () => { S().rows = []; S().results = []; renderTable(); renderResults(); setStatus("", ""); };
+$("clear").onclick = () => { S().rows = []; S().results = []; S().checkedResults = []; renderTable(); renderResults(); renderCheckResults(); setStatus("", ""); };
 
 $("send").onclick = async () => {
   const st = S(); const btn = $("send");
-  btn.disabled = true; setStatus("", "Enviando " + st.rows.length + " combinaciones…");
+  btn.disabled = true; setStatus("", "Enviando predicción " + st.rows.length + " combinaciones…");
   try {
     const r = await fetch($("srvUrl").value.replace(/\/$/, "") + current.endpoint, {
       method: "POST",
@@ -283,19 +309,39 @@ $("send").onclick = async () => {
     const data = await r.json().catch(() => ({}));
     if (!r.ok){
       let detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data, null, 2);
-      if (data.missing) detail += "\n\nFaltan:\n" + JSON.stringify(data.missing, null, 2);
-      if (data.expected) detail += "\n\nEl modelo espera:\n" + data.expected.join(", ");
       setStatus("bad", `El servidor respondió ${r.status}`, detail);
     } else {
       st.results = data.rows || [];
       renderResults();
-      setStatus("ok", `Cálculo completado con el modelo ${data.model_name ?? ""}: ${st.results.length} filas devueltas.`);
+      setStatus("ok", `Predicción completada con el modelo ${data.model_name ?? ""}: ${st.results.length} uniones pre-diseñadas.`);
     }
   } catch (e){
-    setStatus("bad", "No se pudo conectar con el servidor",
-      "Comprueba la URL y que el servidor esté en marcha. Si abres este archivo desde otro origen, el servidor debe permitir CORS.\n\n" + e.message);
+    setStatus("bad", "No se pudo conectar con el servidor", e.message);
   }
   btn.disabled = !st.rows.length;
+};
+
+$("checkBtn").onclick = async () => {
+  const st = S(); const btn = $("checkBtn");
+  btn.disabled = true; setStatus("", "Comprobando " + st.results.length + " uniones con AISC 360-10…");
+  try {
+    const r = await fetch($("srvUrl").value.replace(/\/$/, "") + "/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows: st.results }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok){
+      setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2));
+    } else {
+      st.checkedResults = data.rows || [];
+      renderCheckResults();
+      setStatus("ok", `Comprobación AISC 360-10 finalizada con éxito.`);
+    }
+  } catch (e){
+    setStatus("bad", "Error enviando la comprobación", e.message);
+  }
+  btn.disabled = false;
 };
 
 async function loadModels(){
@@ -305,9 +351,7 @@ async function loadModels(){
     const sel = $("model");
     sel.innerHTML = (o.available_models || []).map(m => `<option value="${m}">${m}</option>`).join("");
     if (o.default_model && (o.available_models || []).includes(o.default_model)) sel.value = o.default_model;
-  } catch(e){
-    /* sin modelos: los campos usan las listas de ejemplo */
-  }
+  } catch(e){}
 }
 
 async function loadOptions(){
@@ -322,10 +366,7 @@ async function loadOptions(){
       }
     }));
     renderForm();
-    setStatus("ok", `Opciones cargadas del modelo ${model}.`);
-  } catch (e){
-    setStatus("bad", "No se pudieron cargar las opciones del servidor; se usa la lista de ejemplo", e.message);
-  }
+  } catch (e){}
 }
 $("srvUrl").onchange = loadOptions;
 $("model").onchange = loadOptions;

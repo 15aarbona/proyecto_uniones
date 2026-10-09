@@ -1,20 +1,4 @@
-"""Servidor HTTP central de inferencia con modelos intercambiables.
-
-Cada modelo es un paquete autocontenido en `models/<NAME>/` (lo instala el Makefile).
-Se cargan todos los modelos instalados y conviven en memoria; cada peticion se enruta
-al modelo indicado en el cuerpo o en la query. Se pueden recargar en caliente, sin
-reiniciar, con `POST /model/activate`.
-
-Endpoints:
-  GET  /health                  Estado del servidor
-  GET  /models                  Modelos instalados y cargados
-  GET  /model                   Contrato del modelo por defecto
-  GET  /options?model=...       Valores validos para los desplegables (del modelo)
-  POST /model/activate          Carga/recarga un modelo por nombre
-  POST /predict                 {"model": "...", "rows": [...]}
-  POST /validate                Guarda filas validadas (sin reentreno)
-  GET  /dataset/summary         Resumen del dataset acumulado
-"""
+"""Servidor HTTP central de inferencia y comprobación estructural."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -44,22 +28,15 @@ async def lifespan(app: FastAPI):
     try:
         model_registry.activate_configured()
         log.info("Modelos cargados: %s", model_registry.loaded_models())
-    except Exception as exc:  # noqa: BLE001
-        log.error("No se pudo cargar ningun modelo: %s", exc)
+    except Exception as exc:
+        log.error("No se pudo cargar ningún modelo: %s", exc)
     yield
 
 
 app = FastAPI(
-    title="Servidor de inferencia - conexiones",
+    title="Servidor de inferencia y comprobación - conexiones",
     version="1.0.0",
-    description=(
-        "Servidor de inferencia para modelos de prediseno de uniones atornilladas. "
-        "Los modelos viven en `models/<NAME>/` y conviven en memoria; cada peticion se "
-        "enruta al modelo indicado en `model`. El contrato de tabla de cada modelo lo "
-        "define su `core/adapter.py`; si una peticion no cumple el contrato se devuelve "
-        "**HTTP 422** indicando los campos que faltan. Las columnas de la respuesta son "
-        "los inputs enviados (o imputados) mas los campos predichos por el modelo."
-    ),
+    description="Servidor de pre-diseño por IA y comprobación AISC 360-10.",
     lifespan=lifespan,
 )
 
@@ -73,10 +50,10 @@ app.add_middleware(
 
 class RowsIn(BaseModel):
     model: str | None = Field(
-        default=None, description="Modelo a usar (carpeta en models/). Si falta, el por defecto."
+        default=None, description="Modelo a usar (carpeta en models/)."
     )
     rows: List[Dict[str, Any]] = Field(
-        ..., description="Filas de la tabla (inputs del modelo; los predichos pueden ir en blanco)."
+        ..., description="Filas de la tabla."
     )
 
 
@@ -99,7 +76,6 @@ async def _contract_error_handler(request: Request, exc: predictor.InputContract
 
 @app.get("/health", tags=["estado"], summary="Estado del servidor")
 def health() -> Dict[str, Any]:
-    """Estado del servidor y modelos instalados/cargados."""
     return {
         "status": "ok",
         "default_model": config.MODEL_NAME,
@@ -108,14 +84,8 @@ def health() -> Dict[str, Any]:
     }
 
 
-@app.get(
-    "/models",
-    tags=["modelos"],
-    summary="Lista los modelos instalados y cargados",
-    response_description="Modelos disponibles y cargados en memoria.",
-)
+@app.get("/models", tags=["modelos"], summary="Lista los modelos instalados y cargados")
 def list_models() -> Dict[str, Any]:
-    """Modelos instalados en `models/` y los cargados actualmente."""
     return {
         "available_models": model_registry.list_models(),
         "loaded_models": model_registry.loaded_models(),
@@ -125,7 +95,6 @@ def list_models() -> Dict[str, Any]:
 
 @app.get("/model", tags=["modelos"], summary="Contrato del modelo por defecto")
 def default_model() -> Dict[str, Any]:
-    """Contrato (inputs/opcionales/outputs) del modelo por defecto."""
     try:
         bundle = model_registry.get(config.MODEL_NAME)
     except KeyError as exc:
@@ -133,67 +102,32 @@ def default_model() -> Dict[str, Any]:
     return {"name": bundle["name"], **bundle["contract"]}
 
 
-@app.get(
-    "/options",
-    tags=["modelos"],
-    summary="Valores validos para los desplegables",
-    response_description="Valores admitidos por campo, publicados por el modelo.",
-    responses={
-        404: {"description": "El modelo no esta disponible o no publica opciones"},
-    },
-)
-def options(model: str | None = Query(default=None, description="Modelo (por defecto, el configurado)")):
-    """Opciones (perfiles, materiales...) del modelo indicado."""
+@app.get("/options", tags=["modelos"], summary="Valores válidos para los desplegables")
+def options(model: str | None = Query(default=None)):
     name = model or config.MODEL_NAME
     try:
         return predictor.options(name)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except predictor.InputContractError as exc:
+    except (KeyError, predictor.InputContractError) as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@app.post(
-    "/model/activate",
-    tags=["modelos"],
-    summary="Carga/recarga un modelo",
-    response_description="Modelo cargado y su contrato.",
-    responses={404: {"description": "El modelo no esta instalado"}},
-)
+@app.post("/model/activate", tags=["modelos"], summary="Carga/recarga un modelo")
 def activate_model(payload: ActivateIn):
-    """Carga (o recarga desde disco) el modelo `name`, sin reiniciar el servidor."""
     try:
         bundle = model_registry.activate(payload.name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("Error activando modelo %s", payload.name)
         raise HTTPException(status_code=500, detail=f"Error activando modelo: {exc}")
     log.info("Modelo cargado: %s", bundle["name"])
     return {"status": "ok", "name": bundle["name"], **bundle["contract"]}
 
 
-@app.post(
-    "/predict",
-    tags=["inferencia"],
-    summary="Predice y devuelve la tabla completa",
-    response_description="Una fila por entrada con inputs + campos predichos.",
-    responses={
-        422: {
-            "description": (
-                "La peticion no cumple el contrato del modelo. El cuerpo incluye "
-                "`model`, `missing` (campos que faltan) y `expected` (contrato)."
-            )
-        },
-        404: {"description": "El modelo indicado no esta disponible"},
-    },
-)
+@app.post("/predict", tags=["inferencia"], summary="Predice la geometría de la conexión")
 def predict(payload: RowsIn):
-    """Valida el contrato, preprocesa y predice con el modelo indicado.
-
-    Devuelve, por fila, los inputs (enviados o imputados) y los campos predichos."""
     if not payload.rows:
-        raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
+        raise HTTPException(status_code=400, detail="La petición no trae filas (rows vacío)")
     name = payload.model or config.MODEL_NAME
     log.info("/predict: modelo=%s, %d filas", name, len(payload.rows))
     try:
@@ -202,35 +136,41 @@ def predict(payload: RowsIn):
         raise
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("Error prediciendo")
         raise HTTPException(status_code=500, detail=f"Error al predecir: {exc}")
-    log.info("/predict: %d filas devueltas", len(predictions))
     return {
         "model_name": name,
         "rows": predictions,
     }
 
 
-@app.post(
-    "/validate",
-    tags=["datos"],
-    summary="Guarda filas validadas en el dataset",
-    responses={422: {"description": "Filas sin las entradas minimas"}},
-)
-def validate(
-    payload: RowsIn,
-    background_tasks: BackgroundTasks,
-):
+@app.post("/check", tags=["comprobacion"], summary="Ejecuta comprobaciones AISC 360-10")
+@app.post("/comprobar", tags=["comprobacion"], include_in_schema=False)
+def check(payload: RowsIn):
     if not payload.rows:
-        raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
+        raise HTTPException(status_code=400, detail="La petición no trae filas (rows vacío)")
+    log.info("/check: comprobando %d filas", len(payload.rows))
+    try:
+        results = predictor.check_rows(payload.rows)
+    except Exception as exc:
+        log.exception("Error en la comprobación")
+        raise HTTPException(status_code=500, detail=f"Error en la comprobación: {exc}")
+    return {
+        "status": "ok",
+        "rows": results,
+    }
+
+
+@app.post("/validate", tags=["datos"], summary="Guarda filas validadas en el dataset")
+def validate(payload: RowsIn, background_tasks: BackgroundTasks):
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="La petición no trae filas (rows vacío)")
     try:
         result = storage.append_rows(payload.rows, source="excel")
     except storage.InvalidRowsError as exc:
-        log.warning("/validate rechazado: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc))
 
-    log.info("/validate: guardadas %d filas, total dataset=%d", result["saved"], result["total_rows"])
     return {"status": "ok", **result}
 
 
@@ -248,5 +188,4 @@ app.mount("/web", StaticFiles(directory=config.BASE_DIR / "web", html=True), nam
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host=config.HOST, port=config.PORT)
