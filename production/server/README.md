@@ -192,9 +192,9 @@ editar una celda marca la fila como `MODIFICADO` y la desmarca. El estado es sol
 
 ## Flujo de la web
 
-1. Formulario dinámico (`/schema`) → **1. Pre-diseñar** (`/predict`) → tabla CODAME
+1. Formulario dinámico (`/schema`) → **Pre-diseñar con IA** (`/predict`) → tabla CODAME
    **editable** (el revisor corrige lo que haga falta).
-2. **2. Comprobar AISC 360-10** (`/check`) sobre la tabla editada → informe por fila.
+2. **Comprobar todas las entradas** (`/check`) sobre la tabla editada → informe por fila.
 
 ## Añadir un modelo nuevo (carpeta V)
 

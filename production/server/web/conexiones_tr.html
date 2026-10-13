@@ -104,9 +104,9 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="grid" id="form"></div>
     <div class="actions">
       <button class="btn" id="add">Añadir a la tabla</button>
+      <button class="btn ghost" id="reset">Limpiar campos</button>
       <button class="btn ghost" id="btnUploadExcel">📥 Cargar Excel / CSV</button>
       <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" style="display:none">
-      <button class="btn ghost" id="reset">Limpiar campos</button>
     </div>
   </section>
 
@@ -114,7 +114,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <h2>Combinaciones a pre-diseñar (<span id="count">0</span>)</h2>
     <div class="tablewrap" id="tbl"></div>
     <div class="actions">
-      <button class="btn red" id="send" disabled>1. Pre-diseñar con IA (/predict)</button>
+      <button class="btn" id="send" disabled>Pre-diseñar con IA</button>
       <button class="btn ghost" id="clear" disabled>Vaciar tabla</button>
     </div>
     <div id="status" role="status"></div>
@@ -124,10 +124,10 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <h2>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· editable</small></h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
-      <button class="btn green" id="checkBtn" disabled>2. Comprobar AISC 360-10 (/check)</button>
+      <button class="btn" id="checkBtn" disabled>Comprobar todas las entradas</button>
       <button class="btn ghost" id="markValid">Marcar "CUMPLE"</button>
       <button class="btn ghost" id="markMod">Marcar "MODIFICADO"</button>
-      <button class="btn" id="sendMarked" disabled>Enviar conexiones marcadas</button>
+      <button class="btn green" id="sendMarked" disabled>Enviar conexiones marcadas</button>
     </div>
   </section>
 
@@ -135,7 +135,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <h2>Resultados de la comprobación AISC 360-10</h2>
     <div class="tablewrap" id="checkRes"></div>
     <div class="actions" style="margin-top:14px;">
-      <button class="btn green" id="exportCheckExcel">📊 Descargar comprobaciones en Excel</button>
+      <button class="btn ghost" id="exportCheckExcel">💾Descargar comprobaciones en Excel</button>
     </div>
   </section>
 </main>
