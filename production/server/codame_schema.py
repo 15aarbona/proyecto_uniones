@@ -76,11 +76,19 @@ CODAME_COLUMNS = [
 # Valor simbolico por defecto (red de seguridad / columnas que el cliente no rellena).
 CODAME_DEFAULTS = {c: 0.0 for c in CODAME_COLUMNS}
 CODAME_DEFAULTS.update({
+    # Valores por defecto de la tabla (Cambios_a_aplicar.txt)
+    "wf": 6.0, "ww": 6.0, "w3": 6.0, "w4": 6.0, "wh": 6.0,
+    "Pr_Porcen": 50,
+    "Traccion": True,
+    "E": 200000.0,
+    "Electrode": "E49XX",
+    "SisUniBoltSI": True,
+    "SisUniPlateSI": True,
+    "Designation": "Tekla19",
     "Unicode": "",
     "Standards": "",
     "BEAM": "",
     "COLUMN": "",
-    "Traccion": "",
     "BoltName_ep": "",
     "ThicknessName_t_webstiff": "0mm",
     "ThicknessName_t_ep": "0mm",
@@ -90,14 +98,10 @@ CODAME_DEFAULTS.update({
     "ntensionrows": 2,
     "BoltGrade": "",
     "BoltThreads": True,
-    "Electrode": "",
     "yieldmethod": True,
     "WeldFactor": 1,
     "BoltsInTensionFactor": 2,
-    "SisUniBoltSI": "",
-    "SisUniPlateSI": "",
     "Source": "",
-    "Designation": "",
     "Estado_IA": "",
 })
 

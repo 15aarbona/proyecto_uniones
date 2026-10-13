@@ -28,6 +28,20 @@ def _num(v, default=0.0):
         return default
 
 
+def _bool(v, default=True):
+    """Booleano robusto: la tabla se edita en la web y llega como texto ("true"/"false")."""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    t = str(v).strip().lower()
+    if t in ("true", "1", "yes", "si", "sí", "verdadero"):
+        return True
+    if t in ("false", "0", "no", "falso"):
+        return False
+    return default
+
+
 def _mm_or_none(v):
     """'15mm' -> '15mm' (nombre de tablaplaca); '0'/'0mm'/'' -> None."""
     if v is None:
@@ -121,16 +135,26 @@ def row_to_conexion_input(row: Dict[str, Any]) -> ConexionInput:
 
     lh = _num(row.get("Lh"))
 
+    # Axial del pilar: Pr_Porcen = % de su carga de plastificacion Py = A*fy (kN).
+    pr = _num(row.get("Pr_Porcen")) / 100.0 * pilar.A * fy / 1000.0
+    e_mod = _num(row.get("E"))
+    if e_mod <= 0:
+        e_mod = 200000.0
+    weld_factor = _num(row.get("WeldFactor"), 1.0) or 1.0
+    bolts_per_row = _num(row.get("BoltsInTensionFactor"), 2.0) or 2.0
+    electrode = str(row.get("Electrode") or "").strip() or None
+
     return ConexionInput(
         viga=viga,
         pilar=pilar,
+        E=e_mod,
         fy=fy,
         fu=fu,
         fyp=fy,
         fup=fu,
         BoltName_ep=bolt_name,
         BoltGrade=str(row.get("BoltGrade") or DEFAULT_CLASE_TORNILLO).strip(),
-        BoltsInTensionFactor=2.0,
+        BoltsInTensionFactor=bolts_per_row,
         nbrtension_ep_AME=nbrtension,
         NumeTotalFilasTornillos=n_total_filas,
         b_ep=b_ep,
@@ -149,15 +173,22 @@ def row_to_conexion_input(row: Dict[str, Any]) -> ConexionInput:
         AnguloCantonera=_num(row.get("AnguloCantonera")),
         FactorCantoCantonera=_num(row.get("FactorCantoCantonera"), 1.0),
         Lh=lh,
+        ww=_num(row.get("ww")),
+        wf=_num(row.get("wf")),
+        wh=_num(row.get("wh")),
+        wswc=_num(row.get("w3")),   # SUPUESTO: soldadura rigidizador-alma del pilar; confirmar w3/w4
+        WeldFactor=weld_factor,
+        Electrode=electrode,
+        Pr=pr,
         MzEd_Porcen=_num(row.get("MzEd_Porcen")),
         FyEd_Porcen=_num(row.get("FyEd_Porcen")),
         FxEd_Porcen=_num(row.get("FxEd_Porcen")),
         MzEd_PanelZone=_num(row.get("MzEd_PanelZone")),
         TipoCombiEnve="LRFD",
-        yieldmethod=bool(row.get("yieldmethod", True)),
-        Traccion=False,
-        SisUniPerMetri=True,
-        SisUniPlaMetri=True,
+        yieldmethod=_bool(row.get("yieldmethod"), True),
+        Traccion=_bool(row.get("Traccion"), False),
+        SisUniPerMetri=_bool(row.get("SisUniBoltSI"), True),
+        SisUniPlaMetri=_bool(row.get("SisUniPlateSI"), True),
     )
 
 
