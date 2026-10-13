@@ -9,7 +9,7 @@ modelo). Referencia: `doc/codame/mapeo_columnas_codame.md`.
 # Orden de las columnas de Tabla_MOMENT_M1.
 CODAME_COLUMNS = [
     "Unicode",
-    "Standards",
+    "Normativas",
     "BEAM",
     "COLUMN",
     "MzEd_Porcen",
@@ -70,8 +70,21 @@ CODAME_COLUMNS = [
     "SisUniPlateSI",
     "Source",
     "Designation",
-    "Estado_IA",
 ]
+
+# Columnas extra de reentreno (no las consume CODAME) que se anaden a la estructura
+# servida y a la tabla del cliente (vacias si el modelo no las aporta).
+TRAIN_EXTRA_COLUMNS = [
+    "Capacity_Moment",
+    "Capacity_Shear",
+    "Capacity_Axial",
+    "SlipCritical",
+    "National_Annex",
+    "AceroEstructural",
+]
+
+# Estructura servida: CODAME + extras de reentreno.
+SERVED_COLUMNS = CODAME_COLUMNS + TRAIN_EXTRA_COLUMNS
 
 # Valor simbolico por defecto (red de seguridad / columnas que el cliente no rellena).
 CODAME_DEFAULTS = {c: 0.0 for c in CODAME_COLUMNS}
@@ -86,7 +99,7 @@ CODAME_DEFAULTS.update({
     "SisUniPlateSI": True,
     "Designation": "Tekla19",
     "Unicode": "",
-    "Standards": "",
+    "Normativas": "",
     "BEAM": "",
     "COLUMN": "",
     "BoltName_ep": "",
@@ -102,10 +115,18 @@ CODAME_DEFAULTS.update({
     "WeldFactor": 1,
     "BoltsInTensionFactor": 2,
     "Source": "",
-    "Estado_IA": "",
+    "Designation": "",
 })
 
 
 def fill_missing(row: dict) -> dict:
-    """Rellena con los defaults las columnas que falten, en el orden canonico."""
+    """Rellena con los defaults las columnas CODAME que falten, en el orden canonico."""
     return {c: row.get(c, CODAME_DEFAULTS[c]) for c in CODAME_COLUMNS}
+
+
+def fill_served(row: dict) -> dict:
+    """Estructura servida completa: CODAME + extras (extras ausentes -> None)."""
+    out = fill_missing(row)
+    for c in TRAIN_EXTRA_COLUMNS:
+        out[c] = row.get(c, None)
+    return out

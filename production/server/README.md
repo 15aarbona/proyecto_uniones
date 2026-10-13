@@ -78,6 +78,7 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | POST | `/model/activate` | `{"name":"V11"}` → carga/recarga un modelo |
 | POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve las 63 columnas CODAME |
 | POST | `/check` | `{"rows":[...]}` (filas CODAME editadas) → comprobación AISC 360-10 |
+| POST | `/dataset/append` | Filas marcadas → traduce a `data_final` y añade al parquet de reentreno (upsert por `Unicode`) |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
 | GET | `/dataset/summary` | Resumen del dataset acumulado |
 
@@ -166,11 +167,34 @@ Respuesta `200`: `{"status":"ok","rows":[{...,"cumple":true,"ratio_pesimo":0.62,
 "descripcion_ratio_pesimo":"...","ratios":[...],"complementarios":[...]}]}`. Si una fila
 no se puede comprobar, se devuelve un informe con `cumple:false` y el error (sin 500).
 
+## Estructura servida y dataset de reentreno
+
+`/predict` devuelve **CODAME + columnas extra** (`codame_schema.SERVED_COLUMNS`): las 62 de
+CODAME (la columna `Normativas` sustituye a `Standards`; sin `Estado_IA`) más
+`Capacity_Moment/Shear/Axial`, `SlipCritical`, `National_Annex`, `AceroEstructural`
+(vacías/NULL si el modelo no las aporta).
+
+`POST /dataset/append` recibe las filas **marcadas y validadas** por el revisor, las
+**traduce** al esquema de reentreno (`train_dataset.to_train_row`), rellena con **NULL** lo
+que falte (`DrawingCode`, demanda ausente, …) y las añade al parquet unificado
+`production/server/data/global_dataset.parquet` **reemplazando `Unicode` duplicados**.
+Devuelve `{added, updated, total_rows}`.
+
+El parquet de reentreno tiene **41 columnas** (subconjunto de `data_final.csv`): `Capacity_*`,
+diseño (`g,tws,Bp,Lp,tp,Lh,e,d,p1..p12,ts,tbs,tst,Hole`), ids/metadatos
+(`Unicode,BEAM,COLUMN,DrawingCode,Bolt,SlipCritical,Normativas,AceroEstructural,EstandarTornillos,Source,National_Annex`).
+**No** se guardan las columnas derivadas (`BEAM_*`, `COLUMN_*`, `fy/fu/fv`) ni `standard`,
+`n_alma`, `n_cantonera` (se derivarán al adaptar el modelo).
+
+En la web (tabla editable de resultados): casilla por fila, botones **Marcar todas** /
+**Marcar "CUMPLE"** (solo las `CUMPLE`) / **Enviar conexiones marcadas** (con confirmación);
+editar una celda marca la fila como `MODIFICADO` y la desmarca. El estado es solo de UI.
+
 ## Flujo de la web
 
-1. Formulario dinámico (`/schema`) → **1. Pre-diseñar** (`/predict`) → tabla CODAME
+1. Formulario dinámico (`/schema`) → **Pre-diseñar con IA** (`/predict`) → tabla CODAME
    **editable** (el revisor corrige lo que haga falta).
-2. **2. Comprobar AISC 360-10** (`/check`) sobre la tabla editada → informe por fila.
+2. **Comprobar todas las entradas** (`/check`) sobre la tabla editada → informe por fila.
 
 ## Añadir un modelo nuevo (carpeta V)
 

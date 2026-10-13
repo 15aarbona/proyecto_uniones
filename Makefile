@@ -59,7 +59,7 @@ PREPROC_SRC = $(call slash,$(SRC)/$(PREPROC))
 install-model: check-artifacts
 	@echo Instalando modelo $(MODEL) en $(DEST) ...
 	@$(call MKDIR,$(DEST))
-	$(XCOPY) "$(CORE_SRC)" "$(DEST)$(SEP)$(CORE)"
+	$(XCOPY) "$(CORE_SRC)" "$(DEST)$(SEP)core"
 	-$(COPY) "$(WEIGHTS_SRC)" "$(DEST)$(SEP)weights.pt"
 	-$(COPY) "$(PREPROC_SRC)" "$(DEST)$(SEP)preprocessor.joblib"
 	-$(XCOPY) "$(DATA_SRC)" "$(DEST)$(SEP)data"
