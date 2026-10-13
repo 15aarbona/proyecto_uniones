@@ -100,7 +100,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
 
     row = {
         "Unicode": inp.get("UNICODE", ""),
-        "Standards": inp.get("Normativas", ""),
+        "Normativas": inp.get("Normativas", ""),
         "BEAM": beam,
         "COLUMN": inp.get("COLUMN", ""),
         "MzEd_Porcen": _num(inp.get("ratio_moment")) * 100.0,

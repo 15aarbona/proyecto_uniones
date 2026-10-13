@@ -9,7 +9,7 @@ modelo). Referencia: `doc/codame/mapeo_columnas_codame.md`.
 # Orden de las columnas de Tabla_MOMENT_M1.
 CODAME_COLUMNS = [
     "Unicode",
-    "Standards",
+    "Normativas",
     "BEAM",
     "COLUMN",
     "MzEd_Porcen",
@@ -79,9 +79,7 @@ TRAIN_EXTRA_COLUMNS = [
     "Capacity_Shear",
     "Capacity_Axial",
     "SlipCritical",
-    "standard",
-    "n_alma",
-    "n_cantonera",
+    "National_Annex",
     "AceroEstructural",
 ]
 
@@ -92,7 +90,7 @@ SERVED_COLUMNS = CODAME_COLUMNS + TRAIN_EXTRA_COLUMNS
 CODAME_DEFAULTS = {c: 0.0 for c in CODAME_COLUMNS}
 CODAME_DEFAULTS.update({
     "Unicode": "",
-    "Standards": "",
+    "Normativas": "",
     "BEAM": "",
     "COLUMN": "",
     "Traccion": "",

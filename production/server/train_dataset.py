@@ -1,7 +1,8 @@
 """Traduccion de filas servidas (CODAME + extras) al esquema de reentreno y persistencia.
 
 - `to_train_row(row)`: fila servida -> columnas `train_schema.TRAIN_COLUMNS` (con tipo y
-  NULL cuando falta el dato).
+  NULL cuando falta el dato). NO se guardan columnas derivadas (BEAM_*/COLUMN_*/fy/fu/fv);
+  solo se usa el catalogo para derivar `BEAM_tf` y calcular `p1`.
 - `append_to_parquet(rows)`: anade al parquet unificado reemplazando `Unicode` duplicados.
 """
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import Any, Dict, List
 import pandas as pd
 
 import config
-from catalogo import ACERO_TABLE, TORNILLO_TABLE, get_profile
+from catalogo import ACERO_TABLE, get_profile
 from train_schema import BOOL_COLUMNS, NUMERIC_COLUMNS, TEXT_COLUMNS, TRAIN_COLUMNS
 
 _LOCK = threading.Lock()
@@ -49,7 +50,7 @@ def _bool(v):
 
 
 def _parse_mm(v):
-    """'20mm' / '20' -> 20.0 ; vacio/'0mm' -> 0.0/None segun valor."""
+    """'20mm' / '20' -> 20.0 ; vacio -> None."""
     if v is None:
         return None
     s = str(v).strip().lower().replace("mm", "").replace("t", "").strip()
@@ -62,8 +63,7 @@ def _bolt_int(v):
     """'M20' / 20 -> 20."""
     if v is None:
         return None
-    s = str(v).strip().upper().replace("M", "")
-    return _num(s)
+    return _num(str(v).strip().upper().replace("M", ""))
 
 
 def to_train_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -71,35 +71,24 @@ def to_train_row(row: Dict[str, Any]) -> Dict[str, Any]:
     r = row or {}
 
     beam = _text(r.get("BEAM"))
-    column = _text(r.get("COLUMN"))
-    geom_b = get_profile(beam) if beam else None
-    geom_c = get_profile(column) if column else None
-
-    def g(geom, col):
-        if geom is None:
-            return None
-        return _num(geom.get(col))
+    geom = get_profile(beam) if beam else None
+    tf_b = _num(geom.get("tf_mm")) if geom is not None else None
 
     pfo = _num(r.get("pfo"))
     pfi = _num(r.get("pfi"))
-    tf_b = g(geom_b, "tf_mm")
-    p1 = None
-    if pfo is not None and pfi is not None:
-        p1 = pfo + pfi + (tf_b or 0.0)
+    p1 = (pfo + pfi + (tf_b or 0.0)) if (pfo is not None and pfi is not None) else None
 
     bolt = _bolt_int(r.get("BoltName_ep") or r.get("Bolt"))
     hole = (bolt + 2) if bolt is not None else None
 
     grado = _text(r.get("AceroEstructural") or r.get("grado_acero"))
     fy = _num(r.get("fy"))
-    fu = _num(r.get("fu"))
     if grado is None and fy is not None:
         for k, v in ACERO_TABLE.items():
             if abs(v["fy_acero_mpa"] - fy) < 1e-6:
                 grado = k
                 break
     clase = _text(r.get("BoltGrade") or r.get("EstandarTornillos"))
-    tornillo = TORNILLO_TABLE.get(clase, {}) if clase else {}
 
     out = {
         # demanda
@@ -127,47 +116,15 @@ def to_train_row(row: Dict[str, Any]) -> Dict[str, Any]:
         # identificacion / metadatos
         "Unicode": _text(r.get("Unicode")),
         "BEAM": beam,
-        "COLUMN": column,
+        "COLUMN": _text(r.get("COLUMN")),
         "DrawingCode": _text(r.get("DrawingCode")),
         "Bolt": bolt,
         "SlipCritical": _bool(r.get("SlipCritical")),
-        "Normativas": _text(r.get("Standards")),
+        "Normativas": _text(r.get("Normativas")),
         "AceroEstructural": grado,
         "EstandarTornillos": clase,
         "Source": _text(r.get("Source")),
         "National_Annex": _text(r.get("National_Annex")),
-        "standard": _text(r.get("standard")),
-        # geometria viga
-        "BEAM_d_mm": g(geom_b, "d_mm"),
-        "BEAM_bf_mm": g(geom_b, "bf_mm"),
-        "BEAM_tw_mm": g(geom_b, "tw_mm"),
-        "BEAM_tf_mm": tf_b,
-        "BEAM_A_mm": g(geom_b, "A_mm"),
-        "BEAM_w_kgm": g(geom_b, "w_kgm"),
-        "BEAM_iy_mm": g(geom_b, "iy_mm"),
-        "BEAM_iz_mm": g(geom_b, "iz_mm"),
-        "BEAM_wely_mm": g(geom_b, "wely_mm"),
-        "BEAM_welz_mm": g(geom_b, "welz_mm"),
-        # geometria columna
-        "COLUMN_d_mm": g(geom_c, "d_mm"),
-        "COLUMN_bf_mm": g(geom_c, "bf_mm"),
-        "COLUMN_tw_mm": g(geom_c, "tw_mm"),
-        "COLUMN_tf_mm": g(geom_c, "tf_mm"),
-        "COLUMN_A_mm": g(geom_c, "A_mm"),
-        "COLUMN_w_kgm": g(geom_c, "w_kgm"),
-        "COLUMN_iy_mm": g(geom_c, "iy_mm"),
-        "COLUMN_iz_mm": g(geom_c, "iz_mm"),
-        "COLUMN_wely_mm": g(geom_c, "wely_mm"),
-        "COLUMN_welz_mm": g(geom_c, "welz_mm"),
-        # materiales
-        "fy_acero_mpa": fy,
-        "fu_acero_mpa": fu,
-        "fy_tornillo_mpa": _num(tornillo.get("fy_tornillo_mpa")),
-        "fu_tornillo_mpa": _num(tornillo.get("fu_tornillo_mpa")),
-        "fv_tornillo_mpa": _num(tornillo.get("fv_tornillo_mpa")),
-        # conteos
-        "n_alma": _num(r.get("n_alma")),
-        "n_cantonera": _num(r.get("n_cantonera")),
     }
     for n in range(3, 13):
         out[f"p{n}"] = _num(r.get(f"p{n}"))

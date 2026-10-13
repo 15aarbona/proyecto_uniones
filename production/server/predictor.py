@@ -105,6 +105,15 @@ def _validate_contract(
         )
 
 
+def _national_annex(normativas, standard):
+    """National_Annex derivado del `standard` predicho (quita el prefijo Normativas);
+    NO reemplaza lo que el usuario puso en `Normativas`."""
+    if not normativas or not standard:
+        return None
+    n, s = str(normativas).strip(), str(standard).strip()
+    return s[len(n) + 3:] if s.startswith(n + " - ") else None
+
+
 def _extras(input_row: Dict[str, Any], design_row: Dict[str, Any]) -> Dict[str, Any]:
     """Columnas de reentreno que CODAME no usa (vacias/NULL si el modelo no las aporta)."""
     inp = input_row or {}
@@ -114,9 +123,7 @@ def _extras(input_row: Dict[str, Any], design_row: Dict[str, Any]) -> Dict[str, 
         "Capacity_Shear": inp.get("Capacity_Shear"),
         "Capacity_Axial": inp.get("Capacity_Axial"),
         "SlipCritical": d.get("SlipCritical", inp.get("SlipCritical")),
-        "standard": d.get("standard"),
-        "n_alma": d.get("n_alma"),
-        "n_cantonera": d.get("n_cantonera"),
+        "National_Annex": _national_annex(inp.get("Normativas"), d.get("standard")),
         "AceroEstructural": inp.get("grado_acero"),
     }
 

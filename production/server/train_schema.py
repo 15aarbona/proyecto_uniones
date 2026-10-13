@@ -1,7 +1,9 @@
-"""Esquema del dataset de reentreno (columnas de `data/data_final.csv`).
+"""Esquema del dataset de reentreno (subconjunto de `data/data_final.csv`).
 
+Se excluyen las columnas derivadas (`BEAM_*`, `COLUMN_*`, `fy/fu/fv`) y las que el modelo
+derivara/adaptara despues (`standard`, `n_alma`, `n_cantonera`).
 `TRAIN_COLUMNS` es el orden exacto del parquet unificado; el tipo de cada columna se usa
-para coercionar al traducir. Referencia: `data/data_final.csv`.
+para coercionar al traducir.
 """
 
 TRAIN_COLUMNS = [
@@ -15,24 +17,12 @@ TRAIN_COLUMNS = [
     "ts", "tbs", "tst", "Hole",
     # identificacion / metadatos
     "Unicode", "BEAM", "COLUMN", "DrawingCode", "Bolt", "SlipCritical",
-    "Normativas", "AceroEstructural", "EstandarTornillos", "Source",
-    "National_Annex", "standard",
-    # geometria viga
-    "BEAM_d_mm", "BEAM_bf_mm", "BEAM_tw_mm", "BEAM_tf_mm", "BEAM_A_mm",
-    "BEAM_w_kgm", "BEAM_iy_mm", "BEAM_iz_mm", "BEAM_wely_mm", "BEAM_welz_mm",
-    # geometria columna
-    "COLUMN_d_mm", "COLUMN_bf_mm", "COLUMN_tw_mm", "COLUMN_tf_mm", "COLUMN_A_mm",
-    "COLUMN_w_kgm", "COLUMN_iy_mm", "COLUMN_iz_mm", "COLUMN_wely_mm", "COLUMN_welz_mm",
-    # materiales
-    "fy_acero_mpa", "fu_acero_mpa",
-    "fy_tornillo_mpa", "fu_tornillo_mpa", "fv_tornillo_mpa",
-    # conteos
-    "n_alma", "n_cantonera",
+    "Normativas", "AceroEstructural", "EstandarTornillos", "Source", "National_Annex",
 ]
 
 TEXT_COLUMNS = {
-    "Unicode", "BEAM", "COLUMN", "DrawingCode", "Normativas",
-    "AceroEstructural", "EstandarTornillos", "Source", "National_Annex", "standard",
+    "Unicode", "BEAM", "COLUMN", "DrawingCode",
+    "Normativas", "AceroEstructural", "EstandarTornillos", "Source", "National_Annex",
 }
 
 BOOL_COLUMNS = {"SlipCritical"}
