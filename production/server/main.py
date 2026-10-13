@@ -31,6 +31,7 @@ import config
 import model_registry
 import predictor
 import storage
+import train_dataset
 
 logging.basicConfig(
     level=logging.INFO,
@@ -209,6 +210,28 @@ def validate(payload: RowsIn, background_tasks: BackgroundTasks):
         result = storage.append_rows(payload.rows, source="excel")
     except storage.InvalidRowsError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    return {"status": "ok", **result}
+
+
+@app.post(
+    "/dataset/append",
+    tags=["datos"],
+    summary="Anade conexiones validadas al parquet de reentreno",
+    response_description="Filas anadidas/actualizadas (upsert por Unicode) y total.",
+)
+def dataset_append(payload: RowsIn):
+    """Traduce las conexiones marcadas al esquema de `data_final` y las persiste
+    (reemplaza `Unicode` duplicados; los datos que falten quedan como NULL)."""
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
+    log.info("/dataset/append: %d filas", len(payload.rows))
+    try:
+        result = train_dataset.append_to_parquet(payload.rows)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Error escribiendo el parquet de reentreno")
+        raise HTTPException(status_code=500, detail=f"Error al guardar el dataset: {exc}")
+    log.info("/dataset/append: +%d nuevas, %d actualizadas, total=%d",
+             result["added"], result["updated"], result["total_rows"])
     return {"status": "ok", **result}
 
 

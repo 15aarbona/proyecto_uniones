@@ -16,7 +16,7 @@ import pandas as pd
 
 import codame
 import model_registry
-from codame_schema import CODAME_COLUMNS, fill_missing
+from codame_schema import SERVED_COLUMNS, fill_served
 from checker import check_rows as perform_check
 
 log = logging.getLogger("ai-server")
@@ -105,6 +105,22 @@ def _validate_contract(
         )
 
 
+def _extras(input_row: Dict[str, Any], design_row: Dict[str, Any]) -> Dict[str, Any]:
+    """Columnas de reentreno que CODAME no usa (vacias/NULL si el modelo no las aporta)."""
+    inp = input_row or {}
+    d = design_row or {}
+    return {
+        "Capacity_Moment": inp.get("Capacity_Moment"),
+        "Capacity_Shear": inp.get("Capacity_Shear"),
+        "Capacity_Axial": inp.get("Capacity_Axial"),
+        "SlipCritical": d.get("SlipCritical", inp.get("SlipCritical")),
+        "standard": d.get("standard"),
+        "n_alma": d.get("n_alma"),
+        "n_cantonera": d.get("n_cantonera"),
+        "AceroEstructural": inp.get("grado_acero"),
+    }
+
+
 def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     bundle = model_registry.get(model_name)
     adapter = bundle["adapter"]
@@ -127,6 +143,7 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
     for i in range(len(df)):
         input_row = features.iloc[i].to_dict()
         design_row = design.iloc[i].to_dict()
+        extras = _extras(input_row, design_row)
         try:
             partial = codame.to_codame(input_row, design_row)
             if not isinstance(partial, dict):
@@ -138,7 +155,7 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
                 i,
             )
             partial = {}
-        output.append(_clean_dict(fill_missing(partial)))
+        output.append(_clean_dict(fill_served({**partial, **extras})))
     return output
 
 
@@ -172,7 +189,7 @@ def schema(model_name: str) -> Dict[str, Any]:
     return {
         "model": bundle["name"],
         "inputs": inputs,
-        "result_columns": list(CODAME_COLUMNS),
+        "result_columns": list(SERVED_COLUMNS),
     }
 
 

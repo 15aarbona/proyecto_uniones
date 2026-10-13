@@ -63,6 +63,12 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
 .badge{display:inline-block;padding:3px 8px;border-radius:3px;font-weight:600;font-size:12px;color:#fff}
 .badge.ok{background:var(--tr-green)}
 .badge.bad{background:var(--tr-red)}
+.badge.mod{background:var(--tr-blue)}
+.st{font-weight:600;font-size:12.5px;white-space:nowrap;color:var(--tr-text)}
+#res tr.row-ok td{background:#E9F6EF}
+#res tr.row-bad td{background:#FDEDEB}
+#res tr.row-mod td{background:#EAF3FB}
+#res th:first-child,#res td:first-child{width:36px;text-align:center}
 #status{margin-top:14px;padding:10px 14px;border-left:4px solid var(--tr-blue);background:#EAF3FB;display:none}
 #status.bad{border-color:var(--tr-red);background:#FDEDEB}
 #status.ok{border-color:var(--tr-green);background:#EAF6EF}
@@ -119,6 +125,9 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="tablewrap" id="res"></div>
     <div class="actions">
       <button class="btn green" id="checkBtn" disabled>2. Comprobar AISC 360-10 (/check)</button>
+      <button class="btn ghost" id="markValid">Marcar "CUMPLE"</button>
+      <button class="btn ghost" id="markMod">Marcar "MODIFICADO"</button>
+      <button class="btn" id="sendMarked" disabled>Enviar conexiones marcadas</button>
     </div>
   </section>
 
@@ -137,7 +146,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
    ===================================================================== */
 const $ = id => document.getElementById(id);
 let SCHEMA = { model: null, inputs: [], result_columns: [] };
-const state = { rows: [], results: [], checked: [] };
+const state = { rows: [], results: [], checked: [], marked: [], status: [] };
 const escHtml = v => String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
 
@@ -292,8 +301,10 @@ function bulkFillColumn(colName){
   const newVal = prompt(`Introduce el nuevo valor para la columna '${colName}' en TODAS las filas (${state.results.length} filas):`, sampleVal);
   if (newVal === null) return; // Cancelado por el usuario
 
-  state.results.forEach(r => {
+  state.results.forEach((r, i) => {
     r[colName] = newVal;
+    state.status[i] = "MODIFICADO";
+    state.marked[i] = false;
   });
   renderResults();
 }
@@ -302,34 +313,80 @@ function renderResults(){
   const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
   $("checkBtn").disabled = !res.length;
-  if (!res.length) return;
+  if (!res.length){ updateSendMarked(); return; }
   const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns
                                             : [...new Set(res.flatMap(r => Object.keys(r)))];
-  
-  // Encabezados con botón de Rellenar todo
-  const head = cols.map(c => `
+
+  // Encabezados: casilla marcar/desmarcar todas + columnas + comprobación.
+  const head = `<th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` + cols.map(c => `
     <th>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
         <span>${escHtml(c)}</span>
         <button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna '${escAttr(c)}'">⚡ Rellenar</button>
       </div>
     </th>
-  `).join("");
+  `).join("") + `<th>Comprobación</th>`;
 
-  const body = res.map((r, i) =>
-    "<tr>" + cols.map(c => {
-      const v = r[c] ?? "";
-      return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
-    }).join("") + "</tr>"
-  ).join("");
+  const body = res.map((r, i) => {
+    const st = state.status[i] || "";
+    const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : st === "MODIFICADO" ? "mod" : "";
+    const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : st === "MODIFICADO" ? "row-mod" : "";
+    return `<tr class="${rowCls}">` +
+      `<td><input type="checkbox" class="rowchk" data-row="${i}" ${state.marked[i] ? "checked" : ""}></td>` +
+      cols.map(c => {
+        const v = r[c] ?? "";
+        return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
+      }).join("") +
+      `<td class="st ${stCls}">${escHtml(st)}</td>` +
+    "</tr>";
+  }).join("");
 
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-  
+
+  // Editar una celda -> estado MODIFICADO (y se desmarca).
   $("res").querySelectorAll("input.cell").forEach(inp => {
     inp.addEventListener("input", () => {
-      state.results[+inp.dataset.row][inp.dataset.col] = inp.value;
+      const i = +inp.dataset.row;
+      state.results[i][inp.dataset.col] = inp.value;
+      markModified(i);
     });
   });
+  // Casillas por fila.
+  $("res").querySelectorAll("input.rowchk").forEach(chk => {
+    chk.addEventListener("change", () => { state.marked[+chk.dataset.row] = chk.checked; updateSendMarked(); });
+  });
+  // Casilla de cabecera: marcar / desmarcar todas (sincronizada con el estado).
+  const all = $("resAll");
+  if (all){
+    const n = state.marked.filter(Boolean).length;
+    all.checked = state.results.length > 0 && n === state.results.length;
+    all.indeterminate = n > 0 && n < state.results.length;
+    all.addEventListener("change", () => {
+      state.marked = state.results.map(() => all.checked);
+      renderResults();
+    });
+  }
+  updateSendMarked();
+}
+
+function markModified(i){
+  state.status[i] = "MODIFICADO";
+  state.marked[i] = false;
+  const row = $("res").querySelectorAll("tbody tr")[i];
+  if (row){
+    row.className = "row-mod";
+    const stCell = row.querySelector("td.st");
+    if (stCell){ stCell.textContent = "MODIFICADO"; stCell.className = "st mod"; }
+    const chk = row.querySelector("input.rowchk");
+    if (chk) chk.checked = false;
+  }
+  // Reflejar el cambio tambien en el informe de comprobaciones.
+  renderCheckResults();
+  updateSendMarked();
+}
+
+function updateSendMarked(){
+  $("sendMarked").disabled = !state.marked.some(Boolean);
 }
 
 function renderCheckResults(){
@@ -342,8 +399,11 @@ function renderCheckResults(){
   </tr></thead><tbody>`;
 
   res.forEach((r, i) => {
-    const badge = r.cumple ? `<span class="badge ok">CUMPLE</span>`
-                           : `<span class="badge bad">NO CUMPLE</span>`;
+    const st = state.status[i] || "";
+    const badge = st === "MODIFICADO"
+      ? `<span class="badge mod">MODIFICADO</span>`
+      : (r.cumple ? `<span class="badge ok">CUMPLE</span>`
+                  : `<span class="badge bad">NO CUMPLE</span>`);
     const ratiosList = (r.ratios || []).map(f =>
       `<li><b>${escHtml(f.descripcion)}:</b> ${f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A'}</li>`).join("");
     const compList = (r.complementarios || []).map(c =>
@@ -440,7 +500,7 @@ $("add").onclick = () => {
 };
 $("reset").onclick = renderForm;
 $("clear").onclick = () => {
-  state.rows = []; state.results = []; state.checked = [];
+  state.rows = []; state.results = []; state.checked = []; state.marked = []; state.status = [];
   renderTable(); renderResults(); renderCheckResults(); setStatus("", "");
 };
 
@@ -462,6 +522,8 @@ $("send").onclick = async () => {
     } else {
       state.results = data.rows || [];
       state.checked = [];
+      state.marked = state.results.map(() => false);
+      state.status = state.results.map(() => "");
       renderResults(); renderCheckResults();
       setStatus("ok", `Predicción completada con el modelo ${data.model_name ?? ""}: ${state.results.length} uniones. Edita si quieres y pulsa "Comprobar".`);
     }
@@ -485,6 +547,11 @@ $("checkBtn").onclick = async () => {
       setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2));
     } else {
       state.checked = data.rows || [];
+      state.status = state.results.map((_, i) => {
+        const c = data.rows[i];
+        return (c && c.cumple) ? "CUMPLE" : "NO CUMPLE";
+      });
+      renderResults();
       renderCheckResults();
       setStatus("ok", "Comprobación AISC 360-10 finalizada.");
     }
@@ -492,6 +559,47 @@ $("checkBtn").onclick = async () => {
     setStatus("bad", "Error enviando la comprobación", e.message);
   }
   btn.disabled = !state.results.length;
+};
+
+/* =====================================================================
+   Marcado y envío de conexiones validadas
+   ===================================================================== */
+$("markValid").onclick = () => {
+  // Solo marca (anade); nunca desmarca.
+  state.marked = state.marked.map((m, i) => m || state.status[i] === "CUMPLE");
+  renderResults();
+};
+
+$("markMod").onclick = () => {
+  // Solo marca (anade); nunca desmarca.
+  state.marked = state.marked.map((m, i) => m || state.status[i] === "MODIFICADO");
+  renderResults();
+};
+
+$("sendMarked").onclick = async () => {
+  const rows = state.results.filter((_, i) => state.marked[i]);
+  if (!rows.length){ setStatus("bad", "No hay conexiones marcadas."); return; }
+  if (!confirm("Aseguro que los registros corresponden a conexiones validadas.\n\n¿Enviar " + rows.length + " conexiones marcadas al dataset de reentreno?")) return;
+
+  const btn = $("sendMarked");
+  btn.disabled = true;
+  setStatus("", "Enviando " + rows.length + " conexiones marcadas…");
+  try {
+    const r = await fetch("/dataset/append", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok){
+      setStatus("bad", `Error al guardar (${r.status})`, JSON.stringify(data, null, 2));
+    } else {
+      setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas (total ${data.total_rows} filas).`);
+    }
+  } catch (e){
+    setStatus("bad", "Error enviando las conexiones marcadas", e.message);
+  }
+  updateSendMarked();
 };
 
 /* =====================================================================
@@ -522,7 +630,7 @@ async function loadSchema(){
   }
 }
 $("model").onchange = () => {
-  state.rows = []; state.results = []; state.checked = [];
+  state.rows = []; state.results = []; state.checked = []; state.marked = []; state.status = [];
   renderTable(); renderResults(); renderCheckResults(); loadSchema();
 };
 

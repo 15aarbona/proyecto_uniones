@@ -78,6 +78,7 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | POST | `/model/activate` | `{"name":"V11"}` → carga/recarga un modelo |
 | POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve las 63 columnas CODAME |
 | POST | `/check` | `{"rows":[...]}` (filas CODAME editadas) → comprobación AISC 360-10 |
+| POST | `/dataset/append` | Filas marcadas → traduce a `data_final` y añade al parquet de reentreno (upsert por `Unicode`) |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
 | GET | `/dataset/summary` | Resumen del dataset acumulado |
 
@@ -165,6 +166,22 @@ devuelve, por fila: `cumple`, `ratio_pesimo`, `descripcion_ratio_pesimo` y el de
 Respuesta `200`: `{"status":"ok","rows":[{...,"cumple":true,"ratio_pesimo":0.62,
 "descripcion_ratio_pesimo":"...","ratios":[...],"complementarios":[...]}]}`. Si una fila
 no se puede comprobar, se devuelve un informe con `cumple:false` y el error (sin 500).
+
+## Estructura servida y dataset de reentreno
+
+`/predict` devuelve **CODAME + columnas extra** (`train_schema`/`codame_schema.SERVED_COLUMNS`):
+las 63 de CODAME **sin `Estado_IA`** más `Capacity_Moment/Shear/Axial`, `SlipCritical`,
+`standard`, `n_alma`, `n_cantonera`, `AceroEstructural` (vacías/NULL si el modelo no las aporta).
+
+`POST /dataset/append` recibe las filas **marcadas y validadas** por el revisor, las
+**traduce** al esquema de `data/data_final.csv` (`train_dataset.to_train_row`), rellena con
+**NULL** lo que falte (`DrawingCode`, `National_Annex`, demanda ausente, …) y las añade al
+parquet unificado `production/server/data/global_dataset.parquet` **reemplazando `Unicode`
+duplicados**. Devuelve `{added, updated, total_rows}`.
+
+En la web (tabla editable de resultados): casilla por fila, botones **Marcar todas** /
+**Marcar "CUMPLE"** (solo las `CUMPLE`) / **Enviar conexiones marcadas** (con confirmación);
+editar una celda marca la fila como `MODIFICADO` y la desmarca. El estado es solo de UI.
 
 ## Flujo de la web
 
