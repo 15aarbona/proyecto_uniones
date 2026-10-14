@@ -142,3 +142,13 @@ def refine(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     except Exception:  # noqa: BLE001
         log.exception("refinar fallo (UNICODE=%s); se deja la fila sin ajustar", uid)
         return row, []
+
+
+def _refresh_web_plate(row: Dict[str, Any]) -> None:
+    if _mm(row["ThicknessName_t_webstiff"]) <= 0:
+        row["Bws"], row["Lws"] = 0.0, 0.0
+        return
+    beam, col = get_profile(row["BEAM"]), get_profile(row["COLUMN"])
+    row["Bws"], row["Lws"] = codame._web_plate_dims(
+        col, codame._geom(beam, "d_mm"), codame._geom(beam, "tf_mm"), _mm(row["ThicknessName_t_tenstiff"])
+    )

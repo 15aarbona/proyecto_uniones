@@ -944,8 +944,10 @@ class CalculadorAISC36010:
               hP: float, tfP: float, tfV: float, esp_t_s: float, connectiontop: str, E: float, Fyp: float) -> Tuple:
         namrtm9 = "Transverse stiffeners"
         Ffts = Ff - BrminAME
-        if esp_t_s == 0.0:
-            return Ffts, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm9
+        # Si la fuerza requerida es <= 0 o no hay espesor asignado, no hace falta rigidizador (medidas a 0)
+        if esp_t_s == 0.0 or Ffts <= 0.0:
+            print(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm9}' (Ffts={Ffts:.2f} kN). Anulando medidas -> bs=0.0, clip=0.0, tts_min=0.0, A_seff=0.0")
+            return max(Ffts, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm9
 
         bs = math.floor((bP - twP) / 2.0)
         bs = bs - (bs % 5)
@@ -978,7 +980,7 @@ class CalculadorAISC36010:
 
         num17 = 0.5988023952095809 if TipoCarga == "ASD" else 0.9
         CrAME = num17 * Fcr * A_seff / 1000.0
-        rtamem9 = max(Ffts, 0.0) / CrAME if CrAME != 0 else 0.0   # <0: el alma sola aguanta
+        rtamem9 = Ffts / CrAME if CrAME != 0 else 0.0
         return Ffts, bs, clip, tts_min, A_seff, KL, Fe, Fcr, CrAME, rtamem9, namrtm9
 
     def step10(self, TipoCarga: str, VrAME: float, Ff: float, Ffts: float, clip_s: float, esp_w_d_p: float,
@@ -986,8 +988,10 @@ class CalculadorAISC36010:
         namrtm10 = "Web doubler plate"
         num = 0.5988023952095809 if TipoCarga == "ASD" else 0.9
         Vfdp = Ff - VrAME
-        if esp_w_d_p == 0.0:
-            return Vfdp, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm10
+        # Si la solicitación sobre la chapa de refuerzo es <= 0 o no existe espesor asignado, se devuelven dimensiones a 0
+        if esp_w_d_p == 0.0 or Vfdp <= 0.0:
+            print(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm10}' (Vfdp={Vfdp:.2f} kN). Anulando medidas -> Ldp=0.0, bdp=0.0, tdp_min=0.0, VrdpAME=0.0")
+            return max(Vfdp, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, namrtm10
 
         Ldp = round((De + 2.0 * (3.0 * (tfP + rP + tp))) / 10.0) * 10.0
         bdp = math.floor(hP - 2.0 * (tfP + rP))
@@ -1006,7 +1010,7 @@ class CalculadorAISC36010:
                 tdp_min = 1000.0 * Ffts / (num * 0.6 * Fyp * (num5 - 2.0 * clip_s) * 2.0)
 
         VrdpAME = num * 0.6 * hP * esp_w_d_p * Fyp / 1000.0
-        rtamem10 = max(Vfdp, 0.0) / VrdpAME if (esp_w_d_p > tdp_min and VrdpAME != 0) else 1.0
+        rtamem10 = Vfdp / VrdpAME if (esp_w_d_p > tdp_min and VrdpAME != 0) else 1.0
         return Vfdp, Ldp, bdp, tdp_min, VrdpAME, rtamem10, namrtm10
 
     def step11(self, TipoCarga: str, angle: float, De: float, hV: float, dV: float, tfV: float,
@@ -1042,8 +1046,10 @@ class CalculadorAISC36010:
                rV: float, hV: float, tfV: float, esp_h_w_s: float, E: float, Fyp: float) -> Tuple:
         namrtm12 = "Haunch web stiffeners"
         C1wsAME = C1 - BrminAME_beam
-        if esp_h_w_s == 0.0:
-            return C1wsAME, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm12
+        # Si la fuerza sobre el rigidizador de la cartela es <= 0 o no hay espesor asignado, se eliminan sus dimensiones
+        if esp_h_w_s == 0.0 or C1wsAME <= 0.0:
+            print(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm12}' (C1wsAME={C1wsAME:.2f} kN). Anulando medidas -> bs=0.0, clip=0.0, tts_min=0.0, A_seff=0.0")
+            return max(C1wsAME, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm12
 
         bs = math.floor((bbV - twV) / 2.0)
         bs = bs - (bs % 5)
@@ -1073,7 +1079,7 @@ class CalculadorAISC36010:
 
         num15 = 0.5 if TipoCarga == "ASD" else 0.9
         CrAME = num15 * Fcr * A_seff / 1000.0
-        rtamem12 = max(C1wsAME, 0.0) / CrAME if CrAME != 0 else 0.0   # <0: el alma sola aguanta
+        rtamem12 = C1wsAME / CrAME if CrAME != 0 else 0.0
         return C1wsAME, bs, clip, tts_min, A_seff, num14 / num11, Fe, Fcr, CrAME, rtamem12, namrtm12
 
     def step13(self, TipoCarga: str, tp: float, hV: float, tfV: float, rV: float, twV: float,

@@ -213,6 +213,11 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     tws = _num(d.get("tws"))
     bws, lws = _web_plate_dims(col_geom, beam_d, tf, t_stiff) if tws > 0 else (0.0, 0.0)
 
+    # Asegurar que si t_stiff o tbs son <= 0 se representen como "0mm"
+    t_stiff_text = _mm_text(t_stiff) if t_stiff > 0 else "0mm"
+    tbs_text = _mm_text(d.get("tbs")) if _num(d.get("tbs")) > 0 else "0mm"
+    tws_text = _mm_text(tws) if tws > 0 else "0mm"
+
     n_cantonera = int(_num(d.get("n_cantonera")))
     lh = _haunch_length(p, e, pfo, beam_d, n_cantonera)
     has_haunch = lh > 0
@@ -232,7 +237,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
         "Havg": 0.0,
         "BoltName_ep": bolt_name,
         "p2_ep": g,
-        "ThicknessName_t_webstiff": _mm_text(tws),
+        "ThicknessName_t_webstiff": tws_text,
         "Bws": bws,
         "Lws": lws,
         "b_ep": b_ep,
@@ -245,9 +250,9 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
         "pfo": pfo,
         "pfi": pfi,
         "pb": p[2],
-        "ThicknessName_t_compstiff": _mm_text(t_stiff),
-        "ThicknessName_t_BeamHcompstiff": _mm_text(d.get("tbs")),
-        "ThicknessName_t_tenstiff": _mm_text(t_stiff),
+        "ThicknessName_t_compstiff": t_stiff_text,
+        "ThicknessName_t_BeamHcompstiff": tbs_text,
+        "ThicknessName_t_tenstiff": t_stiff_text,
         "wf": DEFAULT_WELD_MM,
         "ww": DEFAULT_WELD_MM,
         "w3": DEFAULT_WELD_MM,
