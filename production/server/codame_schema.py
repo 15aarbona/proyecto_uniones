@@ -9,7 +9,7 @@ modelo). Referencia: `doc/codame/mapeo_columnas_codame.md`.
 # Orden de las columnas de Tabla_MOMENT_M1.
 CODAME_COLUMNS = [
     "Unicode",
-    "Standards",
+    "Normativas",
     "BEAM",
     "COLUMN",
     "MzEd_Porcen",
@@ -85,7 +85,7 @@ CODAME_DEFAULTS.update({
     "SisUniPlateSI": True,
     "Designation": "Tekla19",
     "Unicode": "",
-    "Standards": "",
+    "Normativas": "",
     "BEAM": "",
     "COLUMN": "",
     "BoltName_ep": "",

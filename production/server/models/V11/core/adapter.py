@@ -43,7 +43,7 @@ log = logging.getLogger("model-adapter")
 # Contrato de entrada (lo define el modelo): sus inputs + UNICODE.
 # ---------------------------------------------------------------------------
 # `ratio_*` en escala 0-1 (igual que en entrenamiento). `Normativas` alimenta la
-# columna `Standards` de CODAME (la `standard` predicha NO se mapea a `Standards`).
+# columna `Normativas` de CODAME (la `standard` predicha NO se mapea a `Normativas`).
 RAW_INPUT_COLUMNS = [
     "UNICODE",
     "Normativas",
