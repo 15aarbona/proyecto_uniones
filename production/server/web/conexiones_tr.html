@@ -60,8 +60,8 @@ td{padding:7px 10px;border-bottom:1px solid var(--tr-line);white-space:nowrap}
 tr:nth-child(even) td{background:#F7F9FC}
 td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-size:17px}
 #res input.cell{width:100%;min-width:64px;border:1px solid transparent;background:transparent;font:inherit;color:inherit;padding:3px 5px;border-radius:2px}
-#res input.cell:hover{border-color:var(--tr-line)}
-#res input.cell:focus{border-color:var(--tr-blue);background:#fff;outline:none}
+#res input.cell:hover:not([readonly]){border-color:var(--tr-line)}
+#res input.cell:focus:not([readonly]){border-color:var(--tr-blue);background:#fff;outline:none}
 .empty{color:var(--tr-muted);padding:6px 0}
 .badge{display:inline-block;padding:3px 8px;border-radius:3px;font-weight:600;font-size:12px;color:#fff}
 .badge.ok{background:var(--tr-green)}
@@ -303,6 +303,8 @@ function renderTable(){
 /* Rellena unívocamente una columna para todas las filas de los resultados */
 function bulkFillColumn(colName){
   if (!state.results.length) return;
+  if (colName.toLowerCase() === "unicode") return; // Prevención adicional para la columna Unicode
+  
   const sampleVal = state.results[0][colName] ?? "";
   const newVal = prompt(`Introduce el nuevo valor para la columna '${colName}' en TODAS las filas (${state.results.length} filas):`, sampleVal);
   if (newVal === null) return; // Cancelado por el usuario
@@ -312,7 +314,9 @@ function bulkFillColumn(colName){
     state.status[i] = "MODIFICADO";
     state.marked[i] = false;
   });
+  
   renderResults();
+  renderCheckResults(); // Reflejar cambio en la tabla inferior de comprobaciones inmediatamente
 }
 
 function renderResults(){
@@ -324,14 +328,17 @@ function renderResults(){
                                             : [...new Set(res.flatMap(r => Object.keys(r)))];
 
   // Encabezados: casilla marcar/desmarcar todas + columnas + comprobación.
-  const head = `<th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` + cols.map(c => `
+  const head = `<th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` + cols.map(c => {
+    const isUnicode = c.toLowerCase() === "unicode";
+    return `
     <th>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
         <span>${escHtml(c)}</span>
-        <button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna '${escAttr(c)}'">⚡ Rellenar</button>
+        ${isUnicode ? '' : `<button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna '${escAttr(c)}'">⚡ Rellenar</button>`}
       </div>
     </th>
-  `).join("") + `<th>Comprobación</th>`;
+    `;
+  }).join("") + `<th>Comprobación</th>`;
 
   const body = res.map((r, i) => {
     const st = state.status[i] || "";
@@ -341,6 +348,10 @@ function renderResults(){
       `<td><input type="checkbox" class="rowchk" data-row="${i}" ${state.marked[i] ? "checked" : ""}></td>` +
       cols.map(c => {
         const v = r[c] ?? "";
+        const isUnicode = c.toLowerCase() === "unicode";
+        if (isUnicode) {
+          return `<td><input class="cell" readonly data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}" title="Columna no editable" style="cursor:not-allowed;color:var(--tr-muted);"></td>`;
+        }
         return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
       }).join("") +
       `<td class="st ${stCls}">${escHtml(st)}</td>` +
@@ -350,7 +361,7 @@ function renderResults(){
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 
   // Editar una celda -> estado MODIFICADO (y se desmarca).
-  $("res").querySelectorAll("input.cell").forEach(inp => {
+  $("res").querySelectorAll("input.cell:not([readonly])").forEach(inp => {
     inp.addEventListener("input", () => {
       const i = +inp.dataset.row;
       state.results[i][inp.dataset.col] = inp.value;
