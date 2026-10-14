@@ -57,7 +57,19 @@ h2{margin:0 0 14px;font-size:16px;color:var(--tr-navy)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn-icon{background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:3px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:6px;font-weight:normal}
 .btn-icon:hover{background:rgba(255,255,255,.35)}
-.hbtn{background:#EEF3F9;border:1px solid var(--tr-line);border-radius:3px;cursor:pointer;font-size:17px;padding:3px 9px;line-height:1.2}
+.hbtn{
+  background:#EEF3F9;
+  border:1px solid var(--tr-line);
+  border-radius:3px;
+  cursor:pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  line-height: 1;
+}
 .hbtn:hover{background:#E1EAF5}
 .sec-head{display:flex;align-items:center;gap:10px}
 .tablewrap{overflow-x:auto}
@@ -94,7 +106,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
 <body>
 
 <aside>
-  <div class="brand"><img src="./static/TR_logo.svg" width="120px" style="justify-content: center;"><span><p style="text-align: center">Innovación con ML en Civil</p></span></div>
+  <div class="brand"><img src="./static/TR_logo.svg" width="120px"><span><p style="text-align: center">Innovación con ML en Civil</p></span></div>
   <nav aria-label="Tipos de conexión">
     <div class="grp"><p style="text-align: center">CONEXIONES A MOMENTO ATORNILLADAS</p></div>
     <div id="menu"></div>
@@ -133,7 +145,9 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   <section id="resSec" style="display:none">
     <h2 class="sec-head">
       <span>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· editable</small></span>
-      <button class="hbtn" id="exportResultsExcel" title="Descargar resultados en Excel">📥</button>
+      <button class="hbtn" id="exportResultsExcel" title="Descargar resultados en Excel">
+        <img src="./static/download.svg" width="16" height="16" alt="Descargar" style="display: block;">
+      </button>    
     </h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
@@ -147,7 +161,9 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   <section id="checkSec" style="display:none">
     <h2 class="sec-head">
       <span>Resultados de la comprobación AISC 360-10</span>
-      <button class="hbtn" id="exportCheckExcel" title="Descargar comprobaciones en Excel">📥</button>
+      <button class="hbtn" id="exportCheckExcel" title="Descargar comprobaciones en Excel">
+        <img src="./static/download.svg" width="16" height="16" alt="Descargar" style="display: block;">
+      </button>
     </h2>
     <div class="tablewrap" id="checkRes"></div>
   </section>
