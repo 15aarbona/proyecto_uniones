@@ -29,7 +29,7 @@ log = logging.getLogger("ai-server")
 
 ENABLED = os.environ.get("AI_AUTO_REFINE", "1").strip().lower() not in ("0", "false", "no")
 TARGET_RATIO = 1.0
-MAX_STEPS = 20
+MAX_STEPS = 50
 
 # Catalogos de espesores (mm). Mantener alineados con los del modelo (core/config.py).
 CAT_TP = [12, 15, 20, 25, 30, 35, 40, 45, 50, 60]
