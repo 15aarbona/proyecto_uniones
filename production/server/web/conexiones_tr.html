@@ -50,6 +50,9 @@ h2{margin:0 0 14px;font-size:16px;color:var(--tr-navy)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn-icon{background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:3px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:6px;font-weight:normal}
 .btn-icon:hover{background:rgba(255,255,255,.35)}
+.hbtn{background:#EEF3F9;border:1px solid var(--tr-line);border-radius:3px;cursor:pointer;font-size:17px;padding:3px 9px;line-height:1.2}
+.hbtn:hover{background:#E1EAF5}
+.sec-head{display:flex;align-items:center;gap:10px}
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:13.5px}
 th{background:var(--tr-navy);color:#fff;text-align:left;padding:8px 10px;white-space:nowrap;font-weight:600}
@@ -105,7 +108,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="actions">
       <button class="btn" id="add">Añadir a la tabla</button>
       <button class="btn ghost" id="reset">Limpiar campos</button>
-      <button class="btn ghost" id="btnUploadExcel">📥 Cargar Excel / CSV</button>
+      <button class="btn ghost" id="btnUploadExcel">📁 Cargar Excel / CSV</button>
       <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" style="display:none">
     </div>
   </section>
@@ -121,7 +124,10 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   </section>
 
   <section id="resSec" style="display:none">
-    <h2>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· editable</small></h2>
+    <h2 class="sec-head">
+      <span>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· editable</small></span>
+      <button class="hbtn" id="exportResultsExcel" title="Descargar resultados en Excel">📥</button>
+    </h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
       <button class="btn" id="checkBtn" disabled>Comprobar todas las entradas</button>
@@ -132,11 +138,11 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   </section>
 
   <section id="checkSec" style="display:none">
-    <h2>Resultados de la comprobación AISC 360-10</h2>
+    <h2 class="sec-head">
+      <span>Resultados de la comprobación AISC 360-10</span>
+      <button class="hbtn" id="exportCheckExcel" title="Descargar comprobaciones en Excel">📥</button>
+    </h2>
     <div class="tablewrap" id="checkRes"></div>
-    <div class="actions" style="margin-top:14px;">
-      <button class="btn ghost" id="exportCheckExcel">💾Descargar comprobaciones en Excel</button>
-    </div>
   </section>
 </main>
 
@@ -480,6 +486,19 @@ $("exportCheckExcel").onclick = () => {
   const dateStr = new Date().toISOString().slice(0, 10);
   XLSX.writeFile(workbook, `Comprobaciones_AISC36010_${dateStr}.xlsx`);
   setStatus("ok", "Exportación a Excel completada con éxito.");
+};
+
+$("exportResultsExcel").onclick = () => {
+  if (!state.results.length) {
+    setStatus("bad", "No hay resultados para exportar.");
+    return;
+  }
+  const worksheet = XLSX.utils.json_to_sheet(state.results);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Resultados");
+  const dateStr = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `Resultados_${dateStr}.xlsx`);
+  setStatus("ok", "Resultados exportados a Excel.");
 };
 
 function setStatus(kind, text, detail){
