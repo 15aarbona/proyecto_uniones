@@ -66,7 +66,7 @@ def _get_perfil(nombre: str, is_column: bool = False) -> Perfil:
             return default
 
     h = g("d_mm")
-    b = g("bf_mm")
+    b = g("b_mm")
     tf = g("tf_mm")
     tw = g("tw_mm")
     r = g("r1_mm")

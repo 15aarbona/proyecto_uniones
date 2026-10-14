@@ -35,7 +35,7 @@ def profile_lookup() -> pd.DataFrame:
     """Tabla perfil -> geometria, indexada por nombre en MAYUSCULAS (sin espacios)."""
     global _LOOKUP
     if _LOOKUP is None:
-        frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
+        frames = [pd.read_csv(DATA_DIR / name, sep=";") for name in _TEKLA_FILES]
         union = pd.concat(frames, ignore_index=True)
         union["_key"] = union["tekla_nomenclature_1"].astype(str).str.strip().str.upper()
         _LOOKUP = union.drop_duplicates(subset="_key").set_index("_key")
