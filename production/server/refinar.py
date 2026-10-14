@@ -33,7 +33,7 @@ MAX_STEPS = 20
 
 # Catalogos de espesores (mm). Mantener alineados con los del modelo (core/config.py).
 CAT_TP = [12, 15, 20, 25, 30, 35, 40, 45, 50, 60]
-CAT_TST = [0, 10, 15, 20]          # ts = tst
+CAT_TST = [0, 10, 12, 15, 20, 25, 30, 35, 40]          # ts = tst
 CAT_TWS = [0, 6, 8, 10, 12, 15, 20]
 CAT_TBS = [0, 10, 12, 15, 20, 25, 30, 35, 40]
 
