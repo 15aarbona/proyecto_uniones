@@ -422,6 +422,12 @@ class CalculadorAISC36010:
         # Step 1_2: Bolts in combined tension/shear
         ratios_desc[2] = "Bolts in combined tension/shear"
         ratios[2] = self.step1_2(self.TipoCombiEnve, num10, self.FyEd, db, int(round(self.nbol_shear_)), self.FntAME_, self.FnvAME_)
+        # Interaccion sobre los tornillos traccionados (cortante repartido entre todos): siempre da valor.
+        nbol_all = int(round(self.nbol_))
+        ratios[2] = max(
+            ratios[2],
+            self.step1_2(self.TipoCombiEnve, self.Tfb_ * nbol_all, self.FyEd, db, nbol_all, self.FntAME_, self.FnvAME_),
+        )
 
         # Step 3: End Plate / Yield Method
         if not self.yieldmethod:
@@ -683,7 +689,9 @@ class CalculadorAISC36010:
         left = self.lambdaM0AME
         if TipoCarga == "ASD":
             left = 0.5
-        num4 = 1.3 * (FntAME / (left * num2)) * num - (FntAME / (left * FnvAME)) * num3
+        fnt_stress = (FntAME / (left * num2)) * num if (left * num2) != 0 else 0.0
+        num4 = 1.3 * fnt_stress - (FntAME / (left * FnvAME)) * num3 if FnvAME != 0 else fnt_stress
+        num4 = max(min(num4, fnt_stress), 0.0)   # AISC J3-3a: F'nt <= Fnt
         num5 = (left * num2 * num4 * NumeBoltsCortante) / num
         return T / num5 if num5 != 0 else 0.0
 
@@ -970,7 +978,7 @@ class CalculadorAISC36010:
 
         num17 = 0.5988023952095809 if TipoCarga == "ASD" else 0.9
         CrAME = num17 * Fcr * A_seff / 1000.0
-        rtamem9 = Ffts / CrAME if CrAME != 0 else 0.0
+        rtamem9 = max(Ffts, 0.0) / CrAME if CrAME != 0 else 0.0   # <0: el alma sola aguanta
         return Ffts, bs, clip, tts_min, A_seff, KL, Fe, Fcr, CrAME, rtamem9, namrtm9
 
     def step10(self, TipoCarga: str, VrAME: float, Ff: float, Ffts: float, clip_s: float, esp_w_d_p: float,
@@ -998,7 +1006,7 @@ class CalculadorAISC36010:
                 tdp_min = 1000.0 * Ffts / (num * 0.6 * Fyp * (num5 - 2.0 * clip_s) * 2.0)
 
         VrdpAME = num * 0.6 * hP * esp_w_d_p * Fyp / 1000.0
-        rtamem10 = Vfdp / VrdpAME if (esp_w_d_p > tdp_min and VrdpAME != 0) else 1.0
+        rtamem10 = max(Vfdp, 0.0) / VrdpAME if (esp_w_d_p > tdp_min and VrdpAME != 0) else 1.0
         return Vfdp, Ldp, bdp, tdp_min, VrdpAME, rtamem10, namrtm10
 
     def step11(self, TipoCarga: str, angle: float, De: float, hV: float, dV: float, tfV: float,
@@ -1065,7 +1073,7 @@ class CalculadorAISC36010:
 
         num15 = 0.5 if TipoCarga == "ASD" else 0.9
         CrAME = num15 * Fcr * A_seff / 1000.0
-        rtamem12 = C1wsAME / CrAME if CrAME != 0 else 0.0
+        rtamem12 = max(C1wsAME, 0.0) / CrAME if CrAME != 0 else 0.0   # <0: el alma sola aguanta
         return C1wsAME, bs, clip, tts_min, A_seff, num14 / num11, Fe, Fcr, CrAME, rtamem12, namrtm12
 
     def step13(self, TipoCarga: str, tp: float, hV: float, tfV: float, rV: float, twV: float,

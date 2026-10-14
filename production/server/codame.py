@@ -270,7 +270,6 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
         "SisUniPlateSI": DEFAULT_SISUNI,
         "Source": _infer_source(beam),
         "Designation": DEFAULT_DESIGNATION,
-        "Estado_IA": "",
     }
     for n in range(3, _n_years() + 1):
         row[f"p{n}"] = p[n]
