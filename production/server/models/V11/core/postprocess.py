@@ -80,9 +80,6 @@ def decode_predictions(
     for j, name in enumerate(STIFFENER_COLUMNS):
         snapped = snap_to_catalog(vals[:, j], CATALOGS[name])
         out[name] = np.where(probs[:, j] >= thresholds[N_Y + j], snapped, 0.0)
-    # ts y tst son siempre iguales: se predice tst (su catalogo esta contenido en el de ts)
-    # y ts se copia.
-    out["ts"] = out["tst"]
 
     bolt_idx = bolt_logits.argmax(1)
     out["Bolt"] = np.asarray(CATALOGO_BOLT)[bolt_idx]

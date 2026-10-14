@@ -174,40 +174,13 @@ def _to_number(series: pd.Series, column: str) -> pd.Series:
         raise InputContractError(f"{column} debe ser numerico: {exc}") from exc
 
 
-RATIO_COLUMNS = ("ratio_moment", "ratio_shear", "ratio_axial")
-
-# El modelo se entreno con ratios en escala 0-1. Si una fila trae algun ratio por
-# encima de este umbral (p. ej. 70, 50, 10 = porcentajes del Excel) se interpreta como
-# porcentaje y se divide entre 100. Un ratio real de diseno nunca llega a 3 (300 %).
-RATIO_PERCENT_THRESHOLD = 3.0
-
-
-def _normalize_ratios(df: pd.DataFrame) -> pd.DataFrame:
-    """Lleva los ratios a escala 0-1 (el modelo da basura con valores 100x fuera de rango)."""
-    ratios = df[list(RATIO_COLUMNS)]
-    if ratios.isna().any().any():
-        raise InputContractError("ratio_moment, ratio_shear y ratio_axial no pueden estar vacios")
-    if (ratios < 0).any().any():
-        raise InputContractError("Los ratios no pueden ser negativos")
-
-    as_percent = (ratios > RATIO_PERCENT_THRESHOLD).any(axis=1)   # por fila: los 3 juntos
-    if as_percent.any():
-        log.warning(
-            "ratios en porcentaje en %d de %d filas (UNICODE=%s): se dividen entre 100",
-            int(as_percent.sum()), len(df), df.loc[as_percent, "UNICODE"].tolist()[:5],
-        )
-        df.loc[as_percent, list(RATIO_COLUMNS)] = ratios.loc[as_percent] / 100.0
-    return df
-
-
 def preprocess(raw_df: pd.DataFrame) -> pd.DataFrame:
     """Input basico -> dataframe con las FEATURE_COLUMNS completas del modelo."""
     df = _canonicalize(raw_df.copy())
     df = _add_profiles(df)
     df = _add_materials(df)
-    for col in RATIO_COLUMNS:
+    for col in ("ratio_moment", "ratio_shear", "ratio_axial"):
         df[col] = _to_number(df[col], col)
-    df = _normalize_ratios(df)
 
     keep = list(
         dict.fromkeys(

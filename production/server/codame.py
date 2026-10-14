@@ -219,7 +219,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
 
     row = {
         "Unicode": uid if uid is not None else "",
-        "Standards": inp.get("Normativas", ""),
+        "Normativas": inp.get("Normativas", ""),
         "BEAM": beam,
         "COLUMN": column,
         "MzEd_Porcen": _pct_int(inp.get("ratio_moment")),
