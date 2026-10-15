@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador 2D - Uniones Atornilladas V3</title>
+    <style>
+        :root {
+            --bg: #f4f4f9;
+            --panel: #ffffff;
+            --border: #ddd;
+            --primary: #2b5797;
+            --text: #333;
+            --steel: #b0c4de;
+            --plate: #708090;
+            --bolt: #ff4500;
+            --stiffener: #00008b; /* darkblue */
+            --web_stiff: #4169e1; /* royalblue */
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            height: 100vh;
+            background-color: var(--bg);
+            color: var(--text);
+        }
+        .sidebar {
+            width: 380px;
+            background-color: var(--panel);
+            border-right: 1px solid var(--border);
+            padding: 20px;
+            overflow-y: auto;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.05);
+        }
+        .sidebar h2 {
+            font-size: 1.2rem;
+            color: var(--primary);
+            margin-top: 0;
+        }
+        .form-group {
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .form-group label {
+            font-size: 0.85rem;
+            font-weight: 500;
+            flex-grow: 1;
+        }
+        .form-group input {
+            width: 80px;
+            padding: 4px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            text-align: right;
+            margin-left: 10px;
+        }
+        .form-section {
+            margin-top: 20px;
+            padding-top: 10px;
+            border-top: 2px solid var(--border);
+        }
+        .main-content {
+            flex-grow: 1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+        .views-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+        }
+        .view-card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .view-card h3 {
+            margin: 0 0 15px 0;
+            font-size: 1rem;
+            color: var(--primary);
+        }
+        svg {
+            background-color: #fafafa;
+            border: 1px dashed #ccc;
+        }
+        button.render-btn {
+            width: 100%;
+            padding: 10px;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+        button.render-btn:hover {
+            background-color: #1e3f70;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar">
+        <h2>Parámetros del Prediseño</h2>
+        
+        <div class="form-section">
+            <strong>Geometría Viga (mm)</strong>
+            <div class="form-group"><label>Canto (d)</label><input type="number" id="beam_d" value="290"></div>
+            <div class="form-group"><label>Ala Ancho (bf)</label><input type="number" id="beam_bf" value="150"></div>
+            <div class="form-group"><label>Ala Espesor (tf)</label><input type="number" id="beam_tf" value="10.7"></div>
+            <div class="form-group"><label>Alma Espesor (tw)</label><input type="number" id="beam_tw" value="7.1"></div>
+        </div>
+
+        <div class="form-section">
+            <strong>Geometría Pilar (mm)</strong>
+            <div class="form-group"><label>Canto (d)</label><input type="number" id="col_d" value="300"></div>
+            <div class="form-group"><label>Ala Ancho (bf)</label><input type="number" id="col_bf" value="300"></div>
+            <div class="form-group"><label>Ala Espesor (tf)</label><input type="number" id="col_tf" value="14"></div>
+            <div class="form-group"><label>Alma Espesor (tw)</label><input type="number" id="col_tw" value="8.5"></div>
+        </div>
+
+        <div class="form-section">
+            <strong>Placa Frontal (End Plate)</strong>
+            <div class="form-group"><label>Altura (Lp)</label><input type="number" id="Lp" value="450"></div>
+            <div class="form-group"><label>Ancho (Bp)</label><input type="number" id="Bp" value="180"></div>
+            <div class="form-group"><label>Espesor (tp)</label><input type="number" id="tp" value="20"></div>
+            <div class="form-group"><label>Vuelo sup. (ext)</label><input type="number" id="ext_top" value="20"></div>
+        </div>
+        
+        <div class="form-section">
+            <strong>Cantonera (Haunch)</strong>
+            <div class="form-group"><label>Altura/Long (Lh)</label><input type="number" id="Lh" value="150"></div>
+        </div>
+
+        <div class="form-section">
+            <strong>Tornillería (Bolts)</strong>
+            <div class="form-group"><label>Gramil (g)</label><input type="number" id="g" value="100"></div>
+            <div class="form-group"><label>Borde Sup (e)</label><input type="number" id="e" value="40"></div>
+            <div class="form-group"><label>Paso p1</label><input type="number" id="p1" value="70"></div>
+            <div class="form-group"><label>Paso p2</label><input type="number" id="p2" value="90"></div>
+            <div class="form-group"><label>Paso p3</label><input type="number" id="p3" value="90"></div>
+            <div class="form-group"><label>Paso p4</label><input type="number" id="p4" value="0"></div>
+        </div>
+        
+        <div class="form-section">
+            <strong>Rigidizadores (Stiffeners)</strong>
+            <div class="form-group"><label>Alma Pilar (tws - webstiff)</label><input type="number" id="tws" value="10"></div>
+            <div class="form-group"><label>Tracción Pilar (tst - tenstiff)</label><input type="number" id="tst" value="10"></div>
+            <div class="form-group"><label>Compresión Pilar (ts - compstiff)</label><input type="number" id="ts" value="10"></div>
+            <div class="form-group"><label>Compresión Viga (tbs - BeamHcomp)</label><input type="number" id="tbs" value="10"></div>
+        </div>
+
+        <button class="render-btn" onclick="drawAll()">Visualizar Geometría</button>
+    </div>
+
+    <div class="main-content">
+        <div class="views-container">
+            <div class="view-card">
+                <h3>Vista Frontal (Sección A-A / Placa)</h3>
+                <svg id="frontView" width="350" height="550"></svg>
+            </div>
+            
+            <div class="view-card">
+                <h3>Vista Lateral (Perfil)</h3>
+                <svg id="sideView" width="450" height="550"></svg>
+            </div>
+            
+            <div class="view-card">
+                <h3>Vista Superior (Sección C-C)</h3>
+                <svg id="topView" width="450" height="350"></svg>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function getVal(id) {
+            return parseFloat(document.getElementById(id).value) || 0;
+        }
+
+        function createRect(x, y, w, h, fill, stroke="black", strokeWidth=1) {
+            return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+        }
+        function createCircle(cx, cy, r, fill) {
+            return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" stroke="black" stroke-width="1" />`;
+        }
+        function createLine(x1, y1, x2, y2, stroke, dash="") {
+            return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="1.5" stroke-dasharray="${dash}" />`;
+        }
+        function createPolygon(points, fill) {
+            return `<polygon points="${points}" fill="${fill}" stroke="black" stroke-width="1" />`;
+        }
+
+        function drawAll() {
+            const beam_d = getVal('beam_d'), beam_bf = getVal('beam_bf'), beam_tf = getVal('beam_tf'), beam_tw = getVal('beam_tw');
+            const col_d = getVal('col_d'), col_bf = getVal('col_bf'), col_tf = getVal('col_tf'), col_tw = getVal('col_tw');
+            const Lp = getVal('Lp'), Bp = getVal('Bp'), tp = getVal('tp'), ext_top = getVal('ext_top');
+            const Lh = getVal('Lh');
+            const g = getVal('g'), e = getVal('e');
+            const pasos = [getVal('p1'), getVal('p2'), getVal('p3'), getVal('p4')].filter(p => p > 0);
+            
+            const tws = getVal('tws'); 
+            const tst = getVal('tst'); 
+            const ts  = getVal('ts');  
+            const tbs = getVal('tbs'); 
+
+            const scale = 0.8; 
+            const length_beam_drawn = 250; 
+            
+            const colSteel = "var(--steel)";
+            const colPlate = "var(--plate)";
+            const colBolt = "var(--bolt)";
+            const colStiff = "var(--stiffener)";
+            const colWebStiff = "var(--web_stiff)";
+
+            // --- VISTA FRONTAL ---
+            let f_svg = "";
+            let f_cx = 350 / 2; 
+            let f_cy = 50;      
+            
+            f_svg += createRect(f_cx - (Bp/2)*scale, f_cy, Bp*scale, Lp*scale, colPlate);
+            const beam_start_y = f_cy + ext_top*scale;
+            f_svg += createRect(f_cx - (beam_bf/2)*scale, beam_start_y, beam_bf*scale, beam_tf*scale, "none", "black", 1.5);
+            f_svg += createRect(f_cx - (beam_tw/2)*scale, beam_start_y + beam_tf*scale, beam_tw*scale, (beam_d - 2*beam_tf)*scale, "none", "black", 1.5);
+            f_svg += createRect(f_cx - (beam_bf/2)*scale, beam_start_y + beam_d*scale - beam_tf*scale, beam_bf*scale, beam_tf*scale, "none", "black", 1.5);
+            
+            if(Lh > 0) {
+                f_svg += createRect(f_cx - (beam_tw/2)*scale, beam_start_y + beam_d*scale, beam_tw*scale, Lh*scale, "none", "blue", 1.5);
+                f_svg += createRect(f_cx - (beam_bf/2)*scale, beam_start_y + beam_d*scale + Lh*scale - beam_tf*scale, beam_bf*scale, beam_tf*scale, "none", "blue", 1.5);
+            }
+
+            let current_y = f_cy + e*scale;
+            f_svg += createCircle(f_cx - (g/2)*scale, current_y, 4, colBolt);
+            f_svg += createCircle(f_cx + (g/2)*scale, current_y, 4, colBolt);
+            for(let p of pasos) {
+                current_y += p*scale;
+                f_svg += createCircle(f_cx - (g/2)*scale, current_y, 4, colBolt);
+                f_svg += createCircle(f_cx + (g/2)*scale, current_y, 4, colBolt);
+            }
+            document.getElementById('frontView').innerHTML = f_svg;
+
+            // --- VISTA LATERAL (Perfil) ---
+            let s_svg = "";
+            let s_cx = 150; 
+            let s_cy = 50; 
+            
+            s_svg += createRect(s_cx - col_d*scale, s_cy - 20, col_d*scale, (Lp + 60)*scale, "#e6e6e6", "gray");
+            s_svg += createRect(s_cx - col_tf*scale, s_cy - 20, col_tf*scale, (Lp + 60)*scale, colSteel); 
+            s_svg += createRect(s_cx - col_d*scale, s_cy - 20, col_tf*scale, (Lp + 60)*scale, colSteel); 
+            s_svg += createLine(s_cx - (col_d/2)*scale, s_cy - 30, s_cx - (col_d/2)*scale, s_cy + (Lp + 70)*scale, "gray", "5,5");
+
+            s_svg += createRect(s_cx, s_cy, tp*scale, Lp*scale, colPlate);
+            
+            const viga_x = s_cx + tp*scale;
+            const viga_y = s_cy + ext_top*scale;
+            s_svg += createRect(viga_x, viga_y, length_beam_drawn*scale, beam_tf*scale, colSteel); 
+            s_svg += createRect(viga_x, viga_y + beam_d*scale - beam_tf*scale, length_beam_drawn*scale, beam_tf*scale, colSteel); 
+            s_svg += createRect(viga_x, viga_y + beam_tf*scale, length_beam_drawn*scale, (beam_d - 2*beam_tf)*scale, colSteel); 
+            
+            if(Lh > 0) {
+                let pts = `${viga_x},${viga_y + beam_d*scale} ${viga_x + (Lh*1.5)*scale},${viga_y + beam_d*scale} ${viga_x},${viga_y + beam_d*scale + Lh*scale}`;
+                s_svg += createPolygon(pts, "#a2b5cd");
+                s_svg += createLine(viga_x + (Lh*1.5)*scale, viga_y + beam_d*scale, viga_x, viga_y + beam_d*scale + Lh*scale, "black");
+            }
+
+            if(tst > 0) {
+                s_svg += createRect(s_cx - col_d*scale + col_tf*scale, viga_y, (col_d - 2*col_tf)*scale, tst*scale, colStiff);
+            }
+            if(ts > 0) {
+                let y_comp_stiff = viga_y + beam_d*scale - ts*scale;
+                if(Lh > 0) y_comp_stiff += Lh*scale;
+                s_svg += createRect(s_cx - col_d*scale + col_tf*scale, y_comp_stiff, (col_d - 2*col_tf)*scale, ts*scale, colStiff);
+            }
+            if(tbs > 0) {
+                let tbs_x = viga_x + (length_beam_drawn - 30)*scale; 
+                let tbs_y = viga_y + beam_tf*scale;
+                let tbs_h = (beam_d - 2*beam_tf)*scale; // Termina donde acaba la viga interiormente
+                s_svg += createRect(tbs_x, tbs_y, tbs*scale, tbs_h, colStiff);
+            }
+            
+            let sy = s_cy + e*scale;
+            s_svg += createLine(s_cx - col_tf*scale - 10, sy, s_cx + tp*scale + 10, sy, "red", "4,2");
+            for(let p of pasos) {
+                sy += p*scale;
+                s_svg += createLine(s_cx - col_tf*scale - 10, sy, s_cx + tp*scale + 10, sy, "red", "4,2");
+            }
+            document.getElementById('sideView').innerHTML = s_svg;
+
+            // --- VISTA SUPERIOR (Sección C-C) ---
+            let t_svg = "";
+            let t_cx = 150; 
+            let t_cy = 150; 
+            
+            // PILAR: Alas verticales, alma horizontal que las une
+            t_svg += createRect(t_cx - col_d*scale, t_cy - (col_bf/2)*scale, col_tf*scale, col_bf*scale, colSteel); // Ala trasera
+            t_svg += createRect(t_cx - col_tf*scale, t_cy - (col_bf/2)*scale, col_tf*scale, col_bf*scale, colSteel); // Ala frontal conectada
+            t_svg += createRect(t_cx - col_d*scale + col_tf*scale, t_cy - (col_tw/2)*scale, (col_d - 2*col_tf)*scale, col_tw*scale, colSteel); // Alma
+            
+            // Rigidizador de Alma de Pilar (tws) - Paralelo al alma (horizontal en esta vista)
+            if(tws > 0) {
+                t_svg += createRect(t_cx - col_d*scale + col_tf*scale, t_cy - (col_tw/2)*scale - tws*scale, (col_d - 2*col_tf)*scale, tws*scale, colWebStiff);
+            }
+
+            // Placa Frontal
+            t_svg += createRect(t_cx, t_cy - (Bp/2)*scale, tp*scale, Bp*scale, colPlate);
+            
+            // Viga vista desde arriba
+            t_svg += createRect(t_cx + tp*scale, t_cy - (beam_bf/2)*scale, length_beam_drawn*scale, beam_bf*scale, colSteel); 
+            t_svg += createLine(t_cx + tp*scale, t_cy, t_cx + tp*scale + length_beam_drawn*scale, t_cy, "black", "5,5"); 
+
+            // Rigidizador de Viga (tbs) en vista superior
+            if(tbs > 0) {
+                let tbs_x = t_cx + tp*scale + (length_beam_drawn - 30)*scale;
+                t_svg += createRect(tbs_x, t_cy - (beam_bf/2)*scale, tbs*scale, beam_bf*scale, colStiff);
+            }
+
+            document.getElementById('topView').innerHTML = t_svg;
+        }
+
+        window.onload = drawAll;
+    </script>
+</body>
+</html>
