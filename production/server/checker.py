@@ -7,7 +7,8 @@ Convierte una fila del esquema CODAME (Tabla_MOMENT_M1, editada por el revisor) 
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from functools import lru_cache
+from typing import Any, Dict, List, Tuple
 
 from modelos import ConexionInput, Perfil
 from calculador import CalculadorAISC36010
@@ -52,7 +53,10 @@ def _mm_or_none(v):
     return s if s.endswith("mm") else f"{int(round(_num(s)))}mm"
 
 
+@lru_cache(maxsize=1024)
 def _get_perfil(nombre: str, is_column: bool = False) -> Perfil:
+    # En cache: consultar el catalogo (pandas) y construir el Perfil en cada comprobacion
+    # era lo mas caro de preparar la entrada. Los perfiles no se modifican.
     geom = get_profile(nombre)
     if geom is None:
         raise ValueError(f"Perfil '{nombre}' no encontrado en los catalogos Tekla.")
@@ -66,7 +70,7 @@ def _get_perfil(nombre: str, is_column: bool = False) -> Perfil:
             return default
 
     h = g("d_mm")
-    b = g("b_mm")
+    b = g("b_mm") or g("bf_mm")   # el catalogo Tekla usa b_mm (bf_mm solo como respaldo)
     tf = g("tf_mm")
     tw = g("tw_mm")
     r = g("r1_mm")
@@ -88,6 +92,11 @@ def _get_perfil(nombre: str, is_column: bool = False) -> Perfil:
             prmin = max(50.0, tw + 2.0 * r + 60.0)
         if prmax <= 0 or prmax <= prmin:
             prmax = max(prmin + 30.0, b - 2.0 * 30.0)
+
+    # Geometria basica obligatoria: con alguna a 0 el calculador acaba dividiendo por cero.
+    faltan = [n for n, v in (("d_mm", h), ("b_mm", b), ("tf_mm", tf), ("tw_mm", tw)) if v <= 0]
+    if faltan:
+        raise ValueError(f"Perfil '{nombre}': faltan datos geometricos en el catalogo Tekla ({', '.join(faltan)} = 0 o vacio).")
 
     return Perfil(
         nombre=str(nombre),
@@ -121,6 +130,11 @@ def row_to_conexion_input(row: Dict[str, Any]) -> ConexionInput:
     pfo = _num(row.get("pfo"), 50.0)
     dev = _num(row.get("dev"), 50.0)
     pfi = _num(row.get("pfi"), 30.0)
+
+    if p2_ep <= 0:
+        raise ValueError(f"p2_ep (gramil g) = {p2_ep:g}: debe ser mayor que 0 para comprobar la union.")
+    if b_ep <= 0:
+        raise ValueError(f"b_ep (ancho de chapa) = {b_ep:g}: debe ser mayor que 0 para comprobar la union.")
     pb = _num(row.get("pb"), 80.0)
 
     p3 = _num(row.get("p3")); p4 = _num(row.get("p4")); p5 = _num(row.get("p5"))
@@ -190,6 +204,12 @@ def row_to_conexion_input(row: Dict[str, Any]) -> ConexionInput:
         SisUniPerMetri=_bool(row.get("SisUniBoltSI"), True),
         SisUniPlaMetri=_bool(row.get("SisUniPlateSI"), True),
     )
+
+
+def calcular_ratios_row(row: Dict[str, Any]) -> Tuple[Dict[str, float], CalculadorAISC36010]:
+    """Via rapida: solo los ratios ({descripcion: valor}) y el calculador (para sus residuos)."""
+    calc = CalculadorAISC36010(inp=row_to_conexion_input(row))
+    return calc.calcular_ratios(), calc
 
 
 def check_single_row(row: Dict[str, Any]) -> Dict[str, Any]:

@@ -207,7 +207,8 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
 
     b_ep = _plate_width(
         _num(d.get("Bp")), g, bolt,
-        _geom(geom, "bf_mm"), _geom(col_geom, "bf_mm"), uid,
+        _geom(geom, "b_mm") or _geom(geom, "bf_mm"),
+        _geom(col_geom, "b_mm") or _geom(col_geom, "bf_mm"), uid,
     )
 
     tws = _num(d.get("tws"))

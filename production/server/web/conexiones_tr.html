@@ -174,7 +174,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     </h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
-      <button class="btn" id="checkBtn" disabled>Comprobar todas las entradas</button>
+      <button class="btn" id="checkBtn" disabled>Volver a comprobar todas las entradas</button>
       <button class="btn ghost" id="markValid">Marcar "CUMPLE"</button>
       <button class="btn ghost" id="markMod">Marcar "MODIFICADO"</button>
       <button class="btn green" id="sendMarked" disabled>Enviar conexiones marcadas</button>
@@ -601,7 +601,11 @@ $("send").onclick = async () => {
       state.marked = state.results.map(() => false);
       state.status = state.results.map(() => "");
       renderResults(); renderCheckResults();
-      setStatus("ok", `Predicción completada con el modelo ${data.model_name ?? ""}: ${state.results.length} uniones. Edita si quieres y pulsa "Comprobar".`);
+      // El servidor ya devuelve la comprobación de la fila final: se muestra directamente.
+      // (Si no viniera, se pide a /check como antes.)
+      const pre = `Predicción completada con el modelo ${data.model_name ?? ""}: ${state.results.length} uniones. `;
+      if (Array.isArray(data.checks) && data.checks.length === state.results.length) applyChecks(data.checks, pre);
+      else await runCheck(pre);
     }
   } catch (e){
     setStatus("bad", "No se pudo conectar con el servidor", e.message);
@@ -609,9 +613,20 @@ $("send").onclick = async () => {
   btn.disabled = !state.rows.length;
 };
 
-$("checkBtn").onclick = async () => {
+function applyChecks(rows, prefix = ""){
+  state.checked = rows;
+  state.status = state.results.map((_, i) => {
+    const c = rows[i];
+    return (c && c.cumple) ? "CUMPLE" : "NO CUMPLE";
+  });
+  renderResults();
+  renderCheckResults();
+  setStatus("ok", prefix + "Comprobación AISC 360-10 finalizada. Si editas la tabla, pulsa \"Comprobar\" para volver a validar.");
+}
+$("checkBtn").onclick = () => runCheck();   // revalidar tras editar la tabla
+async function runCheck(prefix = ""){
   const btn = $("checkBtn");
-  btn.disabled = true; setStatus("", "Comprobando " + state.results.length + " uniones con AISC 360-10…");
+  btn.disabled = true; setStatus("", prefix + "Comprobando " + state.results.length + " uniones con AISC 360-10…");
   try {
     const r = await fetch("/check", {
       method: "POST",
@@ -622,14 +637,7 @@ $("checkBtn").onclick = async () => {
     if (!r.ok){
       setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2));
     } else {
-      state.checked = data.rows || [];
-      state.status = state.results.map((_, i) => {
-        const c = data.rows[i];
-        return (c && c.cumple) ? "CUMPLE" : "NO CUMPLE";
-      });
-      renderResults();
-      renderCheckResults();
-      setStatus("ok", "Comprobación AISC 360-10 finalizada.");
+      applyChecks(data.rows || [], prefix);
     }
   } catch (e){
     setStatus("bad", "Error enviando la comprobación", e.message);

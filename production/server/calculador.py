@@ -4,15 +4,21 @@ Traducción directa de M_C_AISC36010.cs a Python.
 """
 from __future__ import annotations
 
+import logging
 import math
-from typing import List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any
 
 from modelos import ConexionInput, ResultadoConexion, FilaRatio, Complementario, Perfil
 from externos import Externos, tablapernos, tablaplaca
 from perfiles import RepositorioPerfiles
 
+log = logging.getLogger("ai-server")
+
 
 class CalculadorAISC36010:
+    solo_ratios: bool = False
+    ratios_dict: Dict[str, float] = {}
+
     def __init__(self, inp: ConexionInput, ext: Optional[Externos] = None, repo_perfiles: Optional[RepositorioPerfiles] = None) -> None:
         self.inp = inp
         self.ext = ext or Externos()
@@ -252,6 +258,16 @@ class CalculadorAISC36010:
             self.FxEd = self.inp.FxEd_Porcen / 100.0 * mod_aux.traccionres_AME(self.viga.A, self.fy)  # ya en kN
         if self.inp.FzEd_Porcen is not None:
             self.FzEd = self.inp.FzEd_Porcen / 100.0 * mod_aux.ResisCortanteEjeDebil_AME(self.viga.b, self.viga.tf, self.fy)  # ya en kN
+
+    def calcular_ratios(self) -> Dict[str, float]:
+        """{descripcion del ratio: valor}. Mismo calculo que `calcular_conexion`, sin construir el
+        resultado completo (complementarios, objetos pydantic): para comprobar muchas veces."""
+        self.solo_ratios = True
+        try:
+            self.calcular_conexion()
+        finally:
+            self.solo_ratios = False
+        return self.ratios_dict
 
     def calcular_conexion(self) -> ResultadoConexion:
         self._cargar_perfiles()
@@ -556,6 +572,12 @@ class CalculadorAISC36010:
             if ratios[i] > self.RatioPesimo_:
                 self.RatioPesimo_ = ratios[i]
                 num49 = i
+
+        # Via rapida (calcular_ratios): solo se necesitan los ratios, sin complementarios ni pydantic.
+        if self.solo_ratios:
+            self.ratios_dict = {str(ratios_desc[i]).strip(): ratios[i]
+                                for i in range(self.NumeRatios) if not math.isnan(ratios[i])}
+            return None  # type: ignore[return-value]
 
         # Resultados complementarios
         desc_resul_comp[0] = "PRMIN"
@@ -946,7 +968,7 @@ class CalculadorAISC36010:
         Ffts = Ff - BrminAME
         # Si la fuerza requerida es <= 0 o no hay espesor asignado, no hace falta rigidizador (medidas a 0)
         if esp_t_s == 0.0 or Ffts <= 0.0:
-            print(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm9}' (Ffts={Ffts:.2f} kN). Anulando medidas -> bs=0.0, clip=0.0, tts_min=0.0, A_seff=0.0")
+            log.debug(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm9}' (Ffts={Ffts:.2f} kN). Anulando medidas -> bs=0.0, clip=0.0, tts_min=0.0, A_seff=0.0")
             return max(Ffts, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm9
 
         bs = math.floor((bP - twP) / 2.0)
@@ -990,7 +1012,7 @@ class CalculadorAISC36010:
         Vfdp = Ff - VrAME
         # Si la solicitación sobre la chapa de refuerzo es <= 0 o no existe espesor asignado, se devuelven dimensiones a 0
         if esp_w_d_p == 0.0 or Vfdp <= 0.0:
-            print(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm10}' (Vfdp={Vfdp:.2f} kN). Anulando medidas -> Ldp=0.0, bdp=0.0, tdp_min=0.0, VrdpAME=0.0")
+            log.debug(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm10}' (Vfdp={Vfdp:.2f} kN). Anulando medidas -> Ldp=0.0, bdp=0.0, tdp_min=0.0, VrdpAME=0.0")
             return max(Vfdp, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, namrtm10
 
         Ldp = round((De + 2.0 * (3.0 * (tfP + rP + tp))) / 10.0) * 10.0
@@ -1048,7 +1070,7 @@ class CalculadorAISC36010:
         C1wsAME = C1 - BrminAME_beam
         # Si la fuerza sobre el rigidizador de la cartela es <= 0 o no hay espesor asignado, se eliminan sus dimensiones
         if esp_h_w_s == 0.0 or C1wsAME <= 0.0:
-            print(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm12}' (C1wsAME={C1wsAME:.2f} kN). Anulando medidas -> bs=0.0, clip=0.0, tts_min=0.0, A_seff=0.0")
+            log.debug(f"[LOG CALCULADOR] Ratio negativo/nulo en '{namrtm12}' (C1wsAME={C1wsAME:.2f} kN). Anulando medidas -> bs=0.0, clip=0.0, tts_min=0.0, A_seff=0.0")
             return max(C1wsAME, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, namrtm12
 
         bs = math.floor((bbV - twV) / 2.0)

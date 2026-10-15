@@ -11,14 +11,16 @@ Endpoints:
   GET  /model                   Contrato del modelo por defecto
   GET  /schema?model=...        Inputs del modelo + columnas de resultado CODAME
   POST /model/activate          Carga/recarga un modelo por nombre
-  POST /predict                 {"model": "...", "rows": [...]} -> 63 columnas CODAME
+  POST /predict                 {"model": "...", "rows": [...]} -> columnas CODAME + comprobacion ("checks")
   POST /check                   Comprobacion AISC 360-10 sobre filas CODAME
   POST /validate                Guarda filas validadas (sin reentreno)
   GET  /dataset/summary         Resumen del dataset acumulado
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, List
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
@@ -31,12 +33,22 @@ import config
 import model_registry
 import predictor
 import storage
-import train_dataset
 
+# Logs: un archivo por sesion (cada arranque del servidor), sin salida por pantalla.
+# La ruta se comparte por variable de entorno con los procesos hijos del ajuste (refinar.py),
+# que escriben en el mismo archivo. AI_LOG_CONSOLE=1 vuelve a mostrarlos tambien por consola.
+_LOG_DIR = config.DATA_DIR / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = os.environ.setdefault(
+    "AI_LOG_FILE", str(_LOG_DIR / f"server_{datetime.now():%Y-%m-%d_%H-%M-%S}.log")
+)
+_handlers = [logging.FileHandler(LOG_FILE, encoding="utf-8")]
+if os.environ.get("AI_LOG_CONSOLE", "").strip().lower() in ("1", "true", "yes"):
+    _handlers.append(logging.StreamHandler())
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(config.LOG_PATH), logging.StreamHandler()],
+    handlers=_handlers,
 )
 log = logging.getLogger("ai-server")
 
@@ -171,7 +183,7 @@ def predict(payload: RowsIn):
     name = payload.model or config.MODEL_NAME
     log.info("/predict: modelo=%s, %d filas", name, len(payload.rows))
     try:
-        predictions = predictor.predict_rows(name, payload.rows)
+        predictions, checks = predictor.predict_and_check(name, payload.rows)
     except predictor.InputContractError:
         raise
     except KeyError as exc:
@@ -180,7 +192,7 @@ def predict(payload: RowsIn):
         log.exception("Error prediciendo")
         raise HTTPException(status_code=500, detail=f"Error al predecir: {exc}")
     log.info("/predict: %d filas devueltas", len(predictions))
-    return {"model_name": name, "rows": predictions}
+    return {"model_name": name, "rows": predictions, "checks": checks}
 
 
 @app.post(
@@ -213,28 +225,6 @@ def validate(payload: RowsIn, background_tasks: BackgroundTasks):
     return {"status": "ok", **result}
 
 
-@app.post(
-    "/dataset/append",
-    tags=["datos"],
-    summary="Anade conexiones validadas al parquet de reentreno",
-    response_description="Filas anadidas/actualizadas (upsert por Unicode) y total.",
-)
-def dataset_append(payload: RowsIn):
-    """Traduce las conexiones marcadas al esquema de `data_final` y las persiste
-    (reemplaza `Unicode` duplicados; los datos que falten quedan como NULL)."""
-    if not payload.rows:
-        raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
-    log.info("/dataset/append: %d filas", len(payload.rows))
-    try:
-        result = train_dataset.append_to_parquet(payload.rows)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Error escribiendo el parquet de reentreno")
-        raise HTTPException(status_code=500, detail=f"Error al guardar el dataset: {exc}")
-    log.info("/dataset/append: +%d nuevas, %d actualizadas, total=%d",
-             result["added"], result["updated"], result["total_rows"])
-    return {"status": "ok", **result}
-
-
 @app.get("/dataset/summary", tags=["datos"], summary="Resumen del dataset acumulado")
 def dataset_summary():
     return storage.summary()
@@ -250,4 +240,6 @@ app.mount("/web", StaticFiles(directory=config.BASE_DIR / "web", html=True), nam
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=config.HOST, port=config.PORT)
+    # log_config=None: los logs de uvicorn (accesos, errores) van al mismo archivo, no a pantalla.
+    print(f"Servidor en http://{config.HOST}:{config.PORT}  |  logs: {LOG_FILE}", flush=True)
+    uvicorn.run(app, host=config.HOST, port=config.PORT, log_config=None)

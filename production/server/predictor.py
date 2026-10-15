@@ -107,6 +107,19 @@ def _validate_contract(
 
 
 def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return _predict(model_name, rows, with_checks=False)[0]
+
+
+def predict_and_check(model_name: str, rows: List[Dict[str, Any]]):
+    """Prediccion + ajuste + comprobacion en un solo paso: (filas, comprobaciones).
+
+    La comprobacion se hace una sola vez, sobre la fila final, de forma que el cliente no
+    tiene que llamar a /check justo despues de predecir.
+    """
+    return _predict(model_name, rows, with_checks=True)
+
+
+def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
     bundle = model_registry.get(model_name)
     adapter = bundle["adapter"]
     contract = bundle["contract"]
@@ -124,7 +137,7 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
     except adapter.InputContractError as exc:
         raise InputContractError(str(exc), model=name, expected=raw_inputs) from exc
 
-    output: List[Dict[str, Any]] = []
+    coded: List[Dict[str, Any]] = []
     for i in range(len(df)):
         input_row = features.iloc[i].to_dict()
         design_row = design.iloc[i].to_dict()
@@ -139,32 +152,38 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
                 i,
             )
             partial = {}
-        row = fill_missing(partial)
-        if refinar.ENABLED:
-            row, _ = refinar.refine(row)   # sube espesores de placas hasta que pasen los ratios
+        coded.append(fill_missing(partial))
+
+    # Ajuste de placas/cargas (+ comprobacion final): una union por proceso (ver refinar.py).
+    refined = refinar.refine_many(coded, with_check=with_checks)
+
+    output: List[Dict[str, Any]] = []
+    checks: List[Dict[str, Any]] = []
+    for i, (row, check) in enumerate(refined):
         output.append(_clean_dict(row))
-    return output
+        if with_checks:
+            checks.append(_clean_dict(check) if check is not None else _check_one(i, output[-1]))
+    return output, checks
+
+
+def _check_one(i: int, row: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _clean_dict(perform_check([row])[0])
+    except Exception as exc:  # noqa: BLE001  (informe de error por entrada)
+        log.exception("check_rows fallo (fila=%d)", i)
+        return {
+            "Unicode": row.get("Unicode", row.get("UNICODE", "")),
+            "cumple": False,
+            "ratio_pesimo": None,
+            "descripcion_ratio_pesimo": f"Error en la comprobacion: {exc}",
+            "ratios": [],
+            "complementarios": [],
+        }
 
 
 def check_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Comprobacion AISC 360-10 sobre filas del esquema CODAME (editadas)."""
-    output: List[Dict[str, Any]] = []
-    for i, row in enumerate(rows):
-        try:
-            output.append(_clean_dict(perform_check([row])[0]))
-        except Exception as exc:  # noqa: BLE001  (informe de error por entrada)
-            log.exception("check_rows fallo (fila=%d)", i)
-            output.append(
-                {
-                    "Unicode": row.get("Unicode", row.get("UNICODE", "")),
-                    "cumple": False,
-                    "ratio_pesimo": None,
-                    "descripcion_ratio_pesimo": f"Error en la comprobacion: {exc}",
-                    "ratios": [],
-                    "complementarios": [],
-                }
-            )
-    return output
+    return [_check_one(i, row) for i, row in enumerate(rows)]
 
 
 def schema(model_name: str) -> Dict[str, Any]:
