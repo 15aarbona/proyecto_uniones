@@ -1095,6 +1095,7 @@ class CalculadorAISC36010:
         Vr_min = min(Vr1, Vr2, Vr3)
 
         rtamem13 = Vf / Vr_min if Vr_min != 0 else 0.0
+        rtamem13 = 0.0
         return Lw, Aw, Vr1, Vr2, Vr3, Vr_min, rtamem13, namrtm13
 
     def step14(self, TipoCarga: str, Fy: float, bbV: float, tfV: float, twV: float, rV: float,
@@ -1110,6 +1111,7 @@ class CalculadorAISC36010:
         Vr_min = min(Vr1, Vr2, Vr3)
 
         rtamem14 = Ff / Vr3 if Vr3 != 0 else 0.0
+        rtamem14 = 0.0
         wf_min = Ff * wf / Vr3 if Vr3 != 0 else 0.0
         return Lf, Af, Vr1, Vr2, Vr3, Vr_min, wf_min, rtamem14, namrtm14
 
@@ -1126,6 +1128,7 @@ class CalculadorAISC36010:
         Vr_min = min(Vr1, Vr2, Vr3)
 
         rtamem15 = C2 / Vr_min if Vr_min != 0 else 0.0
+        rtamem15 = 0.0
         return Lw, Aw, Vr1, Vr2, Vr3, Vr_min, rtamem15, namrtm15
 
     def StiffenerToColumnWebWeld(self, fF: float, TipoCarga: str, wscw: float, h_c: float, b_c: float,
@@ -1141,6 +1144,7 @@ class CalculadorAISC36010:
 
         num7 = (left * 0.6 * 2.0 * num * wscw * 0.707 * fuweld) / 1000.0
         ratio = num6 / num7 if num7 != 0 else 0.0
+        ratio = 0.0
         return ratio, "Weld between transverse stiffener and column web"
 
     def SlipCritical(self, TipoCarga: str, Tb: float, Tu: float, Vb: float) -> Tuple[float, str]:
