@@ -10,6 +10,7 @@ Endpoints:
   GET  /models                  Modelos instalados y cargados
   GET  /model                   Contrato del modelo por defecto
   GET  /schema?model=...        Inputs del modelo + columnas de resultado CODAME
+  GET  /profiles?names=...      Geometria de secciones (para el visualizador 2D)
   POST /model/activate          Carga/recarga un modelo por nombre
   POST /predict                 {"model": "...", "rows": [...]} -> columnas CODAME + comprobacion ("checks")
   POST /check                   Comprobacion AISC 360-10 sobre filas CODAME
@@ -29,6 +30,9 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import pandas as pd
+
+import catalogo
 import config
 import model_registry
 import predictor
@@ -127,6 +131,37 @@ def list_models() -> Dict[str, Any]:
         "loaded_models": model_registry.loaded_models(),
         "default_model": config.MODEL_NAME,
     }
+
+
+@app.get(
+    "/profiles",
+    tags=["catalogo"],
+    summary="Geometria de secciones por nombre (para el visualizador 2D)",
+)
+def profiles(names: str = Query(..., description="Nombres de perfil separados por comas")):
+    """Devuelve {nombre: {cota: valor}} o null por cada perfil desconocido."""
+    result: Dict[str, Any] = {}
+    for raw in names.split(","):
+        name = raw.strip()
+        if not name:
+            continue
+        geom = catalogo.get_profile(name)
+        if geom is None:
+            result[name] = None
+        else:
+            def g(k):
+                if k not in geom.index:
+                    return None
+                v = geom.get(k)
+                return None if pd.isna(v) else v
+            bf = g("bf_mm")
+            if bf in (None, 0, 0.0):
+                bf = g("b_mm")   # en el catalogo EU el ancho de ala va en b_mm
+            result[name] = {
+                "type": g("type"), "d_mm": g("d_mm"), "bf_mm": bf,
+                "tw_mm": g("tw_mm"), "tf_mm": g("tf_mm"), "r1_mm": g("r1_mm"),
+            }
+    return {"profiles": result}
 
 
 @app.get("/model", tags=["modelos"], summary="Contrato del modelo por defecto")
