@@ -902,7 +902,7 @@ function drawSide(m){
     s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamBot - m.ts), Math.max(0,(m.cd - 2*m.ctf))*scale, m.ts*scale, "#00008b");
   if (m.tbs > 0)
     s += svgRect(vigaX + beamPx - 30, Y(m.beamTop + m.tf), m.tbs*scale, Math.max(0,(m.bd - 2*m.tf))*scale, "#00008b");
-  m.rows.forEach(yy => { s += svgLine(cRight - m.ctf*scale - 10, Y(yy), vigaX + 10, Y(yy), "#ff4500", "4,2"); });
+  m.rows.forEach(yy => { s += svgLine(cRight - m.ctf*scale - 10, Y(yy), vigaX, Y(yy), "#ff4500", "4,2"); });
   const xL = cRight - m.cd*scale - 18;
   s += dimV(xL, Y(0), Y(m.rows[0]), "e=" + fmt(m.e));
   s += dimV(xL, Y(m.rows[0]), Y(m.beamTop), "pfo=" + fmt(m.pfo));
