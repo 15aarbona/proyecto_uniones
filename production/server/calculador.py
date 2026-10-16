@@ -598,13 +598,38 @@ class CalculadorAISC36010:
         desc_resul_comp[5] = "DEV_MAX"
         resul_comp[5] = f"REVISAR: {self.MAXedge - self.dev} / MaxEdgeDist: {self.MAXedge}" if self.dev > self.MAXedge else "OK"
 
-        # Espaciamiento mínimo / máximo entre tornillos
-        desc_resul_comp[6] = "SPACING_MIN"
-        resul_comp[6] = "OK"
-        desc_resul_comp[7] = "SPACING_MAX"
-        resul_comp[7] = "OK"
+        # Filas de tornillos activas (los pasos a 0 no añaden fila).
+        filas_tornillos = [arr_pos[0]]
+        for i in range(1, 13):
+            if arr_pos[i] != arr_pos[i - 1]:
+                filas_tornillos.append(arr_pos[i])
 
-        # Distancias a obstáculos
+        # Espaciamiento mínimo / máximo entre filas consecutivas.
+        seps = [arr_pos[i + 1] - arr_pos[i] for i in range(12) if arr_pos[i + 1] > arr_pos[i]]
+        desc_resul_comp[6] = "SPACING_MIN"
+        resul_comp[6] = (
+            "OK" if (not seps or min(seps) >= self.MINspacing)
+            else f"REVISAR: separación mínima {min(seps):g} < {self.MINspacing:g}"
+        )
+        desc_resul_comp[7] = "SPACING_MAX"
+        resul_comp[7] = (
+            "OK" if (not seps or max(seps) <= self.MAXspacing)
+            else f"REVISAR: separación máxima {max(seps):g} > {self.MAXspacing:g}"
+        )
+
+        # Distancias a obstáculos: colisión de la fila de tornillos con las CARAS de las
+        # alas (solo se comprueba el eje vertical). El margen es el espacio de herramienta
+        # del tornillo (`clearance`), medido desde el CENTRO del agujero (no incluye el
+        # radio). Las filas entre las alas (alma) o dentro del cuerpo de la cantonera NO
+        # son conflicto por sí mismas: solo lo son si la herramienta toca una cara de ala.
+        _margen = tablapernos.DATOS_PERNOS.get(int(round(db)), {}).get("clearance", 0.0)
+
+        def _toca_al(pos_obs):
+            for j, y in enumerate(filas_tornillos, start=1):
+                if abs(y - pos_obs) < _margen:
+                    return f"REVISAR: fila {j} a {abs(y - pos_obs):.1f} mm (< {_margen:.1f})"
+            return "OK"
+
         for idx, pos_obs, key in [
             (8, posObstaculo1, "ENTER_TOP_FLANGE_TOP"),
             (9, posObstaculo2, "ENTER_TOP_FLANGE_LOW"),
@@ -612,12 +637,16 @@ class CalculadorAISC36010:
             (11, posObstaculo4, "ENTER_LOW_FLANGE_LOW"),
         ]:
             desc_resul_comp[idx] = key
-            resul_comp[idx] = "OK"
+            resul_comp[idx] = _toca_al(pos_obs)
 
         desc_resul_comp[12] = "ENTER_HAUNCH_FLANGE_TOP"
-        resul_comp[12] = "OK"
         desc_resul_comp[13] = "ENTER_HAUNCH_FLANGE_LOW"
-        resul_comp[13] = "OK"
+        if self.AnguloCantonera != 0.0:
+            resul_comp[12] = _toca_al(posObstaculo5)
+            resul_comp[13] = _toca_al(posObstaculo6)
+        else:
+            resul_comp[12] = "OK"
+            resul_comp[13] = "OK"
 
         self.bep_min_ = math.ceil((self.viga.b + 20.0) / 5.0) * 5.0
         desc_resul_comp[14] = "bc&bb"
