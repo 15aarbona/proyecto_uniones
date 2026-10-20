@@ -1067,9 +1067,10 @@ function drawSide(m){
     const wx = cRight - (m.cd/2)*scale - (m.bws/2)*scale;   // centrada en el canto del pilar
     const wy = Y(m.beamTop + m.bd/2) - (m.lws/2)*scale;     // centrada en la viga
     s += svgRect(wx, wy, m.bws*scale, m.lws*scale, "#4169e1", "#1e3a8a", 1.2);
-    // Cotas de la placa, en rojo y junto al rigidizador.
-    s += svgText(wx + (m.bws*scale)/2, wy - 6, "Bws=" + fmt(m.bws), "middle", "#D52B1E", 11);
-    s += svgText(wx - 6, wy + (m.lws*scale)/2 + 4, "Lws=" + fmt(m.lws), "end", "#D52B1E", 11);
+    // Cotas de la placa (rojo). Bws va por encima de tst para no taparlo.
+    const bwsY = Math.min(wy, Y(m.beamTop)) - 18;
+    s += dimH(bwsY, wx, wx + m.bws*scale, "Bws=" + fmt(m.bws));
+    s += dimV(wx - 8, wy, wy + m.lws*scale, "Lws=" + fmt(m.lws), "left");
   }
   s += svgRect(cRight, top, m.tp*scale, m.Lp*scale, "#708090");
   const vigaX = cRight + m.tp*scale;
