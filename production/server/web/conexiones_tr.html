@@ -218,7 +218,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="viewer-actions">
       <button class="btn green" id="viewerCheckBtn">⚡ Comprobar esta unión</button>
       <button class="btn ghost" id="viewerReset">Reset</button>
-      <button class="btn green" id="viewerSave">Guardar</button>
+      <button class="btn green" id="viewerSave" disabled>Guardar</button>
     </div>
   </div>
   <div class="viewer-body">
@@ -226,7 +226,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="viewer-views">
       <div class="view-card">
         <h3>Vista Frontal (chapa)</h3>
-        <svg id="vFront" width="360" height="620"></svg>
+        <svg id="vFront" width="520" height="620"></svg>
       </div>
       <div class="view-card">
         <h3>Vista Lateral (perfil)</h3>
@@ -595,15 +595,32 @@ async function openViewer(i){
     col_d: col ? col.d_mm : "", col_bf: col ? col.bf_mm : "",
     col_tw: col ? col.tw_mm : "", col_tf: col ? col.tf_mm : "",
   };
+  // Valores iniciales restringidos (clamp): si la tabla ya venía con valores fuera de
+  // rango se corrigen al abrir, y "Guardar" queda iluminado para que el usuario lo sepa.
+  const lim0 = boxLimits(viewModel());
+  let wasClamped = false;
+  VIEW_FIELDS.forEach(f => {
+    if (!f.k) return;
+    const before = VIEW.vals[f.k];
+    const clamped = clampToLimits(before, lim0[f.k], f.k);
+    VIEW.vals[f.k] = clamped;
+    if (vNum(clamped) !== vNum(before)) wasClamped = true;
+  });
+  VIEW.baseline = JSON.parse(JSON.stringify(VIEW.vals));
+  VIEW.wasClamped = wasClamped;
   const missed = [];
-  if (!String(row.BEAM || "").trim()) missed.push("viga vacía"); else if (!beam) missed.push("viga '" + row.BEAM + "'");
-  if (!String(row.COLUMN || "").trim()) missed.push("pilar vacío"); else if (!col) missed.push("pilar '" + row.COLUMN + "'");
-  VIEW.warn = missed.length ? "No encontrado en catálogo: " + missed.join(", ") + ". Rellena cotas manualmente." : "";
-  VIEW.snapshot = JSON.stringify({ vals: VIEW.vals, sec: VIEW.sec });
+  if (!String(row.BEAM || "").trim()) missed.push("viga (columna BEAM vacía)");
+  else if (!beam) missed.push("viga '" + row.BEAM + "'");
+  if (!String(row.COLUMN || "").trim()) missed.push("pilar (columna COLUMN vacía)");
+  else if (!col) missed.push("pilar '" + row.COLUMN + "'");
+  VIEW.warn = missed.length
+    ? "No encontrado en el catálogo: " + missed.join(", ") + ". Introduce las cotas de sección a mano (no se guardan)."
+    : "";
   $("viewerTitle").textContent = "Visualización 2D · " + (row.Unicode ?? row.UNICODE ?? ("fila " + (i + 1)));
   buildViewerPanel();
   $("viewer").style.display = "flex";
   drawAll();
+  updateSaveButton();
 }
 
 function buildViewerPanel(){
@@ -671,7 +688,7 @@ function buildViewerPanel(){
   }).join("");
   html += SEC_FIELDS.map(f => {
     if (f.sec) return `<div class="view-sec">${escHtml(f.sec)}</div>`;
-    return viewRow(f.label, "data-skey", f.k, VIEW.sec[f.k], true);
+    return viewRow(f.label, "data-skey", f.k, VIEW.sec[f.k], true, false);
   }).join("");
   html += `<div class="view-sec">Derivados</div>` +
           `<div class="view-row ro"><label>p1 = pfo + tf_viga + pfi</label><div class="mm-wrap"><input id="vP1" readonly><span class="mm-suf">mm</span></div></div>` +
@@ -683,10 +700,7 @@ function buildViewerPanel(){
   if (inlineCheck) inlineCheck.onclick = checkViewerConnection;
 
   p.querySelectorAll("[data-vkey]").forEach(inp => {
-    inp.addEventListener("input", () => { VIEW.vals[inp.dataset.vkey] = inp.value; drawAll(); });
-  });
-  p.querySelectorAll("[data-skey]").forEach(inp => {
-    inp.addEventListener("input", () => { VIEW.sec[inp.dataset.skey] = inp.value; drawAll(); });
+    inp.addEventListener("input", () => onField(inp, VIEW.vals, inp.dataset.vkey));
   });
 }
 
@@ -737,9 +751,12 @@ async function checkViewerConnection(){
 
 $("viewerCheckBtn").onclick = checkViewerConnection;
 
-function viewRow(label, bindAttr, key, value, inMm){
+/* Fila del panel: cotas en mm; el "mm" es texto fijo. Las de sección son de solo lectura. */
+function viewRow(label, bindAttr, key, value, inMm, editable=true){
   const shown = inMm ? mmInput(value) : String(value == null ? "" : value);
-  return `<div class="view-row"><label>${escHtml(label)}</label><div class="mm-wrap"><input ${bindAttr}="${escAttr(key)}" value="${escAttr(shown)}"><span class="mm-suf">mm</span></div></div>`;
+  const input = `<input ${bindAttr}="${escAttr(key)}" value="${escAttr(shown)}" inputmode="decimal" ${editable? "":"readonly"}>`;
+  return `<div class="view-row ${editable? "":"ro"}"><label>${escHtml(label)}</label>` +
+         `<div class="mm-wrap">${input}<span class="mm-suf">mm</span></div></div>`;
 }
 function mmInput(v){
   const s = String(v == null ? "" : v).trim();
@@ -747,25 +764,91 @@ function mmInput(v){
   return String(Math.round(vNum(s)));
 }
 
+/* Deja solo dígitos y un único separador decimal (sin signo). */
+function sanitizeNum(v){
+  let s = String(v == null ? "" : v).replace(/[^\d.,]/g, "").replace(/,/g, ".");
+  const i = s.indexOf(".");
+  if (i >= 0) s = s.slice(0, i + 1) + s.slice(i + 1).replace(/\./g, "");
+  return s;
+}
+
+/* Límites por campo (todos >= 0). El tope depende de la sección (ya de solo lectura) y,
+   para Lh, de la geometría: la cantonera no puede salirse de la chapa (Hhaunch). */
+function boxLimits(m){
+  const t = Math.tan(Math.PI / 3);   // 60º
+  return {
+    b_ep: { min: 0 },                                             // Bp sin tope superior
+    p2_ep: { min: 0, max: m.bf > 0 ? m.bf : null },               // g  <= bf_viga
+    Lh: { min: 0, max: m.Hhaunch > 0 ? m.Hhaunch : null },        // altura cantonera <= final de chapa
+    ThicknessName_t_ep: { min: 0, max: 100 },
+    ThicknessName_t_webstiff: { min: 0, max: 100 },
+    ThicknessName_t_compstiff: { min: 0, max: 100 },
+    ThicknessName_t_BeamHcompstiff: { min: 0, max: 100 },
+    ThicknessName_t_tenstiff: { min: 0, max: 100 },
+  };
+}
+
+function clampToLimits(v, lim, key){
+  if (!lim) lim = { min: 0 };
+  let n = vNum(v);
+  if (lim.min != null && n < lim.min) n = lim.min;
+  if (lim.max != null && n > lim.max) n = lim.max;
+  if (key === "Lh") n = Math.trunc(n);   // Lh sin decimales
+  return String(n);
+}
+
+/* Entrada de campo: sanea (solo número con decimales), aplica límites en vivo y refresca
+   dibujo + botón Guardar. Lh se trunca (sin decimales). */
+function onField(inp, store, key){
+  let s = sanitizeNum(inp.value);
+  const lim = boxLimits(viewModel())[key] || { min: 0 };
+  if (s === ""){ store[key] = ""; inp.value = ""; updateSaveButton(); drawAll(); return; }
+  const n = parseFloat(s);
+  if (!isNaN(n)){
+    let nc = n;
+    if (lim.min != null && nc < lim.min) nc = lim.min;
+    if (lim.max != null && nc > lim.max) nc = lim.max;
+    if (key === "Lh"){ nc = Math.trunc(nc); s = String(nc); }
+    else if (nc !== n){ s = String(nc); }
+  }
+  store[key] = s;
+  if (inp.value !== s) inp.value = s;   // quita letras / normaliza lo tecleado
+  updateSaveButton();
+  drawAll();
+}
+
+/* "Guardar" solo se activa si hay cambios respecto al estado inicial (o si las
+   restricciones cambiaron los valores que venían de la tabla). */
+function updateSaveButton(){
+  if (!VIEW) return;
+  let dirty = !!VIEW.wasClamped;
+  if (!dirty){
+    for (const f of VIEW_FIELDS){
+      if (!f.k) continue;
+      if (vNum(VIEW.vals[f.k]) !== vNum(VIEW.baseline[f.k])){ dirty = true; break; }
+    }
+  }
+  const btn = $("viewerSave");
+  if (btn) btn.disabled = !dirty;
+}
+
 function resetViewer(){
   if (!VIEW) return;
-  const snap = JSON.parse(VIEW.snapshot);
-  VIEW.vals = snap.vals; VIEW.sec = snap.sec;
+  VIEW.vals = JSON.parse(JSON.stringify(VIEW.baseline));
   buildViewerPanel();
   drawAll();
+  updateSaveButton();
 }
 
 function saveViewer(){
   if (!VIEW) return;
   const row = state.results[VIEW.i];
+  const lim = boxLimits(viewModel());
   VIEW_FIELDS.forEach(f => {
     if (!f.k) return;
-    const raw = VIEW.vals[f.k];
-    if (f.type === "mm"){ row[f.k] = vMmText(raw); }
-    else {
-      const s = String(raw).trim();
-      row[f.k] = s === "" ? "" : (isNaN(Number(s)) ? s : Number(s));
-    }
+    const v = clampToLimits(VIEW.vals[f.k], lim[f.k], f.k);
+    if (f.type === "mm"){ row[f.k] = vMmText(v); }
+    else { const s = String(v).trim(); row[f.k] = s === "" ? "" : Number(s); }
   });
   state.status[VIEW.i] = "MODIFICADO";
   state.marked[VIEW.i] = false;
@@ -812,6 +895,7 @@ function viewModel(){
     Hhaunch: Math.max(0, Lp - beamBot),
     tws: vNum(V.ThicknessName_t_webstiff), ts: vNum(V.ThicknessName_t_compstiff),
     tbs: vNum(V.ThicknessName_t_BeamHcompstiff), tst: vNum(V.ThicknessName_t_tenstiff),
+    bws: vNum(VIEW.row.Bws), lws: vNum(VIEW.row.Lws),
   };
 }
 
@@ -824,17 +908,18 @@ function drawAll(){
 }
 
 function drawFront(m){
-  const W = 360, H = 620, cx = 180, top = 40;
+  const W = 520, H = 620, cx = 230, top = 40;
   const maxH = Math.max(m.Lp, m.beamBot, 1);
-  const scale = Math.min(0.9, (H - 90)/maxH, (W - 170)/Math.max(m.Bp, 1));
+  const scale = Math.min(0.9, (H - 90)/maxH, (W - 200)/Math.max(m.Bp, 1));
   const Y = v => top + v*scale, X = v => cx + v*scale;
   let s = "";
   s += svgRect(cx - (m.Bp/2)*scale, top, m.Bp*scale, m.Lp*scale, "#cfd8e3");
   s += svgRect(cx - (m.bf/2)*scale, Y(m.beamTop), m.bf*scale, m.tf*scale, "none", "#33475b", 1.5);
   s += svgRect(cx - (m.tw/2)*scale, Y(m.beamTop + m.tf), m.tw*scale, Math.max(0,(m.bd - 2*m.tf))*scale, "none", "#33475b", 1.5);
   s += svgRect(cx - (m.bf/2)*scale, Y(m.beamBot - m.tf), m.bf*scale, m.tf*scale, "none", "#33475b", 1.5);
-  if (m.Lh > 0 && m.Hhaunch > 0){
-    const hz = Math.min(m.Lh, m.Hhaunch);
+  if (m.Lh > 0){
+    const hz = m.Lh;   // Lh es la ALTURA de la cantonera
+    // alma entre el ala inferior de la viga y el ala de la cantonera (sin solape)
     s += svgRect(cx - (m.tw/2)*scale, Y(m.beamBot), m.tw*scale, Math.max(0, hz - m.tf)*scale, "none", "#1e88e5", 1.5);
     s += svgRect(cx - (m.bf/2)*scale, Y(m.beamBot + hz - m.tf), m.bf*scale, m.tf*scale, "none", "#1e88e5", 1.5);
   }
@@ -849,9 +934,14 @@ function drawFront(m){
   s += dimV(xL, Y(m.rows[0]), Y(m.beamTop), "pfo=" + fmt(m.pfo));
   if (m.rows[1] != null && m.rows[1] > m.beamTop + m.tf)
     s += dimV(xL, Y(m.beamTop + m.tf), Y(m.rows[1]), "pfi=" + fmt(m.pfi));
-  const pit = [fmt(m.pb), ...P_KEYS.map(k => fmt(vNum(VIEW.vals[k])))];
-  for (let i = 1; i < m.rows.length - 1; i++) s += dimV(xL, Y(m.rows[i]), Y(m.rows[i+1]), pit[i-1] || "");
-  s += dimV(xR, Y(0), Y(m.Lp), "Lp=" + fmt(m.Lp), "right");
+  // Pasos entre filas consecutivas, con su nombre (p2, p3, ...).
+  const pit = ["p2=" + fmt(m.pb), ...P_KEYS.map(k => k + "=" + fmt(vNum(VIEW.vals[k])))];
+  for (let i = 1; i < m.rows.length - 1; i++)
+    s += dimV(xL, Y(m.rows[i]), Y(m.rows[i+1]), pit[i-1] || "");
+  s += dimV(xR, Y(m.beamTop), Y(m.beamBot), "d_viga=" + fmt(m.bd), "right");
+  if (m.Lh > 0)
+    s += dimV(xR, Y(m.beamBot), Y(m.beamBot + m.Lh), "Lh=" + fmt(m.Lh), "right");
+  s += dimV(xR + 72, Y(0), Y(m.Lp), "Lp=" + fmt(m.Lp), "right");
   s += dimH(top - 14, X(-m.Bp/2), X(m.Bp/2), "Bp=" + fmt(m.Bp));
   s += dimH(Y(m.Lp) + 18, X(-m.g/2), X(m.g/2), "g=" + fmt(m.g));
   $("vFront").innerHTML = s;
@@ -859,24 +949,40 @@ function drawFront(m){
 
 function drawSide(m){
   const W = 580, H = 620, top = 40;
-  const scale = Math.min(0.85, (H - 110)/Math.max(m.Lp, 1));
-  const cRight = m.cd*scale + 90;
+  const t = Math.tan(Math.PI / 3);
+  const hxMM = m.Lh * t;   // Lh es la altura; el vértice C (junto al pilar) es de 60º
+  // Escala vertical (alto de chapa). Se reduce si la cantonera no cabe en el ancho
+  // disponible a la derecha (el pilar, dibujado a la izquierda, resta hueco).
+  let scale = Math.min(0.85, (H - 110)/Math.max(m.Lp, 1));
+  const denom = m.cd + m.tp + Math.max(hxMM, 0);
+  if (denom > 0) scale = Math.min(scale, (W - 160)/denom);
+  scale = Math.max(scale, 0.12);
+  const cRight = m.cd*scale + 90;   // reserva ~90 px a la izquierda para cotas (e, pfo)
   const Y = v => top + v*scale;
   let s = "";
   const colTop = top - 20, colBot = top + m.Lp*scale + 20;
   s += svgRect(cRight - m.cd*scale, colTop, m.cd*scale, colBot - colTop, "#e6e6e6", "gray");
   s += svgRect(cRight - m.ctf*scale, colTop, m.ctf*scale, colBot - colTop, "#b0c4de");
   s += svgRect(cRight - m.cd*scale, colTop, m.ctf*scale, colBot - colTop, "#b0c4de");
+  // Placa del alma del pilar (Bws x Lws), de cara: centrada en el canto del pilar y en
+  // la viga. Su espesor es tws (no visible de cara). Solo en la vista lateral.
+  if (m.tws > 0 && m.bws > 0 && m.lws > 0){
+    const wx = cRight - (m.cd/2)*scale - (m.bws/2)*scale;   // centrada en el canto del pilar
+    const wy = Y(m.beamTop + m.bd/2) - (m.lws/2)*scale;     // centrada en la viga
+    s += svgRect(wx, wy, m.bws*scale, m.lws*scale, "#4169e1", "#1e3a8a", 1.2);
+    // Cotas de la placa, en rojo y junto al rigidizador.
+    s += svgText(wx + (m.bws*scale)/2, wy - 6, "Bws=" + fmt(m.bws), "middle", "#D52B1E", 11);
+    s += svgText(wx - 6, wy + (m.lws*scale)/2 + 4, "Lws=" + fmt(m.lws), "end", "#D52B1E", 11);
+  }
   s += svgRect(cRight, top, m.tp*scale, m.Lp*scale, "#708090");
   const vigaX = cRight + m.tp*scale;
-  const beamPx = Math.max(120, Math.min(W - vigaX - 60, 250));
+  const beamPx = W - vigaX;   // la viga llega hasta el borde del dibujo
   s += svgRect(vigaX, Y(m.beamTop), beamPx, m.tf*scale, "#b0c4de");
   s += svgRect(vigaX, Y(m.beamTop + m.tf), beamPx, Math.max(0,(m.bd - 2*m.tf))*scale, "#b0c4de");
   s += svgRect(vigaX, Y(m.beamBot - m.tf), beamPx, m.tf*scale, "#b0c4de");
-  if (m.Lh > 0 && m.Hhaunch > 0){
-    const hz = Math.min(m.Lh, m.Hhaunch);
-    const hx = vigaX + Math.min(beamPx, Math.max(m.Lh*scale, 25));
-    s += svgPoly(`${vigaX},${Y(m.beamBot)} ${hx},${Y(m.beamBot)} ${vigaX},${Y(m.beamBot + hz)}`, "#a2b5cd");
+  if (m.Lh > 0){
+    const hx = vigaX + hxMM*scale;
+    s += svgPoly(`${vigaX},${Y(m.beamBot)} ${hx},${Y(m.beamBot)} ${vigaX},${Y(m.beamBot + m.Lh)}`, "#a2b5cd");
   }
   if (m.tst > 0) s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamTop), Math.max(0,(m.cd - 2*m.ctf))*scale, m.tst*scale, "#00008b");
   if (m.ts > 0) s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamBot - m.ts), Math.max(0,(m.cd - 2*m.ctf))*scale, m.ts*scale, "#00008b");
@@ -885,7 +991,8 @@ function drawSide(m){
   const xL = cRight - m.cd*scale - 18;
   s += dimV(xL, Y(0), Y(m.rows[0]), "e=" + fmt(m.e));
   s += dimV(xL, Y(m.rows[0]), Y(m.beamTop), "pfo=" + fmt(m.pfo));
-  s += dimV(vigaX + beamPx + 20, Y(m.beamTop), Y(m.beamBot), "d_viga=" + fmt(m.bd), "right");
+  if (m.Lh > 0)
+    s += dimV(vigaX + hxMM*scale, Y(m.beamBot), Y(m.beamBot + m.Lh), "Lh=" + fmt(m.Lh), "right");
   s += dimH(top - 14, cRight, vigaX, "tp=" + fmt(m.tp));
   $("vSide").innerHTML = s;
 }
