@@ -1016,7 +1016,7 @@ $("sendMarked").onclick = async () => {
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok){ setStatus("bad", `Error (${r.status})`, JSON.stringify(data)); }
-    else { setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas.`); }
+    else { setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas. Pendientes para reentreno: ${data.retrain.pending}/${data.retrain.threshold}` + (data.retrain_started ? " · reentreno iniciado" : ""), data.rejected.length ? "Rechazadas:\n" + data.rejected.join("\n") : ""); }
   } catch (e){ setStatus("bad", "Error de conexión", e.message); }
   updateSendMarked();
 };

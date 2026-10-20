@@ -38,7 +38,7 @@ def list_models() -> list:
     if not MODELS_DIR.exists():
         return []
     return sorted(
-        p.name for p in MODELS_DIR.iterdir() if (p / "core" / "adapter.py").exists()
+        p.name for p in MODELS_DIR.iterdir() if not p.name.startswith("_") and (p / "core" / "adapter.py").exists()
     )
 
 

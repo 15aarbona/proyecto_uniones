@@ -248,9 +248,17 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
     fac0 = _num(row.get("FactorCantoCantonera"))
     ang = _num(row.get("AnguloCantonera"))
     tiene = ang != 0.0 and fac0 > 0.0
+    yb = dev + pfo + h                      # cara inferior del ala inferior de la viga
+    if not tiene:                           # sin cantonera: bajo el ala solo puede haber 1 fila
+        ys0 = [dev, dev + c]
+        for k in _SEP_KEYS:
+            if seps[k] > 0:
+                ys0.append(ys0[-1] + seps[k])
+        if sum(1 for y in ys0 if y > yb) > 1:
+            tiene, ang, fac0 = True, DEFAULT_HAUNCH_ANGLE_DEG, 0.0
+            row["AnguloCantonera"] = ang
     sin_a = math.sin(math.radians(ang)) if tiene else 1.0
     fac = fac0
-    yb = dev + pfo + h                      # cara inferior del ala inferior de la viga
 
     def filas():
         ys = [dev, dev + c]
@@ -297,12 +305,14 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
             ys = filas()
             ye = yb + fac * h / sin_a                  # cara inferior del ala de la cantonera
             claro = (all(abs(y - (ye - tf)) >= m and abs(y - ye) >= m for y in ys)
-                     and ys[-1] >= ye + m)
+                     and ys[-1] >= ye + m
+                     and sum(1 for y in ys if y > ye) == 1)
+            
             if claro:
                 break
             # centrar el ala (espesor tf) entre dos filas consecutivas, aumentando la cantonera
             cand = None
-            for a, b in zip(ys, ys[1:]):
+            for a, b in zip(ys[-2:], ys[-1:]):
                 if (b - a - tf) >= 2.0 * (m + 0.5):
                     y2 = (a + b) / 2.0 + tf / 2.0
                     if y2 >= ye - 1e-9 and (cand is None or y2 < cand):

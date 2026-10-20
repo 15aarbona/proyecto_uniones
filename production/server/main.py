@@ -38,6 +38,8 @@ import model_registry
 import predictor
 import storage
 
+import dataset_valid, retrain_manager
+
 # Logs: un archivo por sesion (cada arranque del servidor), sin salida por pantalla.
 # La ruta se comparte por variable de entorno con los procesos hijos del ajuste (refinar.py),
 # que escriben en el mismo archivo. AI_LOG_CONSOLE=1 vuelve a mostrarlos tambien por consola.
@@ -61,6 +63,7 @@ log = logging.getLogger("ai-server")
 async def lifespan(app: FastAPI):
     try:
         model_registry.activate_configured()
+        retrain_manager.start_watcher()
         log.info("Modelos cargados: %s", model_registry.loaded_models())
     except Exception as exc:  # noqa: BLE001
         log.error("No se pudo cargar ningun modelo: %s", exc)
@@ -249,15 +252,32 @@ def check(payload: RowsIn):
     return {"status": "ok", "rows": results}
 
 
-@app.post("/validate", tags=["datos"], summary="Guarda filas validadas en el dataset")
-def validate(payload: RowsIn, background_tasks: BackgroundTasks):
+@app.post("/dataset/append", tags=["datos"], summary="Guarda uniones validadas")
+@app.post("/validate", tags=["datos"], include_in_schema=False)
+def validate(payload: RowsIn):
     if not payload.rows:
-        raise HTTPException(status_code=400, detail="La peticion no trae filas (rows vacio)")
-    try:
-        result = storage.append_rows(payload.rows, source="excel")
-    except storage.InvalidRowsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return {"status": "ok", **result}
+        raise HTTPException(status_code=400, detail="rows vacio")
+    retrain_manager.init_baseline()
+    res = dataset_valid.append(payload.rows)
+
+    print(f"[validate] recibidas={len(payload.rows)} added={res['added']} updated={res['updated']} "
+          f"rechazadas={len(res['rejected'])} total={res['total_rows']}", flush=True)
+    for r in res["rejected"][:10]: print("[validate] rechazada:", r, flush=True)
+
+    if not res["added"] and not res["updated"]:
+        raise HTTPException(status_code=422, detail="; ".join(res["rejected"][:5]) or "sin filas validas")
+    started = retrain_manager.maybe_start() if res["added"] else False
+    return {"status": "ok", **res, "retrain": retrain_manager.status(), "retrain_started": started}
+
+
+@app.get("/retrain/status", tags=["datos"])
+def retrain_status():
+    return retrain_manager.status()
+
+
+@app.post("/retrain", tags=["datos"])
+def retrain_now():
+    return {"started": retrain_manager.maybe_start(force=True), **retrain_manager.status()}
 
 
 @app.get("/dataset/summary", tags=["datos"], summary="Resumen del dataset acumulado")

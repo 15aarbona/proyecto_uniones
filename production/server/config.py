@@ -28,13 +28,18 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 
-# Modelo activo por defecto (carpeta dentro de MODELS_DIR). Puede cambiarse en
-# caliente con POST /model/activate sin reiniciar. El Makefile instala los paquetes
-# de modelo en models/<NAME>/.
-MODEL_NAME = "V11"
-
 # Definición de rutas absolutas relativas a la carpeta 'server/'
 MODELS_DIR = BASE_DIR / "models"
+
+def _active():
+    try:
+        import json
+        n = json.loads((MODELS_DIR / "active.json").read_text())["name"]
+        return n if (MODELS_DIR / n / "core" / "adapter.py").exists() else None
+    except Exception:
+        return None
+
+MODEL_NAME = _active() or "V11"
 
 # ============================================================================
 # 2. DEFINICIÓN DE ENTRADAS Y CARACTERÍSTICAS DE PRODUCCIÓN
