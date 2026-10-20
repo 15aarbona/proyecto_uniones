@@ -7,14 +7,23 @@ formato correctos; `codame_schema.fill_missing` actua como red de seguridad.
 Referencia: `doc/codame/mapeo_columnas_codame.md`.
 
 Reglas con criterio de ingenieria PROVISIONAL (marcadas con "PROVISIONAL"): ancho de
-chapa, Bws/Lws y largo de cantonera. Estan aisladas en funciones y constantes para
+chapa, Bws/Lws, cantonera y largo de chapa. Estan aisladas en funciones y constantes para
 poder ajustarlas sin tocar el resto.
+
+Reglas de geometria de chapa/cantonera (`ajustar_cantonera_y_chapa`, tambien la usa refinar.py):
+  - Lh = FactorCantoCantonera * d_viga / sin(AnguloCantonera)   (0.7 y 60 grados por defecto).
+  - Si el ala de la cantonera cae sobre una fila de tornillos (a menos del `clearance`),
+    se AUMENTA el canto de la cantonera (FactorCantoCantonera y Lh, manteniendo la formula)
+    hasta centrar el ala entre dos filas (p. ej. penultima y ultima).
+  - El ultimo tornillo va siempre por debajo de la viga/cantonera (+ holgura) y la chapa
+    termina `e` mm por debajo del ultimo tornillo: Lp = ultima fila + e.
+  - b_ep queda entre el ala de la viga y el ala del pilar (punto medio si el modelo se sale).
 """
 import logging
 import math
 
 from catalogo import ACERO_TABLE, DEFAULT_GRADO_ACERO, DEFAULT_CLASE_TORNILLO, get_profile
-from externos import tablapernos
+from externos import Externos, tablapernos, tablaplaca
 
 log = logging.getLogger("ai-server")
 
@@ -38,6 +47,9 @@ PFI_MIN_SEGURIDAD = 5.0
 # PROVISIONAL: holgura (mm) entre la placa del alma de la columna y los acuerdos / rigidizadores.
 WEB_PLATE_GAP_MM = 5.0
 
+# Claves de separacion entre filas de tornillos (la 1a, pfo+pfi+tf, va aparte)
+_SEP_KEYS = ("pb", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12")
+
 
 def _num(v, default=0.0):
     try:
@@ -58,6 +70,10 @@ def _ceil5(x: float) -> float:
 
 def _floor5(x: float) -> float:
     return math.floor(round(x, 6) / 5.0) * 5.0
+
+
+def _round5(x: float) -> float:
+    return round(x / 5.0) * 5.0
 
 
 def _pct_int(ratio) -> int:
@@ -98,27 +114,36 @@ def _tension_rows(design_row: dict, beam_d_mm: float) -> int:
 def _plate_width(bp, g, bolt, bf_beam, bf_col, uid) -> float:
     """b_ep: ancho de la chapa. PROVISIONAL.
 
-    Se respeta lo que predice el modelo salvo que incumpla:
+    Debe ser MAYOR que el ala de la viga (con +20 mm de margen si cabe) y MENOR que el ala
+    del pilar. Se respeta lo que predice el modelo si esta dentro de ese rango; si se sale
+    (o iguala el ala del pilar) se lleva al punto medio entre ambas alas (multiplo de 5).
       - minimo por distancia al borde: g + 2*Le_min del tornillo,
-      - minimo por geometria: ancho del ala de la viga (acotado al ala del pilar),
       - maximo: ancho del ala del pilar.
-    Si el minimo por tornillos ya no cabe en el ala del pilar, se deja el valor del modelo.
+    Si el minimo no cabe en el ala del pilar, se deja el valor del modelo.
     """
     try:
         le_min = tablapernos.DATOS_PERNOS[int(bolt)]["Le_min"]
     except (KeyError, TypeError, ValueError):
         le_min = 0.0
     lo_bolts = g + 2.0 * le_min
-    hi = bf_col if bf_col > 0 else math.inf
-    lo = max(lo_bolts, min(bf_beam, hi) if bf_beam > 0 else 0.0)
+    if bf_col <= 0:
+        return float(math.ceil(max(bp, lo_bolts, bf_beam)))
 
-    if lo_bolts > hi:
+    hi = bf_col
+    lo = max(lo_bolts, _ceil5(bf_beam + 20.0) if bf_beam > 0 else 0.0)
+    if lo > hi:                                  # no cabe el +20: basta con superar el ala
+        lo = max(lo_bolts, bf_beam)
+    if lo > hi:
         log.warning("b_ep: no cabe g + 2*Le_min = %.0f en el ala del pilar (%.0f); "
                     "se mantiene el valor del modelo (UNICODE=%s)", lo_bolts, hi, uid)
         return bp
-    new = float(math.ceil(min(max(bp, lo), hi)))
+
+    medio = min(max(_round5((bf_beam + bf_col) / 2.0), lo), hi)
+    new = bp if lo <= bp < hi else medio
+    new = float(math.ceil(new))
     if new != bp:
-        log.info("b_ep %.0f -> %.0f (min %.0f, max %.0f) (UNICODE=%s)", bp, new, lo, hi, uid)
+        log.info("b_ep %.0f -> %.0f (min %.0f, max %.0f, medio %.0f) (UNICODE=%s)",
+                 bp, new, lo, hi, medio, uid)
     return new
 
 
@@ -139,21 +164,177 @@ def _web_plate_dims(col, beam_d, beam_tf, t_stiff):
     return max(bws, 0.0), max(lws, 0.0)
 
 
-def _haunch_length(p, e, d, beam_d, n_cantonera) -> float:
-    """Lh: largo (proyeccion horizontal) de la cantonera. PROVISIONAL.
-
-    Canto de la cantonera = lo que la chapa sobresale por debajo de la viga:
-        H = sum(p) + e - (d + canto_viga)      (el origen es la primera fila de tornillos)
-    Con angulo de 60 grados medido desde la horizontal: Lh = H / tan(60).
-    Si la geometria no da canto positivo se usan las ultimas `n_cantonera` separaciones.
-    """
+def _haunch_length(beam_d, n_cantonera, factor=DEFAULT_HAUNCH_FACTOR,
+                   angle_deg=DEFAULT_HAUNCH_ANGLE_DEG) -> float:
+    """Lh = FactorCantoCantonera * h_viga / sin(angulo)  (formula del C#). 0 si no hay cantonera."""
     if n_cantonera <= 0:
         return 0.0
-    depth = sum(p.values()) + e - (d + beam_d)
-    if depth <= 0:
-        active = [v for _, v in sorted(p.items()) if v > 0]
-        depth = sum(active[-n_cantonera:]) + e
-    return _ceil5(depth / math.tan(math.radians(DEFAULT_HAUNCH_ANGLE_DEG)))
+    return factor * beam_d / math.sin(math.radians(angle_deg))
+
+
+# ---------------------------------------------------------------------------
+# Cantonera y largo de chapa (comun a codame.py y refinar.py)
+# ---------------------------------------------------------------------------
+_EXT = None
+
+
+def _redond5(x: float) -> float:
+    """Mismo redondeo a multiplo de 5 que usa el calculador para c = pfo + pfi + tf."""
+    global _EXT
+    try:
+        if _EXT is None:
+            _EXT = Externos()
+        return float(_EXT.moduloauxiliar.redond_mult(x, 5.0))
+    except Exception:  # noqa: BLE001
+        return _round5(x)
+
+
+def _limites_fisicos(bolt_name, tp_text) -> dict:
+    """{'clearance', 'minsp', 'maxsp'} (mm) del tornillo y la chapa. Si no hay `clearance`
+    en la tabla de tornillos se usa el diametro del tornillo como holgura minima."""
+    out = {"clearance": 0.0, "minsp": 0.0, "maxsp": math.inf}
+    db = 0.0
+    try:
+        tb = tablapernos()
+        tb.nombretornillo = str(bolt_name)
+        out["minsp"] = _num(tb.pitchminmet)
+        db = _num(tb.dmetrico)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        tpl = tablaplaca()
+        tpl.nombreplaca = str(tp_text)
+        mx = _num(tpl.pitchmaxmet)
+        out["maxsp"] = mx if mx > 0 else math.inf
+    except Exception:  # noqa: BLE001
+        pass
+    digitos = "".join(ch for ch in str(bolt_name) if ch.isdigit())
+    cl = _num(tablapernos.DATOS_PERNOS.get(int(digitos), {}).get("clearance")) if digitos else 0.0
+    out["clearance"] = cl if cl > 0 else (db or (float(digitos) if digitos else 0.0))
+    return out
+
+
+def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
+    """Aplica sobre una fila CODAME (la modifica) las reglas de cantonera y largo de chapa:
+
+      1. Con cantonera: si su ala toca una fila de tornillos, aumenta FactorCantoCantonera
+         (y Lh = factor*h/sin(angulo)) hasta centrar el ala entre dos filas consecutivas.
+         Si no hay hueco, anade filas por debajo.
+      2. El ultimo tornillo queda siempre por debajo de la viga/cantonera (+ holgura).
+      3. Lp = ultima fila + e (la chapa acaba `e` mm por debajo del ultimo tornillo).
+
+    `limites` (opcional): {'clearance', 'minsp', 'maxsp', 'c'}; si falta se obtiene de las tablas.
+    No toca dev, pfo ni pfi. Devuelve True si cambio la geometria (separaciones o cantonera).
+    """
+    beam = get_profile(str(row.get("BEAM", "")).strip())
+    h, tf = _geom(beam, "d_mm"), _geom(beam, "tf_mm")
+    if beam is None or h <= 0 or tf <= 0:
+        return False
+
+    lim = limites or _limites_fisicos(row.get("BoltName_ep", ""), row.get("ThicknessName_t_ep", "0mm"))
+    m = _num(lim.get("clearance"))
+    minsp = _num(lim.get("minsp"))
+    maxsp = _num(lim.get("maxsp"), math.inf)
+    if maxsp <= 0:
+        maxsp = math.inf
+    if m <= 0:
+        return False
+
+    dev, pfo, pfi = _num(row.get("dev")), _num(row.get("pfo")), _num(row.get("pfi"))
+    c = _num(lim.get("c")) or _redond5(pfo + pfi + tf)
+    seps = {k: _num(row.get(k)) for k in _SEP_KEYS}
+    seps0 = dict(seps)
+
+    fac0 = _num(row.get("FactorCantoCantonera"))
+    ang = _num(row.get("AnguloCantonera"))
+    tiene = ang != 0.0 and fac0 > 0.0
+    sin_a = math.sin(math.radians(ang)) if tiene else 1.0
+    fac = fac0
+    yb = dev + pfo + h                      # cara inferior del ala inferior de la viga
+
+    def filas():
+        ys = [dev, dev + c]
+        y = dev + c
+        for k in _SEP_KEYS:
+            if seps[k] > 0:
+                y += seps[k]
+                ys.append(y)
+        return ys
+
+    def ultima():
+        return max((i for i, k in enumerate(_SEP_KEYS) if seps[k] > 0), default=-1)
+
+    def anadir(delta) -> bool:
+        i = ultima() + 1
+        if i >= len(_SEP_KEYS):
+            return False
+        seps[_SEP_KEYS[i]] = delta
+        return True
+
+    def paso_valido(delta) -> float:
+        tope = delta if math.isinf(maxsp) else min(delta, _floor5(maxsp))
+        return max(tope, _ceil5(minsp))
+
+    def llevar_ultima(objetivo) -> bool:
+        """Lleva la ultima fila hasta `objetivo` (alargando su separacion o anadiendo filas)."""
+        for _ in range(6):
+            delta = _ceil5(objetivo - filas()[-1])
+            if delta <= 0:
+                return True
+            i = ultima()
+            if i >= 0 and seps[_SEP_KEYS[i]] + delta <= maxsp:
+                seps[_SEP_KEYS[i]] += delta
+                return True
+            if not anadir(paso_valido(delta)):
+                if i >= 0:
+                    seps[_SEP_KEYS[i]] += delta
+                    return True
+                return False
+        return False
+
+    if tiene:
+        for _ in range(4):
+            ys = filas()
+            ye = yb + fac * h / sin_a                  # cara inferior del ala de la cantonera
+            claro = (all(abs(y - (ye - tf)) >= m and abs(y - ye) >= m for y in ys)
+                     and ys[-1] >= ye + m)
+            if claro:
+                break
+            # centrar el ala (espesor tf) entre dos filas consecutivas, aumentando la cantonera
+            cand = None
+            for a, b in zip(ys, ys[1:]):
+                if (b - a - tf) >= 2.0 * (m + 0.5):
+                    y2 = (a + b) / 2.0 + tf / 2.0
+                    if y2 >= ye - 1e-9 and (cand is None or y2 < cand):
+                        cand = y2
+            if cand is not None:
+                fac = max(fac, round((cand - yb) * sin_a / h, 3))
+                break
+            # no hay hueco: nueva ultima fila por debajo, con sitio para centrar el ala
+            a = ys[-1]
+            b = max(a + minsp, a + tf + 2.0 * (m + 0.5), 2.0 * ye - tf - a)
+            if not anadir(paso_valido(_ceil5(b - a))):
+                log.warning("cantonera: sin filas disponibles para despejar el ala (UNICODE=%s)",
+                            row.get("Unicode"))
+                break
+        else:
+            log.warning("cantonera: no se pudo despejar el ala de los tornillos (UNICODE=%s)",
+                        row.get("Unicode"))
+    else:
+        if filas()[-1] < yb + m:
+            llevar_ultima(_ceil5(yb + max(pfo, m + 0.5)))
+
+    cambio = any(abs(seps[k] - seps0[k]) > 1e-9 for k in _SEP_KEYS) or abs(fac - fac0) > 1e-9
+    for k in _SEP_KEYS:
+        if abs(seps[k] - seps0[k]) > 1e-9:
+            row[k] = seps[k]
+    if abs(fac - fac0) > 1e-9:
+        row["FactorCantoCantonera"] = fac
+        row["Lh"] = fac * h / sin_a
+        log.info("cantonera: Factor %.3f -> %.3f, Lh = %.1f (UNICODE=%s)",
+                 fac0, fac, row["Lh"], row.get("Unicode"))
+    row["Lp"] = filas()[-1] + dev
+    return cambio
 
 
 def to_codame(input_row: dict, design_row: dict) -> dict:
@@ -199,6 +380,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     pfi = p1 - pfo - tf
 
     # Lp = suma de todas las p + 2e (e = distancia del primer y ultimo tornillo al borde).
+    # (ajustar_cantonera_y_chapa lo recalcula al final con las filas definitivas)
     lp = 2.0 * e + sum(p.values())
 
     # ts y tst son siempre iguales: se toma tst (su catalogo {0,10,15,20} esta contenido
@@ -220,7 +402,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     tws_text = _mm_text(tws) if tws > 0 else "0mm"
 
     n_cantonera = int(_num(d.get("n_cantonera")))
-    lh = _haunch_length(p, e, pfo, beam_d, n_cantonera)
+    lh = _haunch_length(beam_d, n_cantonera)
     has_haunch = lh > 0
 
     row = {
@@ -279,4 +461,10 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     }
     for n in range(3, _n_years() + 1):
         row[f"p{n}"] = p[n]
+
+    # Cantonera y largo de chapa (ultimo tornillo por debajo de viga/cantonera, Lp = ultima fila + e)
+    try:
+        ajustar_cantonera_y_chapa(row)
+    except Exception:  # noqa: BLE001
+        log.exception("ajustar_cantonera_y_chapa fallo (UNICODE=%s); se deja la fila del modelo", uid)
     return row

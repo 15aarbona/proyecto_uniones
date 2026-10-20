@@ -1,26 +1,28 @@
-"""Ajuste automatico de las placas tras la prediccion del modelo.
+"""Ajuste automatico de geometría y placas tras la prediccion del modelo.
 
-El modelo propone espesores que a veces no pasan la comprobacion AISC 360-10. Aqui se usa
-el propio comprobador (`checker`) como oraculo: mientras algun ratio (sin contar soldaduras
-ni tornillos) supere 1, se sube UN escalon del catalogo el espesor de la placa responsable
-y se vuelve a comprobar. Asi se obtiene el espesor minimo que cumple.
+El modelo propone geometría y espesores que a veces no pasan la comprobacion AISC 360-10.
+Aqui se usa el propio comprobador (`checker`) como oraculo:
 
-  ratio que falla                                   -> variable que se sube
-  ------------------------------------------------------------------------------------
-  End plate (yield line / rotura) / cortante placa  -> tp   (espesor de la chapa frontal)
-  Column flange / web crippling / rigid. transv.    -> tst  (= ts, rigidizadores del pilar)
-  Column panel zone / Web doubler plate             -> tws  (placa del alma; recalcula Bws/Lws)
-  Beam web yielding / Haunch web stiffeners         -> tbs  (rigidizador del alma de la viga)
+1. REAJUSTE GEOMÉTRICO ITERATIVO (`_ajustar_geometria`):
+   Corrige de forma iterativa las cotas que generan avisos geométricos (REVISAR):
+   gramil p2_ep, ancho b_ep, borde dev, separaciones, colisiones con alas, cantonera
+   sobre tornillos (se aumenta su canto/Lh) y, como último recurso, el diámetro del
+   tornillo. Se prioriza mantener los valores predichos: solo se cambia lo imprescindible.
+   Reglas fijas (ver `codame.ajustar_cantonera_y_chapa`): último tornillo por debajo de
+   viga/cantonera, chapa = última fila + e, b_ep entre el ala de la viga y la del pilar.
 
-No toca tornillos, geometria ni soldaduras (las define el usuario). Si una variable llega al
-final del catalogo y el ratio sigue > 1, la fila se devuelve con lo conseguido y se avisa en el log.
+2. REAJUSTE DE ESPESORES DE PLACAS:
+   Mientras algun ratio (sin contar soldaduras ni tornillos) supere 1, se sube UN escalon
+   del catalogo el espesor de la placa responsable (tp, tst, tws, tbs) y se vuelve a comprobar.
 
-Despues quita los elementos que sobran (rigidizadores / placa del alma con residuo <= 0) y
-busca el mayor porcentaje de carga que la union aguanta (AI_MAXIMIZE_LOAD=0 lo desactiva).
+3. OPTIMIZACIÓN Y MAXIMIZACIÓN DE CARGA:
+   Quita elementos sobrantes con demanda residual <= 0 y busca el mayor porcentaje de carga.
 
 Desactivar con la variable de entorno AI_AUTO_REFINE=0.
 """
+
 import logging
+import math
 import multiprocessing
 import os
 import threading
@@ -28,8 +30,10 @@ from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import codame
+from calculador import CalculadorAISC36010
 from catalogo import get_profile
-from checker import calcular_ratios_row, check_single_row
+from checker import calcular_ratios_row, check_single_row, row_to_conexion_input
+from externos import tablapernos
 
 log = logging.getLogger("ai-server")
 
@@ -121,8 +125,287 @@ def _refresh_web_plate(row: Dict[str, Any]) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Reescalado y ajuste geométrico iterativo
+# ---------------------------------------------------------------------------
+SEP_KEYS = ("pb", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12")
+CLAVES_GEO = ("p2_ep", "b_ep", "dev", "pfo", "pfi") + SEP_KEYS + ("FactorCantoCantonera", "BoltName_ep")
+_FALLOS_PLACA = {"PRMIN", "PRMAX", "DEH_MIN", "DEH_MAX", "bep&bb", "bep&bepmin", "bep&bc"}
+BOLT_MIN = "M20"   # no se baja de este tornillo (igual que geometria.py)
+
+
+def _n(v, default=0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _c5(x: float) -> float:
+    return math.ceil(round(x, 6) / 5.0) * 5.0
+
+
+def _f5(x: float) -> float:
+    return math.floor(round(x, 6) / 5.0) * 5.0
+
+
+def _r5(x: float) -> float:
+    return round(x / 5.0) * 5.0
+
+
+def _cambiado(a, b) -> bool:
+    try:
+        return abs(float(a) - float(b)) > 1e-9
+    except (TypeError, ValueError):
+        return str(a) != str(b)
+
+
+def _fmt(v) -> str:
+    try:
+        return f"{float(v):g}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _evaluar_geometria(work: Dict[str, Any]):
+    """(calculador ya ejecutado, {descripcion: texto REVISAR}). El calculador trae los limites
+    (MINedge, MAXedge, MINspacing, MAXspacing, c_, De_...) que NO estan en ConexionInput."""
+    calc = CalculadorAISC36010(inp=row_to_conexion_input(work))
+    res = calc.calcular_conexion()
+    fallos = {c.descripcion: str(c.resultado) for c in res.complementarios
+              if str(c.resultado).upper().startswith("REVISAR")}
+    return calc, fallos
+
+
+# --- placa: gramil p2_ep y ancho b_ep -------------------------------------
+def _ajustar_placa(work: Dict[str, Any], calc) -> bool:
+    """Mete p2_ep en [Prmin, Prmax] y b_ep en el rango que cumple a la vez:
+         b_ep >= ancho ala viga (y viga+20 si cabe), b_ep <= ala pilar,
+         MINedge <= (b_ep - p2_ep)/2 <= MAXedge.
+    Ademas b_ep debe quedar ESTRICTAMENTE entre el ala de la viga y la del pilar: si iguala
+    o supera alguna, se lleva al punto medio. Cambia lo minimo posible.
+    Devuelve False si no existe solucion con este tornillo (hay que bajar de diametro)."""
+    pilar, viga = calc.pilar, calc.viga
+    mn, mx = calc.MINedge, calc.MAXedge
+    g0 = _n(work.get("p2_ep"), 100.0)
+    b0 = _n(work.get("b_ep"), 200.0)
+    g, b = g0, b0
+    bep_min = _c5(viga.b + 20.0)
+
+    if pilar.Prmin > 0:
+        g = max(g, _c5(pilar.Prmin))
+    if pilar.Prmax > 0:
+        g = min(g, _f5(pilar.Prmax))
+
+    def rango(gv):
+        hi = min(pilar.b, gv + 2.0 * mx)
+        lo = max(viga.b, gv + 2.0 * mn)
+        if bep_min <= hi:
+            lo = max(lo, bep_min)
+        return lo, hi
+
+    lo, hi = rango(g)
+    ok = True
+    if lo > hi:
+        # mover el gramil: bajarlo si la placa no cabe en el ala del pilar, subirlo si no llega a la viga
+        g_new = min(max(g, _c5(viga.b - 2.0 * mx)), _f5(pilar.b - 2.0 * mn))
+        dentro = ((pilar.Prmin <= 0 or g_new >= pilar.Prmin) and
+                  (pilar.Prmax <= 0 or g_new <= pilar.Prmax))
+        if dentro:
+            g = g_new
+            lo, hi = rango(g)
+        if not dentro or lo > hi:
+            ok = False
+
+    if ok:
+        lo_r = _c5(lo) if _c5(lo) <= hi else math.ceil(lo)
+        hi_r = _f5(hi) if _f5(hi) >= lo_r else math.floor(hi)
+        b = min(max(b, lo_r), hi_r)
+        if b >= pilar.b or b <= viga.b:        # preferencia: estrictamente entre ambas alas
+            b = min(max(_r5((viga.b + pilar.b) / 2.0), lo_r), hi_r)
+
+    if _cambiado(g, g0):
+        work["p2_ep"] = g
+    if _cambiado(b, b0):
+        work["b_ep"] = b
+    return ok
+
+
+# --- distancia al borde superior dev ---------------------------------------
+def _ajustar_dev(work: Dict[str, Any], calc) -> None:
+    dev = _n(work.get("dev"), 50.0)
+    new = dev
+    if dev < calc.MINedge:
+        new = _c5(calc.MINedge)
+    elif dev > calc.MAXedge:
+        new = _f5(calc.MAXedge)
+    if _cambiado(new, dev):
+        work["dev"] = new
+
+
+# --- separaciones entre filas ----------------------------------------------
+def _ajustar_separaciones(work: Dict[str, Any], calc) -> None:
+    """La 1a separacion entre filas es c = redondeo5(pfo + pfi + tf): se corrige con pfi.
+    El resto (pb, p3..p12) se corrigen directamente."""
+    mn, mx = calc.MINspacing, calc.MAXspacing
+    for k in SEP_KEYS:
+        v = _n(work.get(k))
+        if 0.0 < v < mn:
+            work[k] = _c5(mn)
+        elif v > mx:
+            work[k] = _f5(mx)
+
+    c = calc.c_
+    pfo, pfi, tf = _n(work.get("pfo"), 50.0), _n(work.get("pfi"), 30.0), calc.viga.tf
+    if c < mn:
+        nuevo = _c5(mn) - pfo - tf
+        if nuevo > pfi:
+            work["pfi"] = nuevo
+    elif c > mx:
+        nuevo = _f5(mx) - pfo - tf
+        if nuevo > 0:
+            work["pfi"] = nuevo
+
+
+# --- colisiones de filas de tornillos con las caras de las alas ------------
+def _margen(calc) -> float:
+    digitos = "".join(ch for ch in str(calc.BoltName_ep) if ch.isdigit())
+    return tablapernos.DATOS_PERNOS.get(int(digitos), {}).get("clearance", 0.0) if digitos else 0.0
+
+
+def _obstaculos(work: Dict[str, Any], calc) -> List[float]:
+    """Caras de las alas de la VIGA. Las de la cantonera las trata `_ajustar_cantonera`
+    (aumentando su canto), no moviendo filas."""
+    dev, pfo = _n(work.get("dev"), 50.0), _n(work.get("pfo"), 50.0)
+    h, tf = calc.viga.h, calc.viga.tf
+    return [dev + pfo, dev + pfo + tf, dev + pfo + h - tf, dev + pfo + h]
+
+
+def _filas(work: Dict[str, Any], calc) -> List[Tuple[float, str]]:
+    dev = _n(work.get("dev"), 50.0)
+    y = dev + calc.c_
+    rows = [(dev, "dev"), (y, "pfi")]
+    for k in SEP_KEYS:
+        v = _n(work.get(k))
+        if v > 0:
+            y += v
+            rows.append((y, k))
+    return rows
+
+
+def _despejar_alas(work: Dict[str, Any], calc) -> bool:
+    """Corrige la PRIMERA fila que choca con una cara de ala de la viga. Un solo cambio por
+    llamada (mover una fila desplaza las siguientes); el bucle principal vuelve a comprobar."""
+    m = _margen(calc)
+    if m <= 0:
+        return False
+    obs = _obstaculos(work, calc)
+    for y, key in _filas(work, calc):
+        if all(abs(y - o) >= m for o in obs):
+            continue
+        if key == "dev":                       # fila 0 vs cara superior del ala: distancia = pfo
+            pfo = _n(work.get("pfo"), 50.0)
+            work["pfo"] = _c5(m) if pfo < m else pfo + 5.0
+            return True
+        if key == "pfi":                       # fila 1 vs cara inferior: distancia = c - pfo - tf
+            falta = m - (calc.c_ - _n(work.get("pfo"), 50.0) - calc.viga.tf)
+            work["pfi"] = _n(work.get("pfi"), 30.0) + max(5.0, _c5(falta))
+            return True
+        v = _n(work.get(key))                  # fila intermedia: desplazar su separacion previa
+        for k in range(1, 13):
+            for d in (5.0 * k, -5.0 * k):
+                nv = v + d
+                if nv < calc.MINspacing or nv > calc.MAXspacing:
+                    continue
+                if all(abs((y + d) - o) >= m for o in obs):
+                    work[key] = nv
+                    return True
+        return False
+    return False
+
+
+# --- cantonera sobre tornillos / ultimo tornillo / largo de chapa -----------
+def _ajustar_cantonera(work: Dict[str, Any], calc) -> bool:
+    """Reglas de `codame.ajustar_cantonera_y_chapa` con los limites reales del calculador:
+    el ala de la cantonera no puede caer sobre una fila (se aumenta el canto/Lh hasta
+    centrarla entre dos filas), el ultimo tornillo va por debajo de viga/cantonera y
+    Lp = ultima fila + e."""
+    lim = {"clearance": _margen(calc), "minsp": calc.MINspacing,
+           "maxsp": calc.MAXspacing, "c": calc.c_}
+    return codame.ajustar_cantonera_y_chapa(work, lim)
+
+
+# --- ultimo recurso: tornillo de menor diametro ----------------------------
+def _bajar_tornillo(work: Dict[str, Any]) -> bool:
+    nombre = str(work.get("BoltName_ep") or "").strip().upper()
+    if not nombre or nombre == BOLT_MIN:
+        return False
+    nuevo = str(tablapernos().NombreTornilloAnterior(nombre) or "").strip().upper()
+    if not nuevo or nuevo == nombre:
+        return False
+    work["BoltName_ep"] = nuevo
+    return True
+
+
+def _actualizar_lp(work: Dict[str, Any], calc) -> None:
+    """Lp (informativo en CODAME) = ultima fila de tornillos + e (dev), con las cotas finales."""
+    if "Lp" not in work:
+        return
+    dev = _n(work.get("dev"))
+    c = codame._redond5(_n(work.get("pfo")) + _n(work.get("pfi")) + calc.viga.tf)
+    work["Lp"] = dev + c + sum(_n(work.get(k)) for k in SEP_KEYS) + dev
+
+
+def _ajustar_geometria(work: Dict[str, Any], max_iter: int = 40) -> List[str]:
+    """Reajusta la geometria hasta que no quede ningun REVISAR ni regla incumplida.
+    Cada iteracion hace UNA tanda de cambios y vuelve a comprobar con el calculador.
+    Orden: placa/dev/separaciones -> colisiones con alas -> cantonera y ultimo tornillo
+    -> bajar tornillo."""
+    changes: List[str] = []
+    vistos = set()
+    calc, fallos = None, {}
+
+    for _ in range(max_iter):
+        calc, fallos = _evaluar_geometria(work)
+        estado = tuple(str(work.get(k)) for k in CLAVES_GEO)
+        if estado in vistos:                   # oscilacion A->B->A
+            break
+        vistos.add(estado)
+        antes = dict(work)
+
+        def sin_cambio() -> bool:
+            return not any(_cambiado(work.get(k), antes.get(k)) for k in CLAVES_GEO)
+
+        falla_placa = bool(_FALLOS_PLACA & set(fallos))
+        ok_placa = _ajustar_placa(work, calc)
+        _ajustar_dev(work, calc)
+        if "SPACING_MIN" in fallos or "SPACING_MAX" in fallos:
+            _ajustar_separaciones(work, calc)
+
+        if sin_cambio() and any(k.startswith("ENTER_") and "HAUNCH" not in k for k in fallos):
+            _despejar_alas(work, calc)
+        if sin_cambio():                       # cantonera sobre tornillo / ultimo tornillo / Lp
+            _ajustar_cantonera(work, calc)
+        if sin_cambio() and falla_placa and not ok_placa:
+            _bajar_tornillo(work)
+        if sin_cambio():
+            break
+
+        for k in CLAVES_GEO:
+            if _cambiado(work.get(k), antes.get(k)):
+                changes.append(f"{k} {_fmt(antes.get(k))}->{_fmt(work.get(k))}")
+    else:
+        calc, fallos = _evaluar_geometria(work)
+
+    if fallos and calc is not None:
+        # (p. ej. bc&bb: ala del pilar mas estrecha que la viga, no se arregla con la geometria)
+        log.warning("refinar %s: geometria sin resolver: %s", work.get("Unicode"), sorted(fallos))
+    if changes and calc is not None:
+        _actualizar_lp(work, calc)
+    return changes
+
+
 # Elementos que SOBRAN cuando la demanda residual es <= 0 (el perfil solo ya aguanta):
-#   atributo del calculador -> (nombre, columnas de espesor que se ponen a 0)
 _SOBRANTES = (
     ("Ffts_", "rigidizadores transversales", ("ThicknessName_t_tenstiff", "ThicknessName_t_compstiff")),
     ("Vfdp_", "placa de refuerzo del alma", ("ThicknessName_t_webstiff",)),
@@ -140,10 +423,7 @@ def _fallan(rs: Dict[str, float]) -> set:
 
 
 def _quitar_sobrantes(work: Dict[str, Any], rs: Dict[str, float], res: Dict[str, float]):
-    """Pone a 0 los elementos con residuo <= 0, siempre que sin ellos no falle nada nuevo.
-
-    `rs` y `res` son los ratios y residuos de `work`. Devuelve (quitados, ratios de la fila resultante).
-    """
+    """Pone a 0 los elementos con residuo <= 0, siempre que sin ellos no falle nada nuevo."""
     quitados: List[str] = []
     presentes = [(a, n, c) for a, n, c in _SOBRANTES if any(_mm(work.get(x)) > 0 for x in c)]
     if not presentes:
@@ -162,15 +442,7 @@ def _quitar_sobrantes(work: Dict[str, Any], rs: Dict[str, float], res: Dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Maximizar la carga. Con la union ya definida (placas ajustadas) se suben las cargas por
-# fases y se queda el mayor valor que respeta los limites:
-#   1) cortante (FyEd): Bolts in Shear y Bolts in combined tension/shear
-#   2) axil + momento (FxEd, MzEd, escalados juntos): tornillos a traccion, chapa frontal,
-#      cortante de la chapa (flange tension force), ala de la columna y el combinado
-# Cada ratio de esas familias puede llegar como mucho a RATIO_TOPE; si ya estaba por encima,
-# no puede empeorar (en la practica su carga no sube). Los demas ratios (sin soldaduras) no
-# pueden pasar de 1 ni empeorar si ya estaban por encima. La busqueda avanza a saltos (1, 2, 4...
-# puntos) y afina por biseccion, calculando cada valor una sola vez.
+# Maximizar la carga
 # ---------------------------------------------------------------------------
 MAXIMIZE_LOAD = os.environ.get("AI_MAXIMIZE_LOAD", "1").strip().lower() not in ("0", "false", "no")
 RATIO_TOPE = 0.85
@@ -210,12 +482,7 @@ def _cumple(rs: Dict[str, float], fam: Dict[str, float], resto: Dict[str, float]
 
 
 def _subir(work: Dict[str, Any], keys, familias, rs: Dict[str, float]):
-    """Sube `keys` (porcentajes de carga, escalados juntos) hasta el mayor valor que cumple.
-
-    Busqueda por saltos (1, 2, 4, 8... puntos) y despues biseccion entre el ultimo valor que
-    cumple y el primero que falla; cada valor se calcula una sola vez. `rs` son los ratios de
-    `work`. Devuelve (cambio | None, ratios de la fila resultante).
-    """
+    """Sube `keys` (porcentajes de carga, escalados juntos) hasta el mayor valor que cumple."""
     ini = {k: _pct(work.get(k)) for k in keys}
     base = max(ini.values())
     if base <= 0 or base >= LOAD_MAX_PCT:
@@ -280,14 +547,19 @@ def _resumen(changes: List[str]) -> str:
 
 
 def refine(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-    """Fila CODAME -> (fila ajustada, lista de cambios). Nunca lanza: ante un error devuelve la original.
-
-    Cada comprobacion se hace una sola vez: los ratios de un paso se reutilizan en el siguiente.
-    """
+    """Fila CODAME -> (fila ajustada, lista de cambios). Nunca lanza: ante un error devuelve la original."""
     uid = row.get("Unicode")
     changes: List[str] = []
     try:
         work = dict(row)
+
+        # 1. Corrección geométrica iterativa (un fallo aqui no debe tirar el resto del refinado)
+        try:
+            changes.extend(_ajustar_geometria(work))
+        except Exception:  # noqa: BLE001
+            log.exception("refinar %s: ajuste geometrico fallo; se sigue sin el", uid)
+
+        # 2. Ajuste de espesores de placas
         blocked = set()
         rs, calc = _eval(work)
         res = _residuos(calc)
@@ -305,10 +577,13 @@ def refine(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
                 continue
             changes.append(change)
             rs, _calc = _eval(work)
+
+        # 3. Quitar sobrantes y maximizar cargas
         quitados, rs = _quitar_sobrantes(work, rs, res)
         changes += quitados
         if MAXIMIZE_LOAD:
             changes += _maximize_load(work, rs)
+
         if changes:
             log.info("refinar %s: %s", uid, _resumen(changes))
         return work, changes
@@ -318,10 +593,7 @@ def refine(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Paralelo. El calculo es Python puro (limitado por el GIL), asi que los hilos no
-# acelerarian nada: se reparte una union por proceso. Variables de entorno:
-#   AI_REFINE_WORKERS=N   procesos (por defecto: nucleos, maximo 8; 1 = sin paralelo)
-# Con pocas filas se calcula en el propio proceso para no pagar el arranque del pool.
+# Paralelo
 # ---------------------------------------------------------------------------
 WORKERS = int(os.environ.get("AI_REFINE_WORKERS", "0") or 0) or min(8, os.cpu_count() or 1)
 PARALLEL_MIN_ROWS = 4
@@ -359,7 +631,6 @@ def _get_pool() -> ProcessPoolExecutor:
     global _pool
     with _pool_lock:
         if _pool is None:
-            # "spawn": arranque limpio (el proceso principal ya tiene torch y varios hilos).
             _pool = ProcessPoolExecutor(
                 max_workers=WORKERS, mp_context=multiprocessing.get_context("spawn"),
                 initializer=_init_worker,

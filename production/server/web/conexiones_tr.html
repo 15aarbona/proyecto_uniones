@@ -125,8 +125,8 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
 .viewer-title{font-weight:700;color:var(--tr-navy);font-size:16px;flex:1}
 .viewer-actions{display:flex;gap:8px}
 .viewer-body{flex:1;display:flex;gap:16px;padding:16px 20px;overflow:auto;background:var(--tr-bg)}
-.viewer-panel{width:330px;flex:none;background:#fff;border:1px solid var(--tr-line);border-radius:6px;padding:14px;overflow:auto;max-height:100%}
-.viewer-views{display:flex;flex-wrap:wrap;gap:16px;align-content:flex-start}
+.viewer-panel{width:380px;flex:none;background:#fff;color:var(--tr-text);border:1px solid var(--tr-line);border-radius:6px;padding:14px;overflow:auto;max-height:100%}
+.viewer-views{display:flex;flex-wrap:wrap;gap:16px;align-content:flex-start;flex:1}
 .view-card{background:#fff;border:1px solid var(--tr-line);border-radius:8px;padding:12px;box-shadow:0 4px 6px rgba(0,0,0,.05)}
 .view-card h3{margin:0 0 10px;font-size:14px;color:var(--tr-blue)}
 .view-sec{margin:14px 0 8px;padding-top:8px;border-top:2px solid var(--tr-line);font-weight:700;font-size:12.5px;color:var(--tr-navy)}
@@ -197,6 +197,9 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
       <button class="hbtn" id="exportResultsExcel" title="Descargar resultados en Excel">
         <img src="./static/download.svg" width="16" height="16" alt="Descargar" style="display: block;">
       </button>    
+      <button class="hbtn" id="exportCheckExcel" title="Descargar informe de comprobaciones AISC 360 en Excel">
+        <img src="./static/download.svg" width="16" height="16" alt="Descargar Comprobaciones" style="display: block; filter: hue-rotate(180deg);">
+      </button>
     </h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
@@ -206,23 +209,14 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
       <button class="btn green" id="sendMarked" disabled>Enviar conexiones marcadas</button>
     </div>
   </section>
-
-  <section id="checkSec" style="display:none">
-    <h2 class="sec-head">
-      <span>Resultados de la comprobación AISC 360-10</span>
-      <button class="hbtn" id="exportCheckExcel" title="Descargar comprobaciones en Excel">
-        <img src="./static/download.svg" width="16" height="16" alt="Descargar" style="display: block;">
-      </button>
-    </h2>
-    <div class="tablewrap" id="checkRes"></div>
-  </section>
 </main>
 
 <div id="viewer" class="viewer" style="display:none">
   <div class="viewer-head">
     <button class="btn ghost" id="viewerBack">← Volver</button>
-    <div class="viewer-title" id="viewerTitle">Visualización 2D</div>
+    <div class="viewer-title" id="viewerTitle">Visualización 2D y Comprobación</div>
     <div class="viewer-actions">
+      <button class="btn green" id="viewerCheckBtn">⚡ Comprobar esta unión</button>
       <button class="btn ghost" id="viewerReset">Reset</button>
       <button class="btn green" id="viewerSave">Guardar</button>
     </div>
@@ -248,7 +242,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
 
 <script>
 /* =====================================================================
-   Estado
+   Estado Global
    ===================================================================== */
 const $ = id => document.getElementById(id);
 let SCHEMA = { model: null, inputs: [], result_columns: [] };
@@ -257,7 +251,7 @@ const escHtml = v => String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replac
 const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
 
 /* =====================================================================
-   Formulario dinámico (desde GET /schema)
+   Formulario dinámico
    ===================================================================== */
 function renderForm(){
   const form = $("form");
@@ -316,7 +310,7 @@ function readForm(){
 }
 
 /* =====================================================================
-   Carga de archivos Excel / CSV (SheetJS)
+   Carga de Excel / CSV
    ===================================================================== */
 $("btnUploadExcel").onclick = () => $("excelFileInput").click();
 
@@ -333,23 +327,13 @@ $("excelFileInput").onchange = (e) => {
       const worksheet = workbook.Sheets[firstSheetName];
       const json = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
 
-      if (!json.length) {
-        setStatus("bad", "El archivo Excel está vacío o no se pudo leer.");
-        return;
-      }
-
-      if (!SCHEMA.inputs.length) {
-        setStatus("bad", "No hay un esquema de modelo cargado.");
-        return;
-      }
+      if (!json.length) { setStatus("bad", "El archivo Excel está vacío."); return; }
+      if (!SCHEMA.inputs.length) { setStatus("bad", "No hay esquema de modelo cargado."); return; }
 
       let count = 0;
       json.forEach(rawRow => {
         const rowNorm = {};
-        Object.keys(rawRow).forEach(k => {
-          rowNorm[k.trim().toLowerCase()] = rawRow[k];
-        });
-
+        Object.keys(rawRow).forEach(k => { rowNorm[k.trim().toLowerCase()] = rawRow[k]; });
         const newRow = {};
         SCHEMA.inputs.forEach(c => {
           const keyLower = c.key.toLowerCase();
@@ -362,17 +346,12 @@ $("excelFileInput").onchange = (e) => {
             newRow[c.key] = val;
           }
         });
-
-        if (Object.keys(newRow).length > 0) {
-          state.rows.push(newRow);
-          count++;
-        }
+        if (Object.keys(newRow).length > 0) { state.rows.push(newRow); count++; }
       });
-
       renderTable();
       setStatus("ok", `Se han cargado ${count} filas desde "${file.name}".`);
     } catch (err) {
-      setStatus("bad", "Error procesando el archivo Excel/CSV", err.message);
+      setStatus("bad", "Error procesando el archivo", err.message);
     }
     $("excelFileInput").value = "";
   };
@@ -380,14 +359,14 @@ $("excelFileInput").onchange = (e) => {
 };
 
 /* =====================================================================
-   Tablas
+   Tablas de Trabajo
    ===================================================================== */
 function table(rows, cols, withDelete){
   if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario o carga un Excel.</div>`;
   const head = cols.map(c => `<th>${escHtml(c)}</th>`).join("") + (withDelete ? "<th></th>" : "");
   const body = rows.map((r, i) =>
     "<tr>" + cols.map(c => `<td>${escHtml(r[c] ?? "")}</td>`).join("") +
-    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila" aria-label="Quitar fila ${i+1}">✕</button></td>` : "") + "</tr>"
+    (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila">✕</button></td>` : "") + "</tr>"
   ).join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
@@ -400,23 +379,18 @@ function renderTable(){
   $("tbl").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { state.rows.splice(+b.dataset.del, 1); renderTable(); });
 }
 
-/* Rellena unívocamente una columna para todas las filas de los resultados */
 function bulkFillColumn(colName){
   if (!state.results.length) return;
-  if (colName.toLowerCase() === "unicode") return; // Prevención adicional para la columna Unicode
-  
+  if (colName.toLowerCase() === "unicode") return;
   const sampleVal = state.results[0][colName] ?? "";
-  const newVal = prompt(`Introduce el nuevo valor para la columna '${colName}' en TODAS las filas (${state.results.length} filas):`, sampleVal);
-  if (newVal === null) return; // Cancelado por el usuario
-
+  const newVal = prompt(`Nuevo valor para '${colName}' en TODAS las filas (${state.results.length}):`, sampleVal);
+  if (newVal === null) return;
   state.results.forEach((r, i) => {
     r[colName] = newVal;
     state.status[i] = "MODIFICADO";
     state.marked[i] = false;
   });
-  
   renderResults();
-  renderCheckResults(); // Reflejar cambio en la tabla inferior de comprobaciones inmediatamente
 }
 
 function renderResults(){
@@ -424,20 +398,14 @@ function renderResults(){
   $("resSec").style.display = res.length ? "" : "none";
   $("checkBtn").disabled = !res.length;
   if (!res.length){ updateSendMarked(); return; }
-  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns
-                                            : [...new Set(res.flatMap(r => Object.keys(r)))];
+  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : [...new Set(res.flatMap(r => Object.keys(r)))];
 
-  // Encabezados: ver + casilla marcar/desmarcar todas + columnas + comprobación.
-  const head = `<th title="Visualizar">👁</th><th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` + cols.map(c => {
+  const head = `<th title="Visualizar y Comprobar">👁</th><th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` + cols.map(c => {
     const isUnicode = c.toLowerCase() === "unicode";
-    return `
-    <th>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
-        <span>${escHtml(c)}</span>
-        ${isUnicode ? '' : `<button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna '${escAttr(c)}'">⚡ Rellenar</button>`}
-      </div>
-    </th>
-    `;
+    return `<th><div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
+      <span>${escHtml(c)}</span>
+      ${isUnicode ? '' : `<button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna">⚡ Rellenar</button>`}
+    </div></th>`;
   }).join("") + `<th>Comprobación</th>`;
 
   const body = res.map((r, i) => {
@@ -445,14 +413,11 @@ function renderResults(){
     const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : st === "MODIFICADO" ? "mod" : "";
     const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : st === "MODIFICADO" ? "row-mod" : "";
     return `<tr class="${rowCls}">` +
-      `<td><button class="vbtn" data-view="${i}" title="Visualizar en 2D" aria-label="Visualizar fila ${i+1}">👁</button></td>` +
+      `<td><button class="vbtn" data-view="${i}" title="Visualizar y Comprobar en 2D">👁</button></td>` +
       `<td><input type="checkbox" class="rowchk" data-row="${i}" ${state.marked[i] ? "checked" : ""}></td>` +
       cols.map(c => {
         const v = r[c] ?? "";
-        const isUnicode = c.toLowerCase() === "unicode";
-        if (isUnicode) {
-          return `<td><input class="cell" readonly data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}" title="Columna no editable" style="cursor:not-allowed;color:var(--tr-muted); min-width: 100px;"></td>`;
-        }
+        if (c.toLowerCase() === "unicode") return `<td><input class="cell" readonly value="${escAttr(v)}" style="cursor:not-allowed;color:var(--tr-muted);min-width:100px;"></td>`;
         return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
       }).join("") +
       `<td class="st ${stCls}">${escHtml(st)}</td>` +
@@ -461,7 +426,6 @@ function renderResults(){
 
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 
-  // Editar una celda -> estado MODIFICADO (y se desmarca).
   $("res").querySelectorAll("input.cell:not([readonly])").forEach(inp => {
     inp.addEventListener("input", () => {
       const i = +inp.dataset.row;
@@ -469,15 +433,12 @@ function renderResults(){
       markModified(i);
     });
   });
-  // Casillas por fila.
   $("res").querySelectorAll("input.rowchk").forEach(chk => {
     chk.addEventListener("change", () => { state.marked[+chk.dataset.row] = chk.checked; updateSendMarked(); });
   });
-  // Botón visualizar por fila.
   $("res").querySelectorAll("button.vbtn").forEach(b => {
     b.onclick = () => openViewer(+b.dataset.view);
   });
-  // Casilla de cabecera: marcar / desmarcar todas (sincronizada con el estado).
   const all = $("resAll");
   if (all){
     const n = state.marked.filter(Boolean).length;
@@ -502,8 +463,6 @@ function markModified(i){
     const chk = row.querySelector("input.rowchk");
     if (chk) chk.checked = false;
   }
-  // Reflejar el cambio tambien en el informe de comprobaciones.
-  renderCheckResults();
   updateSendMarked();
 }
 
@@ -511,109 +470,46 @@ function updateSendMarked(){
   $("sendMarked").disabled = !state.marked.some(Boolean);
 }
 
-function renderCheckResults(){
-  const res = state.checked;
-  $("checkSec").style.display = res.length ? "" : "none";
-  if (!res.length) return;
-
-  let html = `<table><thead><tr>
-    <th>Unicode</th><th>Estado</th><th>Ratio pésimo</th><th>Chequeo crítico</th><th>Detalle</th>
-  </tr></thead><tbody>`;
-
-  res.forEach((r, i) => {
-    const st = state.status[i] || "";
-    const badge = st === "MODIFICADO"
-      ? `<span class="badge mod">MODIFICADO</span>`
-      : (r.cumple ? `<span class="badge ok">CUMPLE</span>`
-                  : `<span class="badge bad">NO CUMPLE</span>`);
-    const ratiosList = (r.ratios || []).map(f =>
-      `<li><b>${escHtml(f.descripcion)}:</b> ${f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A'}</li>`).join("");
-    const compList = (r.complementarios || []).map(c =>
-      `<li><b>${escHtml(c.descripcion)}:</b> ${escHtml(c.resultado)}</li>`).join("");
-    const label = r.Unicode || r.UNICODE || (i + 1);
-
-    html += `<tr>
-      <td>${escHtml(label)}</td>
-      <td>${badge}</td>
-      <td><b>${r.ratio_pesimo ?? 'N/A'}</b></td>
-      <td>${escHtml(r.descripcion_ratio_pesimo || 'N/A')}</td>
-      <td><details><summary>Ver ratios y geométricos</summary>
-        <div style="padding:8px 0;">
-          <p style="margin:4px 0;"><b>Resistencias y ratios:</b></p>
-          <ul style="margin:0;padding-left:18px;">${ratiosList}</ul>
-          <p style="margin:8px 0 4px;"><b>Geometría y complementarias:</b></p>
-          <ul style="margin:0;padding-left:18px;">${compList}</ul>
-        </div></details></td>
-    </tr>`;
-  });
-
-  html += `</tbody></table>`;
-  $("checkRes").innerHTML = html;
-}
-
 /* =====================================================================
-   Exportación de Comprobaciones a Excel
+   Exportación Excel de Comprobaciones acumuladas
    ===================================================================== */
 $("exportCheckExcel").onclick = () => {
   const res = state.checked;
-  if (!res.length) {
-    setStatus("bad", "No hay comprobaciones para exportar.");
-    return;
-  }
+  if (!res.length) { setStatus("bad", "No hay comprobaciones almacenadas para exportar."); return; }
 
   const exportRows = res.map((r, idx) => {
+    if (!r) return { "UNICODE": (idx + 1), "Estado Global": "Sin comprobar" };
     const rowObj = {
       "UNICODE": r.Unicode || r.UNICODE || (idx + 1),
       "Estado Global": r.cumple ? "CUMPLE" : "NO CUMPLE",
       "Ratio Pésimo": r.ratio_pesimo ?? "",
       "Chequeo Crítico": r.descripcion_ratio_pesimo || ""
     };
-
-    // Agregar campos base de geometría/materiales
     Object.keys(r).forEach(k => {
-      if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo"].includes(k)) {
-        rowObj[k] = r[k];
-      }
+      if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo"].includes(k)) rowObj[k] = r[k];
     });
-
-    // Agregar los 18 ratios de resistencia como columnas individuales
     if (Array.isArray(r.ratios)) {
-      r.ratios.forEach(ratioItem => {
-        const keyName = `Ratio: ${ratioItem.descripcion}`;
-        rowObj[keyName] = (ratioItem.ratio !== null && ratioItem.ratio !== undefined) ? ratioItem.ratio : "N/A";
-      });
+      r.ratios.forEach(ratioItem => { rowObj[`Ratio: ${ratioItem.descripcion}`] = ratioItem.ratio ?? "N/A"; });
     }
-
-    // Agregar las 33 comprobaciones geométricas como columnas individuales
     if (Array.isArray(r.complementarios)) {
-      r.complementarios.forEach(compItem => {
-        const keyName = `Geometría: ${compItem.descripcion}`;
-        rowObj[keyName] = compItem.resultado;
-      });
+      r.complementarios.forEach(compItem => { rowObj[`Geometría: ${compItem.descripcion}`] = compItem.resultado; });
     }
-
     return rowObj;
   });
 
   const worksheet = XLSX.utils.json_to_sheet(exportRows);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Comprobaciones AISC360");
-  
-  const dateStr = new Date().toISOString().slice(0, 10);
-  XLSX.writeFile(workbook, `Comprobaciones_AISC36010_${dateStr}.xlsx`);
-  setStatus("ok", "Exportación a Excel completada con éxito.");
+  XLSX.writeFile(workbook, `Comprobaciones_AISC36010_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  setStatus("ok", "Exportación de comprobaciones a Excel completada.");
 };
 
 $("exportResultsExcel").onclick = () => {
-  if (!state.results.length) {
-    setStatus("bad", "No hay resultados para exportar.");
-    return;
-  }
+  if (!state.results.length) { setStatus("bad", "No hay resultados para exportar."); return; }
   const worksheet = XLSX.utils.json_to_sheet(state.results);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Resultados");
-  const dateStr = new Date().toISOString().slice(0, 10);
-  XLSX.writeFile(workbook, `Resultados_${dateStr}.xlsx`);
+  XLSX.writeFile(workbook, `Resultados_${new Date().toISOString().slice(0, 10)}.xlsx`);
   setStatus("ok", "Resultados exportados a Excel.");
 };
 
@@ -625,7 +521,7 @@ function setStatus(kind, text, detail){
 }
 
 /* =====================================================================
-   Visualizador 2D de una conexión (modal)
+   Visualizador 2D con Comprobación Integrada
    ===================================================================== */
 const PROFILE_CACHE = {};
 let VIEW = null;
@@ -652,7 +548,6 @@ VIEW_FIELDS.push(
   {k:"ThicknessName_t_tenstiff", label:"tst · rigid. tracción pilar", type:"mm"},
 );
 
-// Cotas de sección (del catálogo). Editables solo para visualizar; no se guardan en la fila.
 const SEC_FIELDS = [
   {sec:"Sección viga (catálogo)"},
   {k:"beam_d", label:"d_viga · canto"},
@@ -675,13 +570,12 @@ function vMmText(v){ return Math.round(vNum(v)) + "mm"; }
 function fmt(n){ return String(Math.round(n * 10) / 10); }
 
 async function fetchProfiles(names){
-  const need = [...new Set(names.filter(Boolean).map(n => String(n).trim()))]
-               .filter(n => !(n in PROFILE_CACHE));
+  const need = [...new Set(names.filter(Boolean).map(n => String(n).trim()))].filter(n => !(n in PROFILE_CACHE));
   if (need.length){
     try{
       const r = await fetch("/profiles?names=" + encodeURIComponent(need.join(",")));
       if (r.ok){ const d = await r.json(); Object.assign(PROFILE_CACHE, d.profiles || {}); }
-    }catch(e){ /* sin catálogo */ }
+    }catch(e){}
   }
   const out = {};
   names.filter(Boolean).forEach(n => { out[n] = PROFILE_CACHE[String(n).trim()] || null; });
@@ -693,7 +587,7 @@ async function openViewer(i){
   if (!row) return;
   const prof = await fetchProfiles([row.BEAM, row.COLUMN]);
   const beam = prof[row.BEAM] || null, col = prof[row.COLUMN] || null;
-  VIEW = { i, row, beam, col, vals:{}, sec:{}, warn:"" };
+  VIEW = { i, row: { ...row }, beam, col, vals:{}, sec:{}, warn:"" };
   VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (row[f.k] ?? ""); });
   VIEW.sec = {
     beam_d: beam ? beam.d_mm : "", beam_bf: beam ? beam.bf_mm : "",
@@ -702,13 +596,9 @@ async function openViewer(i){
     col_tw: col ? col.tw_mm : "", col_tf: col ? col.tf_mm : "",
   };
   const missed = [];
-  if (!String(row.BEAM || "").trim()) missed.push("viga (columna BEAM vacía)");
-  else if (!beam) missed.push("viga '" + row.BEAM + "'");
-  if (!String(row.COLUMN || "").trim()) missed.push("pilar (columna COLUMN vacía)");
-  else if (!col) missed.push("pilar '" + row.COLUMN + "'");
-  VIEW.warn = missed.length
-    ? "No encontrado en el catálogo: " + missed.join(", ") + ". Introduce las cotas de sección a mano (no se guardan)."
-    : "";
+  if (!String(row.BEAM || "").trim()) missed.push("viga vacía"); else if (!beam) missed.push("viga '" + row.BEAM + "'");
+  if (!String(row.COLUMN || "").trim()) missed.push("pilar vacío"); else if (!col) missed.push("pilar '" + row.COLUMN + "'");
+  VIEW.warn = missed.length ? "No encontrado en catálogo: " + missed.join(", ") + ". Rellena cotas manualmente." : "";
   VIEW.snapshot = JSON.stringify({ vals: VIEW.vals, sec: VIEW.sec });
   $("viewerTitle").textContent = "Visualización 2D · " + (row.Unicode ?? row.UNICODE ?? ("fila " + (i + 1)));
   buildViewerPanel();
@@ -720,6 +610,61 @@ function buildViewerPanel(){
   const p = $("viewerPanel");
   let html = "";
   if (VIEW.warn) html += `<div class="view-warn">${escHtml(VIEW.warn)}</div>`;
+
+  // --- SECCIÓN: COMPROBACIONES Y RATIOS AISC 360-10 ---
+  const checkData = state.checked[VIEW.i];
+  if (checkData) {
+    const st = state.status[VIEW.i] || (checkData.cumple ? "CUMPLE" : "NO CUMPLE");
+    const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+    
+    html += `
+      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
+      <div style="margin-bottom:10px; display:flex; align-items:center; justify-content:space-between;">
+        <span class="badge ${badgeCls}">${escHtml(st)}</span>
+        <button class="btn green" id="viewerCheckBtnInline" style="padding:4px 10px; font-size:12px;">⚡ Comprobar esta unión</button>
+      </div>
+      <div style="font-size:12.5px; margin-bottom:8px; color:var(--tr-navy);">
+        <div><b>Ratio pésimo:</b> <span style="color:var(--tr-navy); font-weight:bold;">${checkData.ratio_pesimo ?? 'N/A'}</span></div>
+        <div style="margin-top:2px;"><b>Chequeo crítico:</b> <span style="color:var(--tr-navy);">${escHtml(checkData.descripcion_ratio_pesimo || 'N/A')}</span></div>
+      </div>
+    `;
+
+    if (Array.isArray(checkData.complementarios) && checkData.complementarios.length > 0) {
+      html += `
+        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
+          <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Comprobaciones Geométricas (${checkData.complementarios.length})</summary>
+          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
+            ${checkData.complementarios.map(c => `<li><b style="color:var(--tr-navy);">${escHtml(c.descripcion)}:</b> <span style="color:var(--tr-navy);">${escHtml(c.resultado)}</span></li>`).join("")}
+          </ul>
+        </details>
+      `;
+    }
+
+    if (Array.isArray(checkData.ratios) && checkData.ratios.length > 0) {
+      html += `
+        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
+          <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Ratios de Resistencia (${checkData.ratios.length})</summary>
+          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
+            ${checkData.ratios.map(f => {
+              const val = f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A';
+              const isBad = f.ratio > 1.0;
+              return `<li><b style="color:var(--tr-navy);">${escHtml(f.descripcion)}:</b> <span style="${isBad ? 'color:var(--tr-red);font-weight:bold;' : 'color:var(--tr-navy);'}">${val}</span></li>`;
+            }).join("")}
+          </ul>
+        </details>
+      `;
+    }
+  } else {
+    html += `
+      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
+      <div style="margin-bottom:12px; background:#EAF3FB; padding:10px; border-left:3px solid var(--tr-blue); border-radius:3px; font-size:12px; color:var(--tr-navy);">
+        Esta unión no se ha comprobado de forma individual.
+        <button class="btn green" id="viewerCheckBtnInline" style="margin-top:8px; width:100%; font-size:12px; padding:6px 12px;">⚡ Comprobar esta unión</button>
+      </div>
+    `;
+  }
+
+  // Campos de Geometría
   html += VIEW_FIELDS.map(f => {
     if (f.sec) return `<div class="view-sec">${escHtml(f.sec)}</div>`;
     return viewRow(f.label, "data-vkey", f.k, VIEW.vals[f.k], true);
@@ -731,7 +676,12 @@ function buildViewerPanel(){
   html += `<div class="view-sec">Derivados</div>` +
           `<div class="view-row ro"><label>p1 = pfo + tf_viga + pfi</label><div class="mm-wrap"><input id="vP1" readonly><span class="mm-suf">mm</span></div></div>` +
           `<div class="view-row ro"><label>Lp = 2·e + Σp (alto chapa)</label><div class="mm-wrap"><input id="vLp" readonly><span class="mm-suf">mm</span></div></div>`;
+
   p.innerHTML = html;
+
+  const inlineCheck = $("viewerCheckBtnInline");
+  if (inlineCheck) inlineCheck.onclick = checkViewerConnection;
+
   p.querySelectorAll("[data-vkey]").forEach(inp => {
     inp.addEventListener("input", () => { VIEW.vals[inp.dataset.vkey] = inp.value; drawAll(); });
   });
@@ -740,13 +690,56 @@ function buildViewerPanel(){
   });
 }
 
-/* Fila del panel: las cotas son todas en mm; el "mm" es texto fijo (no editable)
-   y solo se añade al valor de la fila al guardar (para el esquema CODAME). */
+async function checkViewerConnection(){
+  if (!VIEW) return;
+
+  VIEW_FIELDS.forEach(f => {
+    if (!f.k) return;
+    const raw = VIEW.vals[f.k];
+    if (f.type === "mm"){ VIEW.row[f.k] = vMmText(raw); }
+    else {
+      const s = String(raw).trim();
+      VIEW.row[f.k] = s === "" ? "" : (isNaN(Number(s)) ? s : Number(s));
+    }
+  });
+
+  const btnTop = $("viewerCheckBtn");
+  const btnInline = $("viewerCheckBtnInline");
+  if (btnTop) { btnTop.disabled = true; btnTop.textContent = "Comprobando…"; }
+  if (btnInline) { btnInline.disabled = true; btnInline.textContent = "Comprobando…"; }
+
+  try {
+    const r = await fetch("/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows: [VIEW.row] }),
+    });
+    const data = await r.json().catch(() => ({}));
+
+    if (r.ok && Array.isArray(data.rows) && data.rows.length > 0) {
+      const checkRes = data.rows[0];
+      state.checked[VIEW.i] = checkRes;
+      state.status[VIEW.i] = checkRes.cumple ? "CUMPLE" : "NO CUMPLE";
+      state.results[VIEW.i] = { ...VIEW.row };
+
+      renderResults();
+      buildViewerPanel();
+      drawAll();
+    } else {
+      alert("Error comprobando la conexión: " + (typeof data.detail === "string" ? data.detail : JSON.stringify(data)));
+    }
+  } catch (e) {
+    alert("Error conectando con el servidor: " + e.message);
+  } finally {
+    if (btnTop) { btnTop.disabled = false; btnTop.textContent = "⚡ Comprobar esta unión"; }
+  }
+}
+
+$("viewerCheckBtn").onclick = checkViewerConnection;
+
 function viewRow(label, bindAttr, key, value, inMm){
   const shown = inMm ? mmInput(value) : String(value == null ? "" : value);
-  const input = `<input ${bindAttr}="${escAttr(key)}" value="${escAttr(shown)}">`;
-  return `<div class="view-row"><label>${escHtml(label)}</label>` +
-         `<div class="mm-wrap">${input}<span class="mm-suf">mm</span></div></div>`;
+  return `<div class="view-row"><label>${escHtml(label)}</label><div class="mm-wrap"><input ${bindAttr}="${escAttr(key)}" value="${escAttr(shown)}"><span class="mm-suf">mm</span></div></div>`;
 }
 function mmInput(v){
   const s = String(v == null ? "" : v).trim();
@@ -785,7 +778,7 @@ $("viewerBack").onclick = closeViewer;
 $("viewerReset").onclick = resetViewer;
 $("viewerSave").onclick = saveViewer;
 
-/* ---------- Helpers SVG ---------- */
+/* ---------- Dibujo SVG ---------- */
 function svgRect(x,y,w,h,fill,stroke,sw){ return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill||"none"}" stroke="${stroke||"black"}" stroke-width="${sw||1}"/>`; }
 function svgCircle(cx,cy,r,fill){ return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" stroke="black" stroke-width="1"/>`; }
 function svgLine(x1,y1,x2,y2,stroke,dash,sw){ return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke||"black"}" stroke-width="${sw||1}" stroke-dasharray="${dash||""}"/>`; }
@@ -794,15 +787,12 @@ function svgText(x,y,t,anchor,color,size){ return `<text x="${x}" y="${y}" font-
 function dimV(x,y1,y2,label,side){
   side = side || "left";
   const tx = side === "left" ? x - 4 : x + 4, anc = side === "left" ? "end" : "start";
-  return svgLine(x,y1,x,y2,"#D52B1E") + svgLine(x-3,y1,x+3,y1,"#D52B1E") + svgLine(x-3,y2,x+3,y2,"#D52B1E") +
-         svgText(tx,(y1+y2)/2+4,label,anc,"#D52B1E");
+  return svgLine(x,y1,x,y2,"#D52B1E") + svgLine(x-3,y1,x+3,y1,"#D52B1E") + svgLine(x-3,y2,x+3,y2,"#D52B1E") + svgText(tx,(y1+y2)/2+4,label,anc,"#D52B1E");
 }
 function dimH(y,x1,x2,label){
-  return svgLine(x1,y,x2,y,"#D52B1E") + svgLine(x1,y-3,x1,y+3,"#D52B1E") + svgLine(x2,y-3,x2,y+3,"#D52B1E") +
-         svgText((x1+x2)/2,y-5,label,"middle","#D52B1E");
+  return svgLine(x1,y,x2,y,"#D52B1E") + svgLine(x1,y-3,x1,y+3,"#D52B1E") + svgLine(x2,y-3,x2,y+3,"#D52B1E") + svgText((x1+x2)/2,y-5,label,"middle","#D52B1E");
 }
 
-/* ---------- Modelo de dibujo ---------- */
 function viewModel(){
   const V = VIEW.vals, S = VIEW.sec;
   const tf = vNum(S.beam_tf), bf = vNum(S.beam_bf), tw = vNum(S.beam_tw), bd = vNum(S.beam_d);
@@ -833,7 +823,6 @@ function drawAll(){
   drawFront(m); drawSide(m); drawTop(m);
 }
 
-/* ---------- Vista frontal (chapa) ---------- */
 function drawFront(m){
   const W = 360, H = 620, cx = 180, top = 40;
   const maxH = Math.max(m.Lp, m.beamBot, 1);
@@ -846,9 +835,7 @@ function drawFront(m){
   s += svgRect(cx - (m.bf/2)*scale, Y(m.beamBot - m.tf), m.bf*scale, m.tf*scale, "none", "#33475b", 1.5);
   if (m.Lh > 0 && m.Hhaunch > 0){
     const hz = Math.min(m.Lh, m.Hhaunch);
-    // alma entre el ala inferior de la viga y el ala de la cantonera (sin solape)
     s += svgRect(cx - (m.tw/2)*scale, Y(m.beamBot), m.tw*scale, Math.max(0, hz - m.tf)*scale, "none", "#1e88e5", 1.5);
-    // ala de la cantonera
     s += svgRect(cx - (m.bf/2)*scale, Y(m.beamBot + hz - m.tf), m.bf*scale, m.tf*scale, "none", "#1e88e5", 1.5);
   }
   const r = Math.max(3, (m.boltDia/2)*scale*0.8);
@@ -863,21 +850,16 @@ function drawFront(m){
   if (m.rows[1] != null && m.rows[1] > m.beamTop + m.tf)
     s += dimV(xL, Y(m.beamTop + m.tf), Y(m.rows[1]), "pfi=" + fmt(m.pfi));
   const pit = [fmt(m.pb), ...P_KEYS.map(k => fmt(vNum(VIEW.vals[k])))];
-  for (let i = 1; i < m.rows.length - 1; i++)
-    s += dimV(xL, Y(m.rows[i]), Y(m.rows[i+1]), pit[i-1] || "");
+  for (let i = 1; i < m.rows.length - 1; i++) s += dimV(xL, Y(m.rows[i]), Y(m.rows[i+1]), pit[i-1] || "");
   s += dimV(xR, Y(0), Y(m.Lp), "Lp=" + fmt(m.Lp), "right");
   s += dimH(top - 14, X(-m.Bp/2), X(m.Bp/2), "Bp=" + fmt(m.Bp));
   s += dimH(Y(m.Lp) + 18, X(-m.g/2), X(m.g/2), "g=" + fmt(m.g));
   $("vFront").innerHTML = s;
 }
 
-/* ---------- Vista lateral (perfil) ---------- */
 function drawSide(m){
   const W = 580, H = 620, top = 40;
-  // Escala SOLO vertical (según el alto de chapa). El largo de la viga se dibuja en
-  // píxeles fijos: la longitud real del miembro no está en los datos (esquemático).
   const scale = Math.min(0.85, (H - 110)/Math.max(m.Lp, 1));
-  // Cara derecha del pilar: reserva ~90 px a su izquierda para las cotas (e, pfo...).
   const cRight = m.cd*scale + 90;
   const Y = v => top + v*scale;
   let s = "";
@@ -896,12 +878,9 @@ function drawSide(m){
     const hx = vigaX + Math.min(beamPx, Math.max(m.Lh*scale, 25));
     s += svgPoly(`${vigaX},${Y(m.beamBot)} ${hx},${Y(m.beamBot)} ${vigaX},${Y(m.beamBot + hz)}`, "#a2b5cd");
   }
-  if (m.tst > 0)
-    s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamTop), Math.max(0,(m.cd - 2*m.ctf))*scale, m.tst*scale, "#00008b");
-  if (m.ts > 0)
-    s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamBot - m.ts), Math.max(0,(m.cd - 2*m.ctf))*scale, m.ts*scale, "#00008b");
-  if (m.tbs > 0)
-    s += svgRect(vigaX + beamPx - 30, Y(m.beamTop + m.tf), m.tbs*scale, Math.max(0,(m.bd - 2*m.tf))*scale, "#00008b");
+  if (m.tst > 0) s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamTop), Math.max(0,(m.cd - 2*m.ctf))*scale, m.tst*scale, "#00008b");
+  if (m.ts > 0) s += svgRect(cRight - m.cd*scale + m.ctf*scale, Y(m.beamBot - m.ts), Math.max(0,(m.cd - 2*m.ctf))*scale, m.ts*scale, "#00008b");
+  if (m.tbs > 0) s += svgRect(vigaX + beamPx - 30, Y(m.beamTop + m.tf), m.tbs*scale, Math.max(0,(m.bd - 2*m.tf))*scale, "#00008b");
   m.rows.forEach(yy => { s += svgLine(cRight - m.ctf*scale - 10, Y(yy), vigaX, Y(yy), "#ff4500", "4,2"); });
   const xL = cRight - m.cd*scale - 18;
   s += dimV(xL, Y(0), Y(m.rows[0]), "e=" + fmt(m.e));
@@ -911,32 +890,23 @@ function drawSide(m){
   $("vSide").innerHTML = s;
 }
 
-/* ---------- Vista superior (sección C-C): perfil del pilar + chapa + viga (tbs/tws) ---------- */
 function drawTop(m){
   const W = 500, cy = 180;
   const x0 = 50, beamPx = 190;
   const avail = W - x0 - beamPx - 70;
   const scale = Math.min(0.8, avail / Math.max(m.cd + m.tp, 1));
-  const cx = x0 + m.cd*scale;   // cara frontal (derecha) del pilar
+  const cx = x0 + m.cd*scale;
   const yTop = v => cy - v*scale;
   const steel = "#b0c4de", plate = "#708090", stiff = "#00008b", webStiff = "#4169e1";
   let s = "";
-  // Sección del pilar: alas verticales + alma horizontal (perfil azul claro)
   s += svgRect(cx - m.cd*scale, cy - (m.cbf/2)*scale, m.ctf*scale, m.cbf*scale, steel, "#33475b", 1);
   s += svgRect(cx - m.ctf*scale, cy - (m.cbf/2)*scale, m.ctf*scale, m.cbf*scale, steel);
   s += svgRect(cx - m.cd*scale + m.ctf*scale, yTop(m.ctw/2), Math.max(0,(m.cd - 2*m.ctf))*scale, m.ctw*scale, steel);
-  // Rigidizador de alma del pilar (tws), paralelo al alma
-  if (m.tws > 0)
-    s += svgRect(cx - m.cd*scale + m.ctf*scale, yTop(m.ctw/2) - m.tws*scale, Math.max(0,(m.cd - 2*m.ctf))*scale, m.tws*scale, webStiff);
-  // Chapa frontal
+  if (m.tws > 0) s += svgRect(cx - m.cd*scale + m.ctf*scale, yTop(m.ctw/2) - m.tws*scale, Math.max(0,(m.cd - 2*m.ctf))*scale, m.tws*scale, webStiff);
   s += svgRect(cx, cy - (m.Bp/2)*scale, m.tp*scale, m.Bp*scale, plate);
-  // Viga vista desde arriba
   s += svgRect(cx + m.tp*scale, cy - (m.bf/2)*scale, beamPx, m.bf*scale, steel);
   s += svgLine(cx + m.tp*scale, cy, cx + m.tp*scale + beamPx, cy, "black", "5,5");
-  // Rigidizador de viga (tbs)
-  if (m.tbs > 0)
-    s += svgRect(cx + m.tp*scale + beamPx - 30, cy - (m.bf/2)*scale, m.tbs*scale, m.bf*scale, stiff);
-  // Anotaciones de los tres grosores
+  if (m.tbs > 0) s += svgRect(cx + m.tp*scale + beamPx - 30, cy - (m.bf/2)*scale, m.tbs*scale, m.bf*scale, stiff);
   s += dimH(cy + m.Bp*scale/2 + 16, cx, cx + m.tp*scale, "tp=" + fmt(m.tp));
   if (m.tbs > 0){
     const tx = cx + m.tp*scale + beamPx - 30 + m.tbs*scale;
@@ -953,7 +923,7 @@ function drawTop(m){
 }
 
 /* =====================================================================
-   Acciones
+   Acciones principales
    ===================================================================== */
 $("add").onclick = () => {
   const row = readForm(); if (!row) return;
@@ -964,7 +934,7 @@ $("add").onclick = () => {
 $("reset").onclick = renderForm;
 $("clear").onclick = () => {
   state.rows = []; state.results = []; state.checked = []; state.marked = []; state.status = [];
-  renderTable(); renderResults(); renderCheckResults(); setStatus("", "");
+  renderTable(); renderResults(); setStatus("", "");
 };
 
 $("send").onclick = async () => {
@@ -979,38 +949,31 @@ $("send").onclick = async () => {
     const data = await r.json().catch(() => ({}));
     if (!r.ok){
       let detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data, null, 2);
-      if (data.missing) detail += "\n\nFaltan:\n" + JSON.stringify(data.missing, null, 2);
-      if (data.expected) detail += "\n\nEl modelo espera:\n" + data.expected.join(", ");
-      setStatus("bad", `El servidor respondió ${r.status}`, detail);
+      setStatus("bad", `Error ${r.status}`, detail);
     } else {
       state.results = data.rows || [];
       state.checked = [];
       state.marked = state.results.map(() => false);
       state.status = state.results.map(() => "");
-      renderResults(); renderCheckResults();
-      // El servidor ya devuelve la comprobación de la fila final: se muestra directamente.
-      // (Si no viniera, se pide a /check como antes.)
-      const pre = `Predicción completada con el modelo ${data.model_name ?? ""}: ${state.results.length} uniones. `;
+      renderResults();
+      const pre = `Predicción completada: ${state.results.length} uniones. `;
       if (Array.isArray(data.checks) && data.checks.length === state.results.length) applyChecks(data.checks, pre);
       else await runCheck(pre);
     }
   } catch (e){
-    setStatus("bad", "No se pudo conectar con el servidor", e.message);
+    setStatus("bad", "Error de conexión", e.message);
   }
   btn.disabled = !state.rows.length;
 };
 
 function applyChecks(rows, prefix = ""){
   state.checked = rows;
-  state.status = state.results.map((_, i) => {
-    const c = rows[i];
-    return (c && c.cumple) ? "CUMPLE" : "NO CUMPLE";
-  });
+  state.status = state.results.map((_, i) => (rows[i] && rows[i].cumple) ? "CUMPLE" : "NO CUMPLE");
   renderResults();
-  renderCheckResults();
-  setStatus("ok", prefix + "Comprobación AISC 360-10 finalizada. Si editas la tabla, pulsa \"Comprobar\" para volver a validar.");
+  setStatus("ok", prefix + "Comprobación AISC 360-10 finalizada. Pulsa 👁 en cualquier fila para ver el desglose o editar la geometría.");
 }
-$("checkBtn").onclick = () => runCheck();   // revalidar tras editar la tabla
+
+$("checkBtn").onclick = () => runCheck();
 async function runCheck(prefix = ""){
   const btn = $("checkBtn");
   btn.disabled = true; setStatus("", prefix + "Comprobando " + state.results.length + " uniones con AISC 360-10…");
@@ -1021,40 +984,30 @@ async function runCheck(prefix = ""){
       body: JSON.stringify({ rows: state.results }),
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok){
-      setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2));
-    } else {
-      applyChecks(data.rows || [], prefix);
-    }
-  } catch (e){
-    setStatus("bad", "Error enviando la comprobación", e.message);
-  }
+    if (!r.ok){ setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2)); }
+    else { applyChecks(data.rows || [], prefix); }
+  } catch (e){ setStatus("bad", "Error enviando la comprobación", e.message); }
   btn.disabled = !state.results.length;
 };
 
 /* =====================================================================
-   Marcado y envío de conexiones validadas
+   Marcado y Dataset
    ===================================================================== */
 $("markValid").onclick = () => {
-  // Solo marca (anade); nunca desmarca.
   state.marked = state.marked.map((m, i) => m || state.status[i] === "CUMPLE");
   renderResults();
 };
-
 $("markMod").onclick = () => {
-  // Solo marca (anade); nunca desmarca.
   state.marked = state.marked.map((m, i) => m || state.status[i] === "MODIFICADO");
   renderResults();
 };
-
 $("sendMarked").onclick = async () => {
   const rows = state.results.filter((_, i) => state.marked[i]);
   if (!rows.length){ setStatus("bad", "No hay conexiones marcadas."); return; }
-  if (!confirm("Aseguro que los registros corresponden a conexiones validadas.\n\n¿Enviar " + rows.length + " conexiones marcadas al dataset de reentreno?")) return;
+  if (!confirm("¿Enviar " + rows.length + " conexiones marcadas al dataset de reentreno?")) return;
 
-  const btn = $("sendMarked");
-  btn.disabled = true;
-  setStatus("", "Enviando " + rows.length + " conexiones marcadas…");
+  const btn = $("sendMarked"); btn.disabled = true;
+  setStatus("", "Enviando " + rows.length + " conexiones…");
   try {
     const r = await fetch("/dataset/append", {
       method: "POST",
@@ -1062,19 +1015,14 @@ $("sendMarked").onclick = async () => {
       body: JSON.stringify({ rows }),
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok){
-      setStatus("bad", `Error al guardar (${r.status})`, JSON.stringify(data, null, 2));
-    } else {
-      setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas (total ${data.total_rows} filas).`);
-    }
-  } catch (e){
-    setStatus("bad", "Error enviando las conexiones marcadas", e.message);
-  }
+    if (!r.ok){ setStatus("bad", `Error (${r.status})`, JSON.stringify(data)); }
+    else { setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas.`); }
+  } catch (e){ setStatus("bad", "Error de conexión", e.message); }
   updateSendMarked();
 };
 
 /* =====================================================================
-   Carga de modelos y esquema
+   Inicialización
    ===================================================================== */
 async function loadModels(){
   try{
@@ -1084,7 +1032,7 @@ async function loadModels(){
     const models = o.available_models || [];
     sel.innerHTML = models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
     if (o.default_model && models.includes(o.default_model)) sel.value = o.default_model;
-  } catch(e){ /* sin modelos */ }
+  } catch(e){}
 }
 
 async function loadSchema(){
@@ -1095,14 +1043,12 @@ async function loadSchema(){
     if (!r.ok) throw new Error("HTTP " + r.status);
     SCHEMA = await r.json();
     renderForm(); renderTable();
-    $("sub").textContent = ``;
-  } catch (e){
-    setStatus("bad", "No se pudo cargar el esquema del modelo", e.message);
-  }
+  } catch (e){ setStatus("bad", "Error cargando esquema", e.message); }
 }
+
 $("model").onchange = () => {
   state.rows = []; state.results = []; state.checked = []; state.marked = []; state.status = [];
-  renderTable(); renderResults(); renderCheckResults(); loadSchema();
+  renderTable(); renderResults(); loadSchema();
 };
 
 loadModels().then(loadSchema);

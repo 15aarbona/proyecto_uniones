@@ -709,8 +709,12 @@ class CalculadorAISC36010:
             for i in range(self.NumeResulComplemen)
         ]
 
+        hay_fallo_geometrico = any(
+            comp.resultado.startswith("REVISAR") for indice, comp in enumerate(comp_objs)
+        )
+
         ratio_max_todos = max(ratios) if ratios else 0.0
-        cumple = ratio_max_todos <= 1.0
+        cumple = (ratio_max_todos <= 1.0) and not hay_fallo_geometrico
 
         intermedios = {
             "FntAME": self.FntAME_, "FnvAME": self.FnvAME_, "nbol": self.nbol_,
