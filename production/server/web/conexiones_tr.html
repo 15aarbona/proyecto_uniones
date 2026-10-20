@@ -203,9 +203,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     </h2>
     <div class="tablewrap" id="res"></div>
     <div class="actions">
-      <button class="btn" id="checkBtn" disabled>Volver a comprobar todas las entradas</button>
       <button class="btn ghost" id="markValid">Marcar "CUMPLE"</button>
-      <button class="btn ghost" id="markMod">Marcar "MODIFICADO"</button>
       <button class="btn green" id="sendMarked" disabled>Enviar conexiones marcadas</button>
     </div>
   </section>
@@ -216,7 +214,6 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <button class="btn ghost" id="viewerBack">← Volver</button>
     <div class="viewer-title" id="viewerTitle">Visualización 2D y Comprobación</div>
     <div class="viewer-actions">
-      <button class="btn green" id="viewerCheckBtn">⚡ Comprobar esta unión</button>
       <button class="btn ghost" id="viewerReset">Reset</button>
       <button class="btn ghost" id="viewerRawReset">Reset a predicción sin ajuste</button>
       <button class="btn green" id="viewerSave" disabled>Guardar</button>
@@ -392,12 +389,12 @@ function bulkFillColumn(colName){
     state.marked[i] = false;
   });
   renderResults();
+  runCheck();
 }
 
 function renderResults(){
   const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
-  $("checkBtn").disabled = !res.length;
   if (!res.length){ updateSendMarked(); return; }
   const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : [...new Set(res.flatMap(r => Object.keys(r)))];
 
@@ -433,6 +430,7 @@ function renderResults(){
       state.results[i][inp.dataset.col] = inp.value;
       markModified(i);
     });
+    inp.addEventListener("change", () => checkRow(+inp.dataset.row));
   });
   $("res").querySelectorAll("input.rowchk").forEach(chk => {
     chk.addEventListener("change", () => { state.marked[+chk.dataset.row] = chk.checked; updateSendMarked(); });
@@ -456,15 +454,53 @@ function renderResults(){
 function markModified(i){
   state.status[i] = "MODIFICADO";
   state.marked[i] = false;
+  updateRowStatus(i);
   const row = $("res").querySelectorAll("tbody tr")[i];
-  if (row){
-    row.className = "row-mod";
-    const stCell = row.querySelector("td.st");
-    if (stCell){ stCell.textContent = "MODIFICADO"; stCell.className = "st mod"; }
-    const chk = row.querySelector("input.rowchk");
-    if (chk) chk.checked = false;
-  }
+  const chk = row && row.querySelector("input.rowchk");
+  if (chk) chk.checked = false;
   updateSendMarked();
+}
+
+/* Actualiza en sitio la clase de la fila y su celda de estado (sin re-render). */
+function updateRowStatus(i){
+  const row = $("res").querySelectorAll("tbody tr")[i];
+  if (!row) return;
+  const st = state.status[i] || "";
+  const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : st === "MODIFICADO" ? "mod" : "";
+  const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : st === "MODIFICADO" ? "row-mod" : "";
+  row.className = rowCls;
+  const stCell = row.querySelector("td.st");
+  if (stCell){ stCell.textContent = st; stCell.className = "st " + stCls; }
+}
+
+/* Valida una sola fila (auto al salir de un input, al guardar y tras "Rellenar").
+   Mientras espera, la fila queda en MODIFICADO; al responder pasa a CUMPLE/NO CUMPLE. */
+let _checkTokens = {};
+async function checkRow(i){
+  if (!state.results[i]) return;
+  if (!Array.isArray(state.checked)) state.checked = [];
+  const token = (_checkTokens[i] || 0) + 1;
+  _checkTokens[i] = token;
+  state.status[i] = "MODIFICADO";   // "validando…"
+  updateRowStatus(i);
+  try {
+    const r = await fetch("/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows: [state.results[i]] }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (token !== _checkTokens[i]) return;   // respuesta antigua: ignorar
+    if (r.ok && Array.isArray(data.rows) && data.rows.length){
+      state.checked[i] = data.rows[0];
+      state.status[i] = data.rows[0].cumple ? "CUMPLE" : "NO CUMPLE";
+    }
+  } catch (e){
+    if (token !== _checkTokens[i]) return;
+    console.error("checkRow", i, e);
+  }
+  updateRowStatus(i);
+  if (typeof VIEW !== "undefined" && VIEW && VIEW.i === i) buildViewerPanel();
 }
 
 function updateSendMarked(){
@@ -544,6 +580,8 @@ P_KEYS.forEach(k => VIEW_FIELDS.push({k, label:k, type:"num"}));
 VIEW_FIELDS.push(
   {sec:"Rigidizadores"},
   {k:"ThicknessName_t_webstiff", label:"tws · rigid. alma pilar", type:"mm"},
+  {k:"Bws", label:"Bws · ancho placa alma", type:"num"},
+  {k:"Lws", label:"Lws · alto placa alma", type:"num"},
   {k:"ThicknessName_t_compstiff", label:"ts · rigid. compresión pilar", type:"mm"},
   {k:"ThicknessName_t_BeamHcompstiff", label:"tbs · rigid. alma viga", type:"mm"},
   {k:"ThicknessName_t_tenstiff", label:"tst · rigid. tracción pilar", type:"mm"},
@@ -622,6 +660,7 @@ async function openViewer(i){
   $("viewer").style.display = "flex";
   drawAll();
   updateSaveButton();
+  checkViewerConnection();   // validar siempre al abrir (por si estaba en MODIFICADO)
 }
 
 function buildViewerPanel(){
@@ -629,59 +668,8 @@ function buildViewerPanel(){
   let html = "";
   if (VIEW.warn) html += `<div class="view-warn">${escHtml(VIEW.warn)}</div>`;
 
-  // --- SECCIÓN: COMPROBACIONES Y RATIOS AISC 360-10 ---
-  const checkData = VIEW.check || state.checked[VIEW.i];
-  if (checkData) {
-    const st = VIEW.check ? (VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE")
-                          : (state.status[VIEW.i] || (checkData.cumple ? "CUMPLE" : "NO CUMPLE"));
-    const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
-    
-    html += `
-      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
-      <div style="margin-bottom:10px; display:flex; align-items:center; justify-content:space-between;">
-        <span class="badge ${badgeCls}">${escHtml(st)}</span>
-        <button class="btn green" id="viewerCheckBtnInline" style="padding:4px 10px; font-size:12px;">⚡ Comprobar esta unión</button>
-      </div>
-      <div style="font-size:12.5px; margin-bottom:8px; color:var(--tr-navy);">
-        <div><b>Ratio pésimo:</b> <span style="color:var(--tr-navy); font-weight:bold;">${checkData.ratio_pesimo ?? 'N/A'}</span></div>
-        <div style="margin-top:2px;"><b>Chequeo crítico:</b> <span style="color:var(--tr-navy);">${escHtml(checkData.descripcion_ratio_pesimo || 'N/A')}</span></div>
-      </div>
-    `;
-
-    if (Array.isArray(checkData.complementarios) && checkData.complementarios.length > 0) {
-      html += `
-        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
-          <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Comprobaciones Geométricas (${checkData.complementarios.length})</summary>
-          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
-            ${checkData.complementarios.map(c => `<li><b style="color:var(--tr-navy);">${escHtml(c.descripcion)}:</b> <span style="color:var(--tr-navy);">${escHtml(c.resultado)}</span></li>`).join("")}
-          </ul>
-        </details>
-      `;
-    }
-
-    if (Array.isArray(checkData.ratios) && checkData.ratios.length > 0) {
-      html += `
-        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
-          <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Ratios de Resistencia (${checkData.ratios.length})</summary>
-          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
-            ${checkData.ratios.map(f => {
-              const val = f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A';
-              const isBad = f.ratio > 1.0;
-              return `<li><b style="color:var(--tr-navy);">${escHtml(f.descripcion)}:</b> <span style="${isBad ? 'color:var(--tr-red);font-weight:bold;' : 'color:var(--tr-navy);'}">${val}</span></li>`;
-            }).join("")}
-          </ul>
-        </details>
-      `;
-    }
-  } else {
-    html += `
-      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
-      <div style="margin-bottom:12px; background:#EAF3FB; padding:10px; border-left:3px solid var(--tr-blue); border-radius:3px; font-size:12px; color:var(--tr-navy);">
-        Esta unión no se ha comprobado de forma individual.
-        <button class="btn green" id="viewerCheckBtnInline" style="margin-top:8px; width:100%; font-size:12px; padding:6px 12px;">⚡ Comprobar esta unión</button>
-      </div>
-    `;
-  }
+  // Seccion de comprobacion (se puede refrescar sola sin re-renderizar los inputs).
+  html += `<div id="viewerCheckSection">${checkSectionHtml()}</div>`;
 
   // Campos de Geometría
   html += VIEW_FIELDS.map(f => {
@@ -698,12 +686,82 @@ function buildViewerPanel(){
 
   p.innerHTML = html;
 
-  const inlineCheck = $("viewerCheckBtnInline");
-  if (inlineCheck) inlineCheck.onclick = checkViewerConnection;
-
   p.querySelectorAll("[data-vkey]").forEach(inp => {
     inp.addEventListener("input", () => onField(inp, VIEW.vals, inp.dataset.vkey));
+    inp.addEventListener("change", () => {
+      onFieldBlur(inp, VIEW.vals, inp.dataset.vkey);
+      checkViewerConnection();   // al salir del input, validar sin pulsar el boton
+    });
   });
+}
+
+/* HTML de la seccion de comprobacion (estado + ratios). */
+function checkSectionHtml(){
+  const checkData = VIEW.check || state.checked[VIEW.i];
+  const checking = !!VIEW.checking;
+  if (checkData || checking){
+    let st;
+    if (checking) st = "MODIFICADO";
+    else if (VIEW.check) st = VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE";
+    else st = state.status[VIEW.i] || (checkData.cumple ? "CUMPLE" : "NO CUMPLE");
+    const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+
+    let out = `
+      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
+      <div style="margin-bottom:10px;">
+        <span class="badge ${badgeCls}">${escHtml(st)}</span>
+      </div>
+    `;
+    if (!checkData) return out;   // comprobando sin resultado previo
+
+    out += `
+      <div style="font-size:12.5px; margin-bottom:8px; color:var(--tr-navy);">
+        <div><b>Ratio pésimo:</b> <span style="color:var(--tr-navy); font-weight:bold;">${checkData.ratio_pesimo ?? 'N/A'}</span></div>
+        <div style="margin-top:2px;"><b>Chequeo crítico:</b> <span style="color:var(--tr-navy);">${escHtml(checkData.descripcion_ratio_pesimo || 'N/A')}</span></div>
+      </div>
+    `;
+
+    if (Array.isArray(checkData.complementarios) && checkData.complementarios.length > 0) {
+      out += `
+        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
+          <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Comprobaciones Geométricas (${checkData.complementarios.length})</summary>
+          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
+            ${checkData.complementarios.map(c => `<li><b style="color:var(--tr-navy);">${escHtml(c.descripcion)}:</b> <span style="color:var(--tr-navy);">${escHtml(c.resultado)}</span></li>`).join("")}
+          </ul>
+        </details>
+      `;
+    }
+
+    if (Array.isArray(checkData.ratios) && checkData.ratios.length > 0) {
+      out += `
+        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
+          <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Ratios de Resistencia (${checkData.ratios.length})</summary>
+          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
+            ${checkData.ratios.map(f => {
+              const val = f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A';
+              const isBad = f.ratio > 1.0;
+              return `<li><b style="color:var(--tr-navy);">${escHtml(f.descripcion)}:</b> <span style="${isBad ? 'color:var(--tr-red);font-weight:bold;' : 'color:var(--tr-navy);'}">${val}</span></li>`;
+            }).join("")}
+          </ul>
+        </details>
+      `;
+    }
+    return out;
+  }
+
+  return `
+    <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
+    <div style="margin-bottom:12px; background:#EAF3FB; padding:10px; border-left:3px solid var(--tr-blue); border-radius:3px; font-size:12px; color:var(--tr-navy);">
+      Esta unión no se ha comprobado de forma individual.
+    </div>
+  `;
+}
+
+/* Refresca SOLO la seccion de comprobacion (no toca los inputs ni el foco). */
+function renderCheckSection(){
+  const el = $("viewerCheckSection");
+  if (!el) return;
+  el.innerHTML = checkSectionHtml();
 }
 
 async function checkViewerConnection(){
@@ -719,10 +777,10 @@ async function checkViewerConnection(){
     }
   });
 
-  const btnTop = $("viewerCheckBtn");
-  const btnInline = $("viewerCheckBtnInline");
-  if (btnTop) { btnTop.disabled = true; btnTop.textContent = "Comprobando…"; }
-  if (btnInline) { btnInline.disabled = true; btnInline.textContent = "Comprobando…"; }
+  const token = (VIEW.checkToken || 0) + 1;
+  VIEW.checkToken = token;
+  VIEW.checking = true;
+  renderCheckSection();   // muestra MODIFICADO hasta la respuesta (sin tocar los inputs)
 
   try {
     const r = await fetch("/check", {
@@ -731,24 +789,25 @@ async function checkViewerConnection(){
       body: JSON.stringify({ rows: [VIEW.row] }),
     });
     const data = await r.json().catch(() => ({}));
-
+    if (!VIEW || VIEW.checkToken !== token) return;   // respuesta antigua o visor cerrado
     if (r.ok && Array.isArray(data.rows) && data.rows.length > 0) {
       // Comprobacion EFIMERA: se muestra en el visor, pero no toca la tabla.
       // Solo se persiste (junto con los valores) al pulsar "Guardar".
       VIEW.check = data.rows[0];
-      buildViewerPanel();
-      drawAll();
     } else {
       alert("Error comprobando la conexión: " + (typeof data.detail === "string" ? data.detail : JSON.stringify(data)));
     }
   } catch (e) {
+    if (!VIEW || VIEW.checkToken !== token) return;
     alert("Error conectando con el servidor: " + e.message);
   } finally {
-    if (btnTop) { btnTop.disabled = false; btnTop.textContent = "⚡ Comprobar esta unión"; }
+    if (VIEW && VIEW.checkToken === token) {
+      VIEW.checking = false;
+      renderCheckSection();
+      drawAll();
+    }
   }
 }
-
-$("viewerCheckBtn").onclick = checkViewerConnection;
 
 /* Fila del panel: cotas en mm; el "mm" es texto fijo. Las de sección son de solo lectura. */
 function viewRow(label, bindAttr, key, value, inMm, editable=true){
@@ -771,20 +830,9 @@ function sanitizeNum(v){
   return s;
 }
 
-/* Límites por campo (todos >= 0). El tope depende de la sección (ya de solo lectura) y,
-   para Lh, de la geometría: la cantonera no puede salirse de la chapa (Hhaunch). */
+/* Solo se limita por abajo (no negativos). Los topes los valida el servidor. */
 function boxLimits(m){
-  const t = Math.tan(Math.PI / 3);   // 60º
-  return {
-    b_ep: { min: 0 },                                             // Bp sin tope superior
-    p2_ep: { min: 0, max: m.bf > 0 ? m.bf : null },               // g  <= bf_viga
-    Lh: { min: 0, max: m.Hhaunch > 0 ? m.Hhaunch : null },        // altura cantonera <= final de chapa
-    ThicknessName_t_ep: { min: 0, max: 100 },
-    ThicknessName_t_webstiff: { min: 0, max: 100 },
-    ThicknessName_t_compstiff: { min: 0, max: 100 },
-    ThicknessName_t_BeamHcompstiff: { min: 0, max: 100 },
-    ThicknessName_t_tenstiff: { min: 0, max: 100 },
-  };
+  return {};
 }
 
 function clampToLimits(v, lim, key){
@@ -792,13 +840,22 @@ function clampToLimits(v, lim, key){
   let n = vNum(v);
   if (lim.min != null && n < lim.min) n = lim.min;
   if (lim.max != null && n > lim.max) n = lim.max;
-  if (key === "Lh") n = Math.trunc(n);   // Lh sin decimales
   return String(n);
+}
+
+/* Marca la comprobación como pendiente (MODIFICADO) en cuanto se edita un campo. */
+function markViewerModified(){
+  if (!VIEW) return;
+  const was = !!VIEW.checking;
+  VIEW.checking = true;
+  VIEW.checkToken = (VIEW.checkToken || 0) + 1;   // invalida cualquier respuesta en vuelo
+  if (!was) renderCheckSection();
 }
 
 /* Entrada de campo: sanea (solo número con decimales), aplica límites en vivo y refresca
    dibujo + botón Guardar. Lh se trunca (sin decimales). */
 function onField(inp, store, key){
+  markViewerModified();   // MODIFICADO en cuanto el usuario toca un input
   let s = sanitizeNum(inp.value);
   const lim = boxLimits(viewModel())[key] || { min: 0 };
   if (s === ""){ store[key] = ""; inp.value = ""; updateSaveButton(); drawAll(); return; }
@@ -807,11 +864,21 @@ function onField(inp, store, key){
     let nc = n;
     if (lim.min != null && nc < lim.min) nc = lim.min;
     if (lim.max != null && nc > lim.max) nc = lim.max;
-    if (key === "Lh"){ nc = Math.trunc(nc); s = String(nc); }
-    else if (nc !== n){ s = String(nc); }
+    if (nc !== n){ s = String(nc); }
   }
   store[key] = s;
   if (inp.value !== s) inp.value = s;   // quita letras / normaliza lo tecleado
+  updateSaveButton();
+  drawAll();
+}
+
+/* Al salir del campo: si queda vacío (o no numérico) se pone 0. Nunca negativo. */
+function onFieldBlur(inp, store, key){
+  const s = sanitizeNum(inp.value);
+  let n = (s === "" || isNaN(parseFloat(s))) ? 0 : parseFloat(s);
+  if (n < 0) n = 0;
+  store[key] = String(n);
+  if (inp.value !== String(n)) inp.value = String(n);
   updateSaveButton();
   drawAll();
 }
@@ -840,6 +907,7 @@ function resetViewer(){
   buildViewerPanel();
   drawAll();
   updateSaveButton();
+  checkViewerConnection();   // revalidar tras el reset
 }
 
 /* Carga en los campos la prediccion RAW (sin ajustes) de esta fila. Solo es visual:
@@ -861,11 +929,13 @@ function loadRawPrediction(){
   buildViewerPanel();
   drawAll();
   updateSaveButton();
+  checkViewerConnection();   // revalidar la predicción sin ajuste
 }
 
 function saveViewer(){
   if (!VIEW) return;
-  const row = state.results[VIEW.i];
+  const i = VIEW.i;
+  const row = state.results[i];
   const lim = boxLimits(viewModel());
   VIEW_FIELDS.forEach(f => {
     if (!f.k) return;
@@ -873,12 +943,13 @@ function saveViewer(){
     if (f.type === "mm"){ row[f.k] = vMmText(v); }
     else { const s = String(v).trim(); row[f.k] = s === "" ? "" : Number(s); }
   });
-  state.status[VIEW.i] = "MODIFICADO";
-  state.marked[VIEW.i] = false;
+  state.status[i] = "MODIFICADO";
+  state.marked[i] = false;
   // Guardar persiste también la comprobación manual (si se hizo en el visor).
-  if (VIEW.check) state.checked[VIEW.i] = VIEW.check;
+  if (VIEW.check) state.checked[i] = VIEW.check;
   closeViewer();
   renderResults();
+  checkRow(i);
 }
 
 function closeViewer(){ $("viewer").style.display = "none"; VIEW = null; }
@@ -921,7 +992,7 @@ function viewModel(){
     Hhaunch: Math.max(0, Lp - beamBot),
     tws: vNum(V.ThicknessName_t_webstiff), ts: vNum(V.ThicknessName_t_compstiff),
     tbs: vNum(V.ThicknessName_t_BeamHcompstiff), tst: vNum(V.ThicknessName_t_tenstiff),
-    bws: vNum(VIEW.row.Bws), lws: vNum(VIEW.row.Lws),
+    bws: vNum(V.Bws), lws: vNum(V.Lws),
   };
 }
 
@@ -996,9 +1067,10 @@ function drawSide(m){
     const wx = cRight - (m.cd/2)*scale - (m.bws/2)*scale;   // centrada en el canto del pilar
     const wy = Y(m.beamTop + m.bd/2) - (m.lws/2)*scale;     // centrada en la viga
     s += svgRect(wx, wy, m.bws*scale, m.lws*scale, "#4169e1", "#1e3a8a", 1.2);
-    // Cotas de la placa, en rojo y junto al rigidizador.
-    s += svgText(wx + (m.bws*scale)/2, wy - 6, "Bws=" + fmt(m.bws), "middle", "#D52B1E", 11);
-    s += svgText(wx - 6, wy + (m.lws*scale)/2 + 4, "Lws=" + fmt(m.lws), "end", "#D52B1E", 11);
+    // Cotas de la placa (rojo). Bws va por encima de tst para no taparlo.
+    const bwsY = Math.min(wy, Y(m.beamTop)) - 18;
+    s += dimH(bwsY, wx, wx + m.bws*scale, "Bws=" + fmt(m.bws));
+    s += dimV(wx - 8, wy, wy + m.lws*scale, "Lws=" + fmt(m.lws), "left");
   }
   s += svgRect(cRight, top, m.tp*scale, m.Lp*scale, "#708090");
   const vigaX = cRight + m.tp*scale;
@@ -1066,7 +1138,7 @@ $("add").onclick = () => {
 };
 $("reset").onclick = renderForm;
 $("clear").onclick = () => {
-  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = [];
+  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = []; _checkTokens = {};
   renderTable(); renderResults(); setStatus("", "");
 };
 
@@ -1085,6 +1157,7 @@ $("send").onclick = async () => {
       setStatus("bad", `Error ${r.status}`, detail);
     } else {
       state.results = data.rows || [];
+      _checkTokens = {};
       state.resultsRaw = Array.isArray(data.rows_raw) ? data.rows_raw : [];
       state.checked = [];
       state.marked = state.results.map(() => false);
@@ -1107,10 +1180,8 @@ function applyChecks(rows, prefix = ""){
   setStatus("ok", prefix + "Comprobación AISC 360-10 finalizada. Pulsa 👁 en cualquier fila para ver el desglose o editar la geometría.");
 }
 
-$("checkBtn").onclick = () => runCheck();
 async function runCheck(prefix = ""){
-  const btn = $("checkBtn");
-  btn.disabled = true; setStatus("", prefix + "Comprobando " + state.results.length + " uniones con AISC 360-10…");
+  setStatus("", prefix + "Comprobando " + state.results.length + " uniones con AISC 360-10…");
   try {
     const r = await fetch("/check", {
       method: "POST",
@@ -1121,7 +1192,7 @@ async function runCheck(prefix = ""){
     if (!r.ok){ setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2)); }
     else { applyChecks(data.rows || [], prefix); }
   } catch (e){ setStatus("bad", "Error enviando la comprobación", e.message); }
-  btn.disabled = !state.results.length;
+
 };
 
 /* =====================================================================
@@ -1129,10 +1200,6 @@ async function runCheck(prefix = ""){
    ===================================================================== */
 $("markValid").onclick = () => {
   state.marked = state.marked.map((m, i) => m || state.status[i] === "CUMPLE");
-  renderResults();
-};
-$("markMod").onclick = () => {
-  state.marked = state.marked.map((m, i) => m || state.status[i] === "MODIFICADO");
   renderResults();
 };
 $("sendMarked").onclick = async () => {
@@ -1181,7 +1248,7 @@ async function loadSchema(){
 }
 
 $("model").onchange = () => {
-  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = [];
+  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = []; _checkTokens = {};
   renderTable(); renderResults(); loadSchema();
 };
 
