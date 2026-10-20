@@ -12,9 +12,10 @@ poder ajustarlas sin tocar el resto.
 
 Reglas de geometria de chapa/cantonera (`ajustar_cantonera_y_chapa`, tambien la usa refinar.py):
   - Lh = FactorCantoCantonera * d_viga / sin(AnguloCantonera)   (0.7 y 60 grados por defecto).
-  - Si el ala de la cantonera cae sobre una fila de tornillos (a menos del `clearance`),
-    se AUMENTA el canto de la cantonera (FactorCantoCantonera y Lh, manteniendo la formula)
-    hasta centrar el ala entre dos filas (p. ej. penultima y ultima).
+  - Lh es un DATO: se queda con el valor de la formula y NUNCA se modifica al corregir.
+    Si el ala de la cantonera cae sobre una fila de tornillos (a menos del `clearance`),
+    se adaptan las FILAS a ella: las intermedias se suben hasta quedar por encima del ala
+    y la ultima baja hasta quedar por debajo (anadiendo filas si hace falta).
   - El ultimo tornillo va siempre por debajo de la viga/cantonera (+ holgura) y la chapa
     termina `e` mm por debajo del ultimo tornillo: Lp = ultima fila + e.
   - b_ep queda entre el ala de la viga y el ala del pilar (punto medio si el modelo se sale).
@@ -217,8 +218,8 @@ def _limites_fisicos(bolt_name, tp_text) -> dict:
 def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
     """Aplica sobre una fila CODAME (la modifica) las reglas de cantonera y largo de chapa:
 
-      1. Con cantonera: si su ala toca una fila de tornillos, aumenta FactorCantoCantonera
-         (y Lh = factor*h/sin(angulo)) hasta centrar el ala entre dos filas consecutivas.
+      1. Con cantonera: si su ala toca una fila de tornillos, mueve las filas (nunca Lh):
+         las intermedias suben hasta quedar sobre el ala y la ultima queda bajo ella.
          Si no hay hueco, anade filas por debajo.
       2. El ultimo tornillo queda siempre por debajo de la viga/cantonera (+ holgura).
       3. Lp = ultima fila + e (la chapa acaba `e` mm por debajo del ultimo tornillo).
@@ -248,6 +249,7 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
     fac0 = _num(row.get("FactorCantoCantonera"))
     ang = _num(row.get("AnguloCantonera"))
     tiene = ang != 0.0 and fac0 > 0.0
+    nueva = False                           # cantonera que no predijo el modelo y hay que crear
     yb = dev + pfo + h                      # cara inferior del ala inferior de la viga
     if not tiene:                           # sin cantonera: bajo el ala solo puede haber 1 fila
         ys0 = [dev, dev + c]
@@ -255,10 +257,10 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
             if seps[k] > 0:
                 ys0.append(ys0[-1] + seps[k])
         if sum(1 for y in ys0 if y > yb) > 1:
-            tiene, ang, fac0 = True, DEFAULT_HAUNCH_ANGLE_DEG, 0.0
+            tiene, ang, fac0, nueva = True, DEFAULT_HAUNCH_ANGLE_DEG, 0.0, True
             row["AnguloCantonera"] = ang
     sin_a = math.sin(math.radians(ang)) if tiene else 1.0
-    fac = fac0
+    fac = DEFAULT_HAUNCH_FACTOR if nueva else fac0     # Lh = fac*h/sen(ang): dato, no se ajusta
 
     def filas():
         ys = [dev, dev + c]
@@ -301,35 +303,36 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
         return False
 
     if tiene:
-        for _ in range(4):
+        ye = yb + fac * h / sin_a                      # cara inferior del ala de la cantonera (Lh fijo)
+
+        def claro() -> bool:
             ys = filas()
-            ye = yb + fac * h / sin_a                  # cara inferior del ala de la cantonera
-            claro = (all(abs(y - (ye - tf)) >= m and abs(y - ye) >= m for y in ys)
-                     and ys[-1] >= ye + m
-                     and sum(1 for y in ys if y > ye) == 1)
-            
-            if claro:
-                break
-            # centrar el ala (espesor tf) entre dos filas consecutivas, aumentando la cantonera
-            cand = None
-            for a, b in zip(ys[-2:], ys[-1:]):
-                if (b - a - tf) >= 2.0 * (m + 0.5):
-                    y2 = (a + b) / 2.0 + tf / 2.0
-                    if y2 >= ye - 1e-9 and (cand is None or y2 < cand):
-                        cand = y2
-            if cand is not None:
-                fac = max(fac, round((cand - yb) * sin_a / h, 3))
-                break
-            # no hay hueco: nueva ultima fila por debajo, con sitio para centrar el ala
-            a = ys[-1]
-            b = max(a + minsp, a + tf + 2.0 * (m + 0.5), 2.0 * ye - tf - a)
-            if not anadir(paso_valido(_ceil5(b - a))):
-                log.warning("cantonera: sin filas disponibles para despejar el ala (UNICODE=%s)",
-                            row.get("Unicode"))
-                break
-        else:
-            log.warning("cantonera: no se pudo despejar el ala de los tornillos (UNICODE=%s)",
-                        row.get("Unicode"))
+            return (all(abs(y - (ye - tf)) >= m and abs(y - ye) >= m for y in ys)
+                    and ys[-1] >= ye + m
+                    and sum(1 for y in ys if y > ye) == 1)
+
+        if not claro():
+            # Todas las filas salvo la ultima por encima del ala; la ultima por debajo.
+            ys = filas()
+            n = len(ys)
+            claves = [k for k in _SEP_KEYS if seps[k] > 0]
+            obj = list(ys)
+            tope = _floor5(ye - tf - m)
+            for j in range(n - 2, 1, -1):              # intermedias: suben si tocan el ala
+                obj[j] = min(obj[j], tope)
+                tope = obj[j] - _ceil5(minsp)
+            if n >= 3 and obj[-1] - obj[-2] > maxsp:
+                obj[-1] = obj[-2] + _floor5(maxsp)
+            valido = all(obj[j] - obj[j - 1] >= minsp - 1e-9 for j in range(2, n)) and \
+                all(obj[j] - obj[j - 1] <= maxsp + 1e-9 for j in range(2, n))
+            if valido:
+                for j in range(2, n):
+                    seps[claves[j - 2]] = obj[j] - obj[j - 1]
+                if filas()[-1] < ye + m:               # la ultima, por debajo del ala
+                    llevar_ultima(ye + m)
+            if not claro():
+                log.warning("cantonera: no se pudo despejar el ala de los tornillos con Lh fijo "
+                            "(UNICODE=%s)", row.get("Unicode"))
     else:
         if filas()[-1] < yb + m:
             llevar_ultima(_ceil5(yb + max(pfo, m + 0.5)))
@@ -341,8 +344,8 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
     if abs(fac - fac0) > 1e-9:
         row["FactorCantoCantonera"] = fac
         row["Lh"] = fac * h / sin_a
-        log.info("cantonera: Factor %.3f -> %.3f, Lh = %.1f (UNICODE=%s)",
-                 fac0, fac, row["Lh"], row.get("Unicode"))
+        log.info("cantonera creada: Factor %.3f, Lh = %.1f (UNICODE=%s)",
+                 fac, row["Lh"], row.get("Unicode"))
     row["Lp"] = filas()[-1] + dev
     return cambio
 

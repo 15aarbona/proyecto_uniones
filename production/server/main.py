@@ -16,8 +16,10 @@ Endpoints:
   POST /check                   Comprobacion AISC 360-10 sobre filas CODAME
   POST /validate                Guarda filas validadas (sin reentreno)
   GET  /dataset/summary         Resumen del dataset acumulado
+  MCP  /mcp                     Servidor MCP para integracion con Microsoft Copilot
 """
 
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -40,9 +42,9 @@ import storage
 
 import dataset_valid, retrain_manager
 
+from mcp.server.fastmcp import FastMCP
+
 # Logs: un archivo por sesion (cada arranque del servidor), sin salida por pantalla.
-# La ruta se comparte por variable de entorno con los procesos hijos del ajuste (refinar.py),
-# que escriben en el mismo archivo. AI_LOG_CONSOLE=1 vuelve a mostrarlos tambien por consola.
 _LOG_DIR = config.DATA_DIR / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = os.environ.setdefault(
@@ -59,15 +61,96 @@ logging.basicConfig(
 log = logging.getLogger("ai-server")
 
 
+# =============================================================================
+# Servidor MCP (Model Context Protocol) para Microsoft Copilot
+# =============================================================================
+mcp = FastMCP("ServidorConexionesEstructurales", stateless_http=True)
+
+
+@mcp.tool()
+async def predecir_conexion(rows: List[Dict[str, Any]], model: str | None = None) -> Dict[str, Any]:
+    """Pre-diseña conexiones y devuelve las 63 columnas CODAME con sus comprobaciones.
+
+    Args:
+        rows: Lista de diccionarios con las propiedades geométricas y de carga.
+        model: Nombre opcional del modelo a usar (si falta, usa el modelo configurado por defecto).
+    """
+    name = model or config.MODEL_NAME
+    log.info("[MCP] /predict: modelo=%s, %d filas", name, len(rows))
+    predictions, checks = predictor.predict_and_check(name, rows)
+    return {"model_name": name, "rows": predictions, "checks": checks}
+
+
+@mcp.tool()
+async def comprobar_aisc(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ejecuta la comprobación estructural AISC 360-10 sobre filas CODAME.
+
+    Args:
+        rows: Lista de filas con los parámetros del diseño CODAME a verificar.
+    """
+    log.info("[MCP] /check: comprobando %d filas", len(rows))
+    results = predictor.check_rows(rows)
+    return {"status": "ok", "rows": results}
+
+
+@mcp.tool()
+async def consultar_perfiles(names: str) -> Dict[str, Any]:
+    """Consulta la geometría de secciones/perfiles de acero por nombre para el visualizador.
+
+    Args:
+        names: Nombres de los perfiles separados por comas (ej. "HEB200, IPE300").
+    """
+    result: Dict[str, Any] = {}
+    for raw in names.split(","):
+        name = raw.strip()
+        if not name:
+            continue
+        geom = catalogo.get_profile(name)
+        if geom is None:
+            result[name] = None
+        else:
+            def g(k):
+                if k not in geom.index:
+                    return None
+                v = geom.get(k)
+                return None if pd.isna(v) else v
+            bf = g("bf_mm")
+            if bf in (None, 0, 0.0):
+                bf = g("b_mm")
+            result[name] = {
+                "type": g("type"), "d_mm": g("d_mm"), "bf_mm": bf,
+                "tw_mm": g("tw_mm"), "tf_mm": g("tf_mm"), "r1_mm": g("r1_mm"),
+            }
+    return {"profiles": result}
+
+
+@mcp.tool()
+async def listar_modelos() -> Dict[str, Any]:
+    """Consulta los modelos de IA instalados y cargados en el servidor."""
+    return {
+        "available_models": model_registry.list_models(),
+        "loaded_models": model_registry.loaded_models(),
+        "default_model": config.MODEL_NAME,
+    }
+
+
+# =============================================================================
+# App FastAPI & Lifespan
+# =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Carga de modelos e inicio de retrain watcher
     try:
         model_registry.activate_configured()
         retrain_manager.start_watcher()
         log.info("Modelos cargados: %s", model_registry.loaded_models())
     except Exception as exc:  # noqa: BLE001
         log.error("No se pudo cargar ningun modelo: %s", exc)
-    yield
+
+    # Administrador de sesión de MCP sobre HTTP/SSE
+    async with contextlib.AsyncExitStack() as stack:
+        await stack.enter_async_context(mcp.session_manager.run())
+        yield
 
 
 app = FastAPI(
@@ -90,7 +173,13 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+# Monta la app HTTP de MCP en /mcp (Endpoint para Copilot: http://localhost:<port>/mcp/mcp)
+app.mount("/mcp", mcp.streamable_http_app())
 
+
+# =============================================================================
+# Modelos Pydantic & Handlers
+# =============================================================================
 class RowsIn(BaseModel):
     model: str | None = Field(
         default=None, description="Modelo a usar (carpeta en models/). Si falta, el por defecto."
@@ -117,6 +206,9 @@ async def _contract_error_handler(request: Request, exc: predictor.InputContract
     )
 
 
+# =============================================================================
+# Endpoints HTTP REST
+# =============================================================================
 @app.get("/health", tags=["estado"], summary="Estado del servidor")
 def health() -> Dict[str, Any]:
     return {
@@ -295,6 +387,6 @@ app.mount("/web", StaticFiles(directory=config.BASE_DIR / "web", html=True), nam
 if __name__ == "__main__":
     import uvicorn
 
-    # log_config=None: los logs de uvicorn (accesos, errores) van al mismo archivo, no a pantalla.
+    # log_config=None: los logs de uvicorn van al mismo archivo, no a pantalla
     print(f"Servidor en http://{config.HOST}:{config.PORT}  |  logs: {LOG_FILE}", flush=True)
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_config=None)

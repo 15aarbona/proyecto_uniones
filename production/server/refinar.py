@@ -6,7 +6,7 @@ Aqui se usa el propio comprobador (`checker`) como oraculo:
 1. REAJUSTE GEOMÉTRICO ITERATIVO (`_ajustar_geometria`):
    Corrige de forma iterativa las cotas que generan avisos geométricos (REVISAR):
    gramil p2_ep, ancho b_ep, borde dev, separaciones, colisiones con alas, cantonera
-   sobre tornillos (se aumenta su canto/Lh) y, como último recurso, el diámetro del
+   sobre tornillos (Lh NO se toca: se mueven las filas) y, como último recurso, el diámetro del
    tornillo. Se prioriza mantener los valores predichos: solo se cambia lo imprescindible.
    Reglas fijas (ver `codame.ajustar_cantonera_y_chapa`): último tornillo por debajo de
    viga/cantonera, chapa = última fila + e, b_ep entre el ala de la viga y la del pilar.
@@ -327,8 +327,8 @@ def _despejar_alas(work: Dict[str, Any], calc) -> bool:
 # --- cantonera sobre tornillos / ultimo tornillo / largo de chapa -----------
 def _ajustar_cantonera(work: Dict[str, Any], calc) -> bool:
     """Reglas de `codame.ajustar_cantonera_y_chapa` con los limites reales del calculador:
-    el ala de la cantonera no puede caer sobre una fila (se aumenta el canto/Lh hasta
-    centrarla entre dos filas), el ultimo tornillo va por debajo de viga/cantonera y
+    el ala de la cantonera no puede caer sobre una fila (Lh es fijo: se mueven las filas
+    por encima/debajo del ala), el ultimo tornillo va por debajo de viga/cantonera y
     Lp = ultima fila + e."""
     lim = {"clearance": _margen(calc), "minsp": calc.MINspacing,
            "maxsp": calc.MAXspacing, "c": calc.c_}
