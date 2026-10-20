@@ -221,7 +221,7 @@ def predict(payload: RowsIn):
     name = payload.model or config.MODEL_NAME
     log.info("/predict: modelo=%s, %d filas", name, len(payload.rows))
     try:
-        predictions, checks = predictor.predict_and_check(name, payload.rows)
+        predictions, checks, rows_raw = predictor.predict_full(name, payload.rows)
     except predictor.InputContractError:
         raise
     except KeyError as exc:
@@ -230,7 +230,7 @@ def predict(payload: RowsIn):
         log.exception("Error prediciendo")
         raise HTTPException(status_code=500, detail=f"Error al predecir: {exc}")
     log.info("/predict: %d filas devueltas", len(predictions))
-    return {"model_name": name, "rows": predictions, "checks": checks}
+    return {"model_name": name, "rows": predictions, "checks": checks, "rows_raw": rows_raw}
 
 
 @app.post(
