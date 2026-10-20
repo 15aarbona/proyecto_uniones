@@ -43,6 +43,7 @@ import storage
 import dataset_valid, retrain_manager
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Logs: un archivo por sesion (cada arranque del servidor), sin salida por pantalla.
 _LOG_DIR = config.DATA_DIR / "logs"
@@ -64,11 +65,16 @@ log = logging.getLogger("ai-server")
 # =============================================================================
 # Servidor MCP (Model Context Protocol) para Microsoft Copilot
 # =============================================================================
-mcp = FastMCP("ServidorConexionesEstructurales", stateless_http=True)
-
+mcp = FastMCP(
+    "ServidorConexionesEstructurales",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False  # o allowed_hosts=["0tpn3dld-8080.uks1.devtunnels.ms", "localhost:*"]
+    ),
+)
 
 @mcp.tool()
-async def predecir_conexion(rows: List[Dict[str, Any]], model: str | None = None) -> Dict[str, Any]:
+async def predecir_conexion(rows: List[Dict[str, Any]], model: str = "") -> Dict[str, Any]:
     """Pre-diseña conexiones y devuelve las 63 columnas CODAME con sus comprobaciones.
 
     Args:
@@ -173,9 +179,8 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# Monta la app HTTP de MCP en /mcp (Endpoint para Copilot: http://localhost:<port>/mcp/mcp)
-app.mount("/mcp", mcp.streamable_http_app())
-
+mcp_app = mcp.streamable_http_app()
+app.router.routes.extend(mcp_app.routes)
 
 # =============================================================================
 # Modelos Pydantic & Handlers
