@@ -121,6 +121,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
   h1{font-size:clamp(25px,7vw,36px);white-space:normal}
 }
 .viewer{position:fixed;left:272px;right:0;top:0;bottom:0;background:rgba(15,30,50,.35);display:flex;flex-direction:column;z-index:60}
+body.modal-open{overflow:hidden}
 .viewer-head{display:flex;align-items:center;gap:12px;padding:10px 20px;background:#fff;border-bottom:1px solid var(--tr-line);box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .viewer-title{font-weight:700;color:var(--tr-navy);font-size:16px;flex:1}
 .viewer-actions{display:flex;gap:8px}
@@ -658,6 +659,7 @@ async function openViewer(i){
   $("viewerTitle").textContent = "Visualización 2D · " + (row.Unicode ?? row.UNICODE ?? ("fila " + (i + 1)));
   buildViewerPanel();
   $("viewer").style.display = "flex";
+  document.body.classList.add("modal-open");
   drawAll();
   updateSaveButton();
   checkViewerConnection();   // validar siempre al abrir (por si estaba en MODIFICADO)
@@ -952,7 +954,7 @@ function saveViewer(){
   checkRow(i);
 }
 
-function closeViewer(){ $("viewer").style.display = "none"; VIEW = null; }
+function closeViewer(){ $("viewer").style.display = "none"; document.body.classList.remove("modal-open"); VIEW = null; }
 $("viewerBack").onclick = closeViewer;
 $("viewerReset").onclick = resetViewer;
 $("viewerRawReset").onclick = loadRawPrediction;
