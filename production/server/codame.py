@@ -350,8 +350,13 @@ def ajustar_cantonera_y_chapa(row: dict, limites: dict = None) -> bool:
     return cambio
 
 
-def to_codame(input_row: dict, design_row: dict) -> dict:
-    """Input + diseno -> fila de CODAME (todas las columnas, imputadas)."""
+def to_codame(input_row: dict, design_row: dict, apply_adjustments: bool = True) -> dict:
+    """Input + diseno -> fila de CODAME (todas las columnas, imputadas).
+
+    `apply_adjustments=False` devuelve la prediccion del modelo SIN los ajustes
+    (no recorta b_ep, no corrige pfi, no recoloca filas/cantonera/Lp). Se mantienen
+    las derivaciones puras (pfo, pfi, pb, Lh, Bws/Lws, textos mm, Lp=2e+sum(p)).
+    """
     inp = input_row or {}
     d = design_row or {}
     uid = inp.get("UNICODE")
@@ -384,7 +389,7 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     # incoherente se corrige aqui (red de seguridad) y se deja constancia en el log.
     if p[1] <= 0:
         log.error("p1 ausente o 0 en el diseno (UNICODE=%s): pfi no es fiable", uid)
-    elif p[1] - pfo - tf < PFI_MIN_SEGURIDAD:
+    elif apply_adjustments and p[1] - pfo - tf < PFI_MIN_SEGURIDAD:
         nuevo_p1 = math.ceil((pfo + tf + PFI_MIN_SEGURIDAD) / 5.0) * 5.0
         log.warning("pfi=%.1f < %.1f; p1 %.1f -> %.1f (UNICODE=%s)",
                     p[1] - pfo - tf, PFI_MIN_SEGURIDAD, p[1], nuevo_p1, uid)
@@ -400,10 +405,13 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
     # en el de ts) y se copia. Si un modelo antiguo solo trae ts, se usa ese.
     t_stiff = _num(d["tst"]) if "tst" in d else _num(d.get("ts"))
 
-    b_ep = _plate_width(
-        _num(d.get("Bp")), g, bolt,
-        _geom(geom, "b_mm") or _geom(geom, "bf_mm"),
-        _geom(col_geom, "b_mm") or _geom(col_geom, "bf_mm"), uid,
+    b_ep = (
+        _plate_width(
+            _num(d.get("Bp")), g, bolt,
+            _geom(geom, "b_mm") or _geom(geom, "bf_mm"),
+            _geom(col_geom, "b_mm") or _geom(col_geom, "bf_mm"), uid,
+        )
+        if apply_adjustments else _num(d.get("Bp"))
     )
 
     tws = _num(d.get("tws"))
@@ -476,8 +484,9 @@ def to_codame(input_row: dict, design_row: dict) -> dict:
         row[f"p{n}"] = p[n]
 
     # Cantonera y largo de chapa (ultimo tornillo por debajo de viga/cantonera, Lp = ultima fila + e)
-    try:
-        ajustar_cantonera_y_chapa(row)
-    except Exception:  # noqa: BLE001
-        log.exception("ajustar_cantonera_y_chapa fallo (UNICODE=%s); se deja la fila del modelo", uid)
+    if apply_adjustments:
+        try:
+            ajustar_cantonera_y_chapa(row)
+        except Exception:  # noqa: BLE001
+            log.exception("ajustar_cantonera_y_chapa fallo (UNICODE=%s); se deja la fila del modelo", uid)
     return row

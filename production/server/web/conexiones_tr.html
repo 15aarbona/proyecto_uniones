@@ -218,6 +218,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
     <div class="viewer-actions">
       <button class="btn green" id="viewerCheckBtn">⚡ Comprobar esta unión</button>
       <button class="btn ghost" id="viewerReset">Reset</button>
+      <button class="btn ghost" id="viewerRawReset">Reset a predicción sin ajuste</button>
       <button class="btn green" id="viewerSave" disabled>Guardar</button>
     </div>
   </div>
@@ -246,7 +247,7 @@ td.x button{background:none;border:0;color:var(--tr-red);cursor:pointer;font-siz
    ===================================================================== */
 const $ = id => document.getElementById(id);
 let SCHEMA = { model: null, inputs: [], result_columns: [] };
-const state = { rows: [], results: [], checked: [], marked: [], status: [] };
+const state = { rows: [], results: [], resultsRaw: [], checked: [], marked: [], status: [] };
 const escHtml = v => String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
 
@@ -587,7 +588,7 @@ async function openViewer(i){
   if (!row) return;
   const prof = await fetchProfiles([row.BEAM, row.COLUMN]);
   const beam = prof[row.BEAM] || null, col = prof[row.COLUMN] || null;
-  VIEW = { i, row: { ...row }, beam, col, vals:{}, sec:{}, warn:"" };
+  VIEW = { i, row: { ...row }, rowBaseline: { ...row }, isRaw: false, check: null, beam, col, vals:{}, sec:{}, warn:"" };
   VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (row[f.k] ?? ""); });
   VIEW.sec = {
     beam_d: beam ? beam.d_mm : "", beam_bf: beam ? beam.bf_mm : "",
@@ -629,9 +630,10 @@ function buildViewerPanel(){
   if (VIEW.warn) html += `<div class="view-warn">${escHtml(VIEW.warn)}</div>`;
 
   // --- SECCIÓN: COMPROBACIONES Y RATIOS AISC 360-10 ---
-  const checkData = state.checked[VIEW.i];
+  const checkData = VIEW.check || state.checked[VIEW.i];
   if (checkData) {
-    const st = state.status[VIEW.i] || (checkData.cumple ? "CUMPLE" : "NO CUMPLE");
+    const st = VIEW.check ? (VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE")
+                          : (state.status[VIEW.i] || (checkData.cumple ? "CUMPLE" : "NO CUMPLE"));
     const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
     
     html += `
@@ -731,12 +733,9 @@ async function checkViewerConnection(){
     const data = await r.json().catch(() => ({}));
 
     if (r.ok && Array.isArray(data.rows) && data.rows.length > 0) {
-      const checkRes = data.rows[0];
-      state.checked[VIEW.i] = checkRes;
-      state.status[VIEW.i] = checkRes.cumple ? "CUMPLE" : "NO CUMPLE";
-      state.results[VIEW.i] = { ...VIEW.row };
-
-      renderResults();
+      // Comprobacion EFIMERA: se muestra en el visor, pero no toca la tabla.
+      // Solo se persiste (junto con los valores) al pulsar "Guardar".
+      VIEW.check = data.rows[0];
       buildViewerPanel();
       drawAll();
     } else {
@@ -835,6 +834,30 @@ function updateSaveButton(){
 function resetViewer(){
   if (!VIEW) return;
   VIEW.vals = JSON.parse(JSON.stringify(VIEW.baseline));
+  VIEW.row = { ...VIEW.rowBaseline };
+  VIEW.isRaw = false;
+  VIEW.check = null;
+  buildViewerPanel();
+  drawAll();
+  updateSaveButton();
+}
+
+/* Carga en los campos la prediccion RAW (sin ajustes) de esta fila. Solo es visual:
+   NO se guarda en la tabla de resultados hasta que el usuario pulse "Guardar". */
+function loadRawPrediction(){
+  if (!VIEW) return;
+  const raw = state.resultsRaw && state.resultsRaw[VIEW.i];
+  if (!raw){ alert("No hay predicción sin ajuste disponible para esta fila."); return; }
+  VIEW.vals = {};
+  VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (raw[f.k] ?? ""); });
+  VIEW.row = { ...raw };
+  VIEW.isRaw = true;
+  VIEW.check = null;
+  const lim = boxLimits(viewModel());
+  VIEW_FIELDS.forEach(f => {
+    if (!f.k) return;
+    VIEW.vals[f.k] = clampToLimits(VIEW.vals[f.k], lim[f.k], f.k);
+  });
   buildViewerPanel();
   drawAll();
   updateSaveButton();
@@ -852,6 +875,8 @@ function saveViewer(){
   });
   state.status[VIEW.i] = "MODIFICADO";
   state.marked[VIEW.i] = false;
+  // Guardar persiste también la comprobación manual (si se hizo en el visor).
+  if (VIEW.check) state.checked[VIEW.i] = VIEW.check;
   closeViewer();
   renderResults();
 }
@@ -859,6 +884,7 @@ function saveViewer(){
 function closeViewer(){ $("viewer").style.display = "none"; VIEW = null; }
 $("viewerBack").onclick = closeViewer;
 $("viewerReset").onclick = resetViewer;
+$("viewerRawReset").onclick = loadRawPrediction;
 $("viewerSave").onclick = saveViewer;
 
 /* ---------- Dibujo SVG ---------- */
@@ -1040,7 +1066,7 @@ $("add").onclick = () => {
 };
 $("reset").onclick = renderForm;
 $("clear").onclick = () => {
-  state.rows = []; state.results = []; state.checked = []; state.marked = []; state.status = [];
+  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = [];
   renderTable(); renderResults(); setStatus("", "");
 };
 
@@ -1059,6 +1085,7 @@ $("send").onclick = async () => {
       setStatus("bad", `Error ${r.status}`, detail);
     } else {
       state.results = data.rows || [];
+      state.resultsRaw = Array.isArray(data.rows_raw) ? data.rows_raw : [];
       state.checked = [];
       state.marked = state.results.map(() => false);
       state.status = state.results.map(() => "");
@@ -1154,7 +1181,7 @@ async function loadSchema(){
 }
 
 $("model").onchange = () => {
-  state.rows = []; state.results = []; state.checked = []; state.marked = []; state.status = [];
+  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = [];
   renderTable(); renderResults(); loadSchema();
 };
 

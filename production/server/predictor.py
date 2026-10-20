@@ -111,11 +111,13 @@ def predict_rows(model_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 def predict_and_check(model_name: str, rows: List[Dict[str, Any]]):
-    """Prediccion + ajuste + comprobacion en un solo paso: (filas, comprobaciones).
+    """Prediccion + ajuste + comprobacion: (filas, comprobaciones)."""
+    output, checks, _ = _predict(model_name, rows, with_checks=True)
+    return output, checks
 
-    La comprobacion se hace una sola vez, sobre la fila final, de forma que el cliente no
-    tiene que llamar a /check justo despues de predecir.
-    """
+
+def predict_full(model_name: str, rows: List[Dict[str, Any]]):
+    """Prediccion + ajuste + comprobacion + filas RAW (sin ajustes): (filas, checks, raw)."""
     return _predict(model_name, rows, with_checks=True)
 
 
@@ -138,9 +140,20 @@ def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
         raise InputContractError(str(exc), model=name, expected=raw_inputs) from exc
 
     coded: List[Dict[str, Any]] = []
+    raw: List[Dict[str, Any]] = []
     for i in range(len(df)):
         input_row = features.iloc[i].to_dict()
         design_row = design.iloc[i].to_dict()
+        # Prediccion RAW: sin ajustes de chapa/cantonera ni pfi (para comparar en el visor).
+        try:
+            raw_partial = codame.to_codame(input_row, design_row, apply_adjustments=False)
+            if not isinstance(raw_partial, dict):
+                raise TypeError("codame.to_codame no devolvio un dict")
+        except Exception:  # noqa: BLE001
+            log.exception("codame.to_codame(raw) fallo (modelo=%s, fila=%d)", name, i)
+            raw_partial = {}
+        raw.append(fill_missing(raw_partial))
+        # Prediccion AJUSTADA (comportamiento normal).
         try:
             partial = codame.to_codame(input_row, design_row)
             if not isinstance(partial, dict):
@@ -163,7 +176,8 @@ def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
         output.append(_clean_dict(row))
         if with_checks:
             checks.append(_clean_dict(check) if check is not None else _check_one(i, output[-1]))
-    return output, checks
+    rows_raw = [_clean_dict(r) for r in raw]
+    return output, checks, rows_raw
 
 
 def _check_one(i: int, row: Dict[str, Any]) -> Dict[str, Any]:
