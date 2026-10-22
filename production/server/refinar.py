@@ -26,10 +26,12 @@ import math
 import multiprocessing
 import os
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import codame
+import config
 from calculador import CalculadorAISC36010
 from catalogo import get_profile
 from checker import calcular_ratios_row, check_single_row, row_to_conexion_input
@@ -593,13 +595,10 @@ def refine(row: Dict[str, Any], maximize_load: Optional[bool] = None) -> Tuple[D
 
 
 # ---------------------------------------------------------------------------
-# Paralelo
+# Paralelismo (interfaz facil de sustituir: local -> Ray)
 # ---------------------------------------------------------------------------
 WORKERS = int(os.environ.get("AI_REFINE_WORKERS", "0") or 0) or min(8, os.cpu_count() or 1)
 PARALLEL_MIN_ROWS = 4
-
-_pool: Optional[ProcessPoolExecutor] = None
-_pool_lock = threading.Lock()
 
 
 def _init_worker() -> None:
@@ -628,35 +627,170 @@ def refine_and_check(row: Dict[str, Any], with_check: bool = True,
         return new, None
 
 
-def _get_pool() -> ProcessPoolExecutor:
-    global _pool
-    with _pool_lock:
-        if _pool is None:
-            _pool = ProcessPoolExecutor(
-                max_workers=WORKERS, mp_context=multiprocessing.get_context("spawn"),
-                initializer=_init_worker,
-            )
-        return _pool
+class RefineTimeout(RuntimeError):
+    """El refinado paralelo supero AI_REFINE_TIMEOUT_S."""
 
 
-def _reset_pool() -> None:
-    global _pool
-    with _pool_lock:
-        if _pool is not None:
-            _pool.shutdown(wait=False, cancel_futures=True)
-            _pool = None
+class RefineBackend:
+    """Interfaz minima: mapear filas -> [(fila, check | None)]."""
+
+    name = "base"
+
+    def start(self) -> None:
+        pass
+
+    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool):
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
-def refine_many(rows: List[Dict[str, Any]], with_check: bool = True, maximize_load: Optional[bool] = None):
+class SerialBackend(RefineBackend):
+    """Ejecucion en el proceso actual (debug o entornos sin pool)."""
+
+    name = "serial"
+
+    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool):
+        return [refine_and_check(r, with_check) for r in rows]
+
+
+class ProcessPoolBackend(RefineBackend):
+    """Pool de procesos con timeout global y recreacion segura.
+
+    Para escalar con Ray basta crear un `RayBackend(RefineBackend)` y devolverlo desde
+    `_make_backend()` (ver doc/ray_escalado.md); el resto del servidor no cambia.
+    """
+
+    name = "process"
+
+    def __init__(self) -> None:
+        self._executor: Optional[ProcessPoolExecutor] = None
+        self._lock = threading.RLock()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._executor is None:
+                self._executor = ProcessPoolExecutor(
+                    max_workers=WORKERS,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_init_worker,
+                )
+                log.info("refinar: pool de procesos iniciado (%d workers)", WORKERS)
+
+    def _get(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            self.start()
+        return self._executor
+
+    def _drop(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def reset(self) -> None:
+        with self._lock:
+            self._drop()
+
+    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool):
+        if not rows:
+            return []
+        with self._lock:
+            executor = self._get()
+            futures = [executor.submit(refine_and_check, row, with_check) for row in rows]
+            deadline = time.monotonic() + max(1.0, config.REFINE_TIMEOUT_S)
+            out = []
+            try:
+                for fut in futures:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    out.append(fut.result(timeout=remaining))
+                return out
+            except TimeoutError:
+                for fut in futures:
+                    fut.cancel()
+                self._drop()
+                log.error(
+                    "refinar: timeout de %.0fs para %d filas; pool reiniciado",
+                    config.REFINE_TIMEOUT_S, len(rows),
+                )
+                raise RefineTimeout(
+                    f"El refinado supero {config.REFINE_TIMEOUT_S:.0f}s para {len(rows)} filas"
+                )
+            except Exception:
+                for fut in futures:
+                    fut.cancel()
+                self._drop()
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._executor is not None:
+                log.info("refinar: cerrando pool de procesos")
+                self._executor.shutdown(wait=True, cancel_futures=True)
+                self._executor = None
+
+
+_BACKEND: Optional[RefineBackend] = None
+_BACKEND_LOCK = threading.Lock()
+
+
+def _make_backend() -> RefineBackend:
+    kind = (config.REFINE_BACKEND or "process").lower()
+    if kind == "serial":
+        return SerialBackend()
+    if kind == "process":
+        return ProcessPoolBackend()
+    log.warning("AI_REFINE_BACKEND=%s no soportado; se usa 'process'", kind)
+    return ProcessPoolBackend()
+
+
+def get_backend() -> RefineBackend:
+    global _BACKEND
+    with _BACKEND_LOCK:
+        if _BACKEND is None:
+            _BACKEND = _make_backend()
+        return _BACKEND
+
+
+def start_backend() -> None:
+    get_backend().start()
+
+
+def shutdown_backend() -> None:
+    global _BACKEND
+    with _BACKEND_LOCK:
+        if _BACKEND is not None:
+            try:
+                _BACKEND.close()
+            finally:
+                _BACKEND = None
+
+
+def refine_many(
+    rows: List[Dict[str, Any]],
+    with_check: bool = True,
+    maximize_load: Optional[bool] = None,
+):
     """[(fila ajustada, comprobacion | None)] en el mismo orden; en paralelo si compensa."""
     if not ENABLED:
         return [(r, None) for r in rows]
-    if WORKERS > 1 and len(rows) >= PARALLEL_MIN_ROWS:
-        try:
-            flags = [with_check] * len(rows)
-            maxs = [maximize_load] * len(rows)
-            return list(_get_pool().map(refine_and_check, rows, flags, maxs, chunksize=1))
-        except Exception:  # noqa: BLE001  (pool roto, sin recursos...): se sigue en serie
-            log.exception("refinar en paralelo fallo; se calcula en serie")
-            _reset_pool()
-    return [refine_and_check(r, with_check, maximize_load) for r in rows]
+    if not rows:
+        return []
+
+    backend = get_backend()
+    if backend.name == "process" and (WORKERS <= 1 or len(rows) < PARALLEL_MIN_ROWS):
+        return [refine_and_check(r, with_check, maximize_load) for r in rows]
+
+    try:
+        return backend.map_refine(rows, with_check, maximize_load)
+    except RefineTimeout:
+        raise
+    except Exception:  # noqa: BLE001 (pool roto, sin recursos...): se sigue en serie
+        log.exception("refinar en %s fallo; se calcula en serie", backend.name)
+        backend.reset()
+        return [refine_and_check(r, with_check, maximize_load) for r in rows]

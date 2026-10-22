@@ -15,7 +15,10 @@ EVERY = int(os.environ.get("AI_RETRAIN_EVERY", "200"))
 MASTER = config.MODELS_DIR / "V11" / "data" / "datos_modelo.parquet"
 _L = threading.RLock()
 
-RESTART = os.environ.get("AI_RESTART_AFTER_RETRAIN", "1").strip().lower() not in ("0", "false", "no")
+# Por defecto NO se reinicia el servidor tras reentrenar: se activa en caliente para no
+# cortar peticiones MCP en vuelo. Restaurar el comportamiento antiguo con
+# AI_RESTART_AFTER_RETRAIN=1.
+RESTART = os.environ.get("AI_RESTART_AFTER_RETRAIN", "0").strip().lower() not in ("0", "false", "no")
 
 
 def _restart():

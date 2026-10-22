@@ -32,8 +32,30 @@ uv run uvicorn main:app --app-dir production/server --host 0.0.0.0 --port 8080
 scikit-learn, joblib, pandas, pyarrow). Si prefieres el flujo antiguo con `pip`:
 `pip install -r production/server/requirements.txt`.
 
-> Recomendado **1 worker**. Con varios, cada proceso carga su propia copia de todos los
-> modelos y una recarga (`POST /model/activate`) solo afectaría al worker que la atiende.
+> **1 worker** (por defecto). Con varios, cada proceso carga su propia copia de todos los
+> modelos, su propio pool de refinado y su propio watcher de reentreno; una recarga
+> (`POST /model/activate`) solo afectaría al worker que la atiende. Para escalar, usar Ray
+> (ver `doc/ray_escalado.md`), no más workers de uvicorn.
+>
+> **No usar `--reload`** con MCP en uso: cada cambio reinicia el worker y corta las
+> peticiones en vuelo. Reservado para desarrollo sin clientes conectados.
+
+### Concurrencia y timeouts
+
+Los tools MCP no bloquean el event loop: la predicción y la comprobación se ejecutan en
+sendas hebras dedicadas, y el refinado en un pool de procesos aislado. Todo se corta con
+timeout para que una petición no quede colgada:
+
+| Variable | Defecto | Uso |
+|---|---|---|
+| `AI_PREDICT_TIMEOUT_S` | `120` | `predecir_conexion` |
+| `AI_CHECK_TIMEOUT_S` | `120` | `comprobar_aisc` |
+| `AI_REFINE_TIMEOUT_S` | `90` | refinado (pool) |
+| `AI_REFINE_BACKEND` | `process` | `process` (pool), `serial` (debug) o `ray` (futuro) |
+| `AI_REFINE_WORKERS` | `min(8, cpus)` | nº de procesos del pool |
+
+El backend de refinado es una interfaz (`RefineBackend`) con implementaciones
+`ProcessPoolBackend` y `SerialBackend`; añadir `RayBackend` no requiere tocar el servidor.
 
 ## Instalar / actualizar un modelo
 

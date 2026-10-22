@@ -19,6 +19,16 @@ LOG_PATH = DATA_DIR / "server.log"
 HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8080"))
 
+# Concurrencia y timeouts del servidor.
+#   - Los endpoints MCP no deben bloquear el event loop: el trabajo pesado se ejecuta en
+#     un runner dedicado y se corta con estos timeouts.
+#   - Refinado: backend `process` (pool de procesos, por defecto), `serial` (debug) o,
+#     en el futuro, `ray` (ver doc/ray_escalado.md).
+PREDICT_TIMEOUT_S = float(os.environ.get("AI_PREDICT_TIMEOUT_S", "120"))
+CHECK_TIMEOUT_S = float(os.environ.get("AI_CHECK_TIMEOUT_S", "120"))
+REFINE_TIMEOUT_S = float(os.environ.get("AI_REFINE_TIMEOUT_S", "90"))
+REFINE_BACKEND = os.environ.get("AI_REFINE_BACKEND", "process").strip().lower()
+
 # Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
 # se sirve fuera de la red interna.
 # Para abrir el HTML con doble clic (file://) añadir "null" solo para pruebas.
