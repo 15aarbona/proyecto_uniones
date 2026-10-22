@@ -4,24 +4,33 @@
 const $ = id => document.getElementById(id);
 let SCHEMA = { model: null, inputs: [], result_columns: [] };
 
-/*
-  state.results es una lista de objetos "Conexión", donde cada objeto contiene:
-  {
-    inputRow: { ... },
-    activeVarIndex: 0,
-    variations: [
-      { label: "E1: Sin cantonera", tipo: "E1", data: { ...CODAME }, raw: { ... }, check: { ... }, status: "CUMPLE" },
-      { label: "E2: Mín. con cantonera", tipo: "E2", data: { ...CODAME }, raw: { ... }, check: { ... }, status: "CUMPLE" },
-      { label: "E3: Máx. con cantonera", tipo: "E3", data: { ...CODAME }, raw: { ... }, check: { ... }, status: "NO CUMPLE" }
-    ],
-    marked: false
-  }
-*/
 const state = { rows: [], results: [] };
 let _checkTokens = {};
 
 const escHtml = v => String(v == null ? "" : v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
+
+/* Helper seguro para obtener variaciones de una conexión */
+function getConnVariations(connIdx) {
+  const conn = state.results[connIdx];
+  if (!conn) return [];
+  if (Array.isArray(conn.variations) && conn.variations.length > 0) {
+    return conn.variations;
+  }
+  const r = conn.data || conn;
+  const lbl = r.Escenario || r.escenario || r.descripcion || "Diseño Principal";
+  return [{
+    label: lbl,
+    tipo: "E1",
+    data: r,
+    adjusted: { ...r },
+    raw: conn.raw || r,
+    check: conn.check || null,
+    adjustedCheck: conn.check ? JSON.parse(JSON.stringify(conn.check)) : null,
+    status: conn.status || (conn.check?.cumple ? "CUMPLE" : "NO CUMPLE"),
+    accepted: false
+  }];
+}
 
 /* =====================================================================
    Formulario dinámico
@@ -101,6 +110,15 @@ $("excelFileInput").onchange = (e) => {
       const json = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
 
       if (!json.length) { setStatus("bad", "El archivo Excel está vacío."); return; }
+
+      if (json[0].Escenario || json[0]["Unicode origen"] || json[0].escenario) {
+        state.results = parseScenariosResponse({ rows: json }, []);
+        renderResults();
+        renderAcceptedTable();
+        setStatus("ok", `Se han cargado ${state.results.length} conexiones con sus variaciones desde "${file.name}".`);
+        return;
+      }
+
       if (!SCHEMA.inputs.length) { setStatus("bad", "No hay esquema de modelo cargado."); return; }
 
       let count = 0;
@@ -152,115 +170,62 @@ function renderTable(){
   $("tbl").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { state.rows.splice(+b.dataset.del, 1); renderTable(); });
 }
 
-function bulkFillColumn(colName){
-  if (!state.results.length) return;
-  if (colName.toLowerCase() === "unicode") return;
-  const sampleVal = state.results[0].variations[state.results[0].activeVarIndex]?.data[colName] ?? "";
-  const newVal = prompt(`Nuevo valor para '${colName}' en TODAS las variaciones activas (${state.results.length}):`, sampleVal);
-  if (newVal === null) return;
-
-  state.results.forEach((conn, connIdx) => {
-    const varIdx = conn.activeVarIndex;
-    const v = conn.variations[varIdx];
-    if (v){
-      v.data[colName] = newVal;
-      v.status = "MODIFICADO";
-      conn.marked = false;
-      checkRow(connIdx, varIdx);
-    }
-  });
-  renderResults();
-}
-
+/* =====================================================================
+   Renderizado de la Pantalla Inicial (Sección 1: Resumen por Conexión)
+   ===================================================================== */
 function renderResults(){
   const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
-  if (!res.length){ updateSendMarked(); return; }
+  if (!res.length){ renderAcceptedTable(); return; }
 
-  // Obtener todas las columnas CODAME a partir de la primera variación activa
-  const sampleData = res[0].variations[res[0].activeVarIndex]?.data || {};
-  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : Object.keys(sampleData);
-
-  const head = `<th title="Visualizar y Comprobar">👁</th>` +
-    `<th>Variaciones del Diseño</th>` +
-    `<th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` +
-    cols.map(c => {
-      const isUnicode = c.toLowerCase() === "unicode";
-      return `<th><div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
-        <span>${escHtml(c)}</span>
-        ${isUnicode ? '' : `<button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna">⚡ Rellenar</button>`}
-      </div></th>`;
-    }).join("") +
-    `<th>Comprobación AISC</th>`;
+  const head = `
+    <th>Conexión (Unicode)</th>
+    <th title="Visualizar Plano 2D">Plano 2D</th>
+    <th>Selección de Variantes Aceptadas</th>
+  `;
 
   const body = res.map((conn, connIdx) => {
-    const varIdx = conn.activeVarIndex || 0;
-    const activeVar = conn.variations[varIdx] || conn.variations[0];
-    const r = activeVar.data;
-    const st = activeVar.status || "CUMPLE";
+    const vars = getConnVariations(connIdx);
+    const activeVar = vars[conn.activeVarIndex || 0] || vars[0];
+    const unicodeVal = activeVar?.data?.["Unicode origen"] || activeVar?.data?.Unicode || (`Conexión_${connIdx + 1}`);
 
-    const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
-    const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : "row-mod";
+    const cardsHtml = `<div class="var-cards-wrap">` +
+      vars.map((v, vI) => {
+        const st = v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE");
+        const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+        const isChecked = !!v.accepted;
 
-    // Pestañas pequeñas para elegir variación directamente en la tabla
-    const varTabsHtml = `<div class="var-tabs-group">` +
-      conn.variations.map((v, vI) => {
-        const vStCls = v.status === "CUMPLE" ? "ok" : v.status === "NO CUMPLE" ? "bad" : "mod";
-        const isActive = vI === varIdx;
-        return `<button class="var-tab-pill ${isActive ? "active" : ""}" data-conn="${connIdx}" data-var="${vI}" title="${escAttr(v.label)}">
-          <span class="var-dot ${vStCls}"></span>
-          <span>${escHtml(v.tipo || ("V" + (vI + 1)))}</span>
-        </button>`;
+        return `
+          <div class="var-card-item ${isChecked ? "accepted" : ""}">
+            <label>
+              <input type="checkbox" class="var-accept-chk" data-conn="${connIdx}" data-var="${vI}" ${isChecked ? "checked" : ""}>
+              <span>${escHtml(v.label)}</span>
+            </label>
+            <span class="badge ${badgeCls}">${escHtml(st)}</span>
+          </div>
+        `;
       }).join("") + `</div>`;
 
-    return `<tr class="${rowCls}">` +
-      `<td><button class="vbtn" data-view-conn="${connIdx}" data-view-var="${varIdx}" title="Visualizar en 2D y Comprobar">👁</button></td>` +
-      `<td>${varTabsHtml}</td>` +
-      `<td><input type="checkbox" class="rowchk" data-conn="${connIdx}" ${conn.marked ? "checked" : ""}></td>` +
-      cols.map(c => {
-        const val = r[c] ?? "";
-        if (c.toLowerCase() === "unicode") return `<td><input class="cell" readonly value="${escAttr(val)}" style="cursor:not-allowed;color:var(--tr-muted);min-width:100px;"></td>`;
-        return `<td><input class="cell" data-conn="${connIdx}" data-var="${varIdx}" data-col="${escAttr(c)}" value="${escAttr(val)}"></td>`;
-      }).join("") +
-      `<td class="st ${stCls}">${escHtml(st)}</td>` +
-    "</tr>";
+    return `<tr>` +
+      `<td><b style="color:var(--tr-navy); font-size:14px;">${escHtml(unicodeVal)}</b></td>` +
+      `<td><button class="btn ghost vbtn" data-view-conn="${connIdx}" data-view-var="${conn.activeVarIndex || 0}" style="padding:4px 10px; font-size:13px;">👁 Ver Plano 2D</button></td>` +
+      `<td>${cardsHtml}</td>` +
+    `</tr>`;
   }).join("");
 
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 
-  // Listeners para cambiar de pestaña en la tabla
-  $("res").querySelectorAll("button.var-tab-pill").forEach(btn => {
-    btn.onclick = () => {
-      const cI = +btn.dataset.conn;
-      const vI = +btn.dataset.var;
-      state.results[cI].activeVarIndex = vI;
-      renderResults();
-    };
-  });
-
-  // Listeners para editar celdas directamente
-  $("res").querySelectorAll("input.cell:not([readonly])").forEach(inp => {
-    inp.addEventListener("input", () => {
-      const cI = +inp.dataset.conn;
-      const vI = +inp.dataset.var;
-      state.results[cI].variations[vI].data[inp.dataset.col] = inp.value;
-      state.results[cI].variations[vI].status = "MODIFICADO";
-      state.results[cI].marked = false;
-      updateRowStatus(cI);
-      updateSendMarked();
-    });
-    inp.addEventListener("change", () => {
-      const cI = +inp.dataset.conn;
-      const vI = +inp.dataset.var;
-      checkRow(cI, vI);
-    });
-  });
-
-  $("res").querySelectorAll("input.rowchk").forEach(chk => {
+  $("res").querySelectorAll("input.var-accept-chk").forEach(chk => {
     chk.addEventListener("change", () => {
       const cI = +chk.dataset.conn;
-      state.results[cI].marked = chk.checked;
-      updateSendMarked();
+      const vI = +chk.dataset.var;
+      const vars = getConnVariations(cI);
+      if (vars[vI]) {
+        vars[vI].accepted = chk.checked;
+      }
+      renderResults();
+      renderAcceptedTable();
+      if (VIEW && VIEW.connIdx === cI) buildViewerPanel();
     });
   });
 
@@ -268,132 +233,158 @@ function renderResults(){
     b.onclick = () => openViewer(+b.dataset.viewConn, +b.dataset.viewVar);
   });
 
-  const all = $("resAll");
-  if (all){
-    const n = state.results.filter(c => c.marked).length;
-    all.checked = state.results.length > 0 && n === state.results.length;
-    all.indeterminate = n > 0 && n < state.results.length;
-    all.addEventListener("change", () => {
-      state.results.forEach(c => c.marked = all.checked);
-      renderResults();
-    });
-  }
-  updateSendMarked();
-}
-
-function updateRowStatus(connIdx){
-  const conn = state.results[connIdx];
-  if (!conn) return;
-  const activeVar = conn.variations[conn.activeVarIndex];
-  if (!activeVar) return;
-
-  const row = $("res").querySelectorAll("tbody tr")[connIdx];
-  if (!row) return;
-
-  const st = activeVar.status || "CUMPLE";
-  const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
-  const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : "row-mod";
-
-  row.className = rowCls;
-  const stCell = row.querySelector("td.st");
-  if (stCell){ stCell.textContent = st; stCell.className = "st " + stCls; }
-}
-
-/* Valida una sola variación de una conexión */
-async function checkRow(connIdx, varIdx){
-  const conn = state.results[connIdx];
-  if (!conn) return;
-  const v = conn.variations[varIdx];
-  if (!v) return;
-
-  const tokenKey = `${connIdx}_${varIdx}`;
-  const token = (_checkTokens[tokenKey] || 0) + 1;
-  _checkTokens[tokenKey] = token;
-
-  v.status = "MODIFICADO";
-  updateRowStatus(connIdx);
-
-  try {
-    const r = await fetch("/check", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: [v.data] }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (token !== _checkTokens[tokenKey]) return;
-    if (r.ok && Array.isArray(data.rows) && data.rows.length){
-      v.check = data.rows[0];
-      v.status = data.rows[0].cumple ? "CUMPLE" : "NO CUMPLE";
-    }
-  } catch (e){
-    if (token !== _checkTokens[tokenKey]) return;
-    console.error("checkRow", connIdx, varIdx, e);
-  }
-  updateRowStatus(connIdx);
-  if (VIEW && VIEW.connIdx === connIdx && VIEW.activeVarIndex === varIdx) buildViewerPanel();
-}
-
-function updateSendMarked(){
-  $("sendMarked").disabled = !state.results.some(c => c.marked);
+  renderAcceptedTable();
 }
 
 /* =====================================================================
-   Exportación Excel de Comprobaciones y Resultados
+   Renderizado de la Pantalla Inicial (Sección 2: Variantes Aceptadas)
+   ===================================================================== */
+function renderAcceptedTable(){
+  const acceptedList = [];
+
+  state.results.forEach((conn, connIdx) => {
+    const vars = getConnVariations(connIdx);
+    vars.forEach((v, vIdx) => {
+      if (v.accepted) {
+        acceptedList.push({
+          connIdx,
+          varIdx: vIdx,
+          unicode: v.data["Unicode origen"] || v.data.Unicode || (`Conexión_${connIdx + 1}`),
+          label: v.label,
+          data: v.data,
+          check: v.check,
+          status: v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE")
+        });
+      }
+    });
+  });
+
+  const sec = $("acceptedSec");
+  $("acceptedCount").textContent = acceptedList.length;
+  $("sendAccepted").disabled = !acceptedList.length;
+
+  if (!state.results.length) {
+    sec.style.display = "none";
+    return;
+  }
+  sec.style.display = "";
+
+  const container = $("acceptedTbl");
+  if (!acceptedList.length) {
+    container.innerHTML = `<div class="empty">No has marcado ninguna variante como aceptada todavía. Haz clic en los casilleros para agregar diseños a la lista final.</div>`;
+    return;
+  }
+
+  const sampleData = acceptedList[0].data;
+  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : Object.keys(sampleData).filter(k => k !== "raw" && k !== "check" && k !== "adjusted" && k !== "adjustedCheck");
+
+  const head = `<th>Visualizar</th><th>Variante Aceptada</th>` +
+    cols.map(c => `<th>${escHtml(c)}</th>`).join("") +
+    `<th>Comprobación AISC</th><th>Quitar</th>`;
+
+  const body = acceptedList.map((item) => {
+    const r = item.data;
+    const st = item.status;
+    const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+
+    return `<tr>` +
+      `<td><button class="vbtn" data-view-conn="${item.connIdx}" data-view-var="${item.varIdx}" title="Ver en 2D">👁</button></td>` +
+      `<td><b style="color:var(--tr-navy);">${escHtml(item.label)}</b></td>` +
+      cols.map(c => `<td>${escHtml(r[c] ?? "")}</td>`).join("") +
+      `<td class="st ${stCls}">${escHtml(st)}</td>` +
+      `<td class="x"><button class="discard-btn" data-conn="${item.connIdx}" data-var="${item.varIdx}" title="Quitar de aceptadas">✕</button></td>` +
+    `</tr>`;
+  }).join("");
+
+  container.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+
+  container.querySelectorAll("button.discard-btn").forEach(b => {
+    b.onclick = () => {
+      const cI = +b.dataset.conn;
+      const vI = +b.dataset.var;
+      const vars = getConnVariations(cI);
+      if (vars[vI]) vars[vI].accepted = false;
+      renderResults();
+      renderAcceptedTable();
+      if (VIEW && VIEW.connIdx === cI) buildViewerPanel();
+    };
+  });
+
+  container.querySelectorAll("button.vbtn").forEach(b => {
+    b.onclick = () => openViewer(+b.dataset.viewConn, +b.dataset.viewVar);
+  });
+}
+
+/* =====================================================================
+   Exportación Excel
    ===================================================================== */
 $("exportCheckExcel").onclick = () => {
-  if (!state.results.length) { setStatus("bad", "No hay resultados para exportar."); return; }
+  const acceptedList = [];
+  state.results.forEach((conn, connIdx) => {
+    const vars = getConnVariations(connIdx);
+    vars.forEach((v, vIdx) => {
+      if (v.accepted) acceptedList.push({ connIdx, vIdx, v });
+    });
+  });
+
+  if (!acceptedList.length) { setStatus("bad", "No hay variantes aceptadas para exportar."); return; }
 
   const exportRows = [];
-  state.results.forEach((conn, connIdx) => {
-    conn.variations.forEach((v, vIdx) => {
-      const chk = v.check || {};
-      const rowObj = {
-        "Conexión #": connIdx + 1,
-        "Variación": v.label || (`Variación ${vIdx + 1}`),
-        "UNICODE": v.data.Unicode || v.data.UNICODE || (connIdx + 1),
-        "Estado Global": v.status || (chk.cumple ? "CUMPLE" : "NO CUMPLE"),
-        "Ratio Pésimo": chk.ratio_pesimo ?? "",
-        "Chequeo Crítico": chk.descripcion_ratio_pesimo || ""
-      };
-      Object.keys(v.data).forEach(k => {
-        if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo"].includes(k)) {
-          rowObj[k] = v.data[k];
-        }
-      });
-      if (Array.isArray(chk.ratios)) {
-        chk.ratios.forEach(ratioItem => { rowObj[`Ratio: ${ratioItem.descripcion}`] = ratioItem.ratio ?? "N/A"; });
+  acceptedList.forEach(({ connIdx, vIdx, v }) => {
+    const chk = v.check || {};
+    const rowObj = {
+      "Conexión #": connIdx + 1,
+      "Variación": v.label || (`Variación ${vIdx + 1}`),
+      "UNICODE": v.data.Unicode || v.data.UNICODE || (connIdx + 1),
+      "Estado Global": v.status || (chk.cumple ? "CUMPLE" : "NO CUMPLE"),
+      "Ratio Pésimo": chk.ratio_pesimo ?? "",
+      "Chequeo Crítico": chk.descripcion_ratio_pesimo || ""
+    };
+    Object.keys(v.data).forEach(k => {
+      if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo", "raw", "adjusted", "adjustedCheck", "check"].includes(k)) {
+        rowObj[k] = v.data[k];
       }
-      if (Array.isArray(chk.complementarios)) {
-        chk.complementarios.forEach(compItem => { rowObj[`Geometría: ${compItem.descripcion}`] = compItem.resultado; });
-      }
-      exportRows.push(rowObj);
     });
+    if (Array.isArray(chk.ratios)) {
+      chk.ratios.forEach(ratioItem => { rowObj[`Ratio: ${ratioItem.descripcion}`] = ratioItem.ratio ?? "N/A"; });
+    }
+    if (Array.isArray(chk.complementarios)) {
+      chk.complementarios.forEach(compItem => { rowObj[`Geometría: ${compItem.descripcion}`] = compItem.resultado; });
+    }
+    exportRows.push(rowObj);
   });
 
   const worksheet = XLSX.utils.json_to_sheet(exportRows);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Comprobaciones AISC360");
-  XLSX.writeFile(workbook, `Comprobaciones_AISC36010_${new Date().toISOString().slice(0, 10)}.xlsx`);
-  setStatus("ok", "Exportación de comprobaciones a Excel completada.");
+  XLSX.writeFile(workbook, `Comprobaciones_VariantesAceptadas_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  setStatus("ok", "Exportación de comprobaciones de variantes aceptadas a Excel completada.");
 };
 
-$("exportResultsExcel").onclick = () => {
-  if (!state.results.length) { setStatus("bad", "No hay resultados para exportar."); return; }
-  const exportRows = [];
+$("exportAcceptedExcel").onclick = () => {
+  const acceptedList = [];
   state.results.forEach((conn, connIdx) => {
-    conn.variations.forEach((v, vIdx) => {
-      exportRows.push({
-        "Conexión #": connIdx + 1,
-        "Variación": v.label || (`Variación ${vIdx + 1}`),
-        ...v.data
-      });
+    const vars = getConnVariations(connIdx);
+    vars.forEach((v, vIdx) => {
+      if (v.accepted) acceptedList.push({ connIdx, vIdx, v });
     });
   });
+
+  if (!acceptedList.length) { setStatus("bad", "No hay variantes aceptadas para exportar."); return; }
+
+  const exportRows = acceptedList.map(({ connIdx, vIdx, v }) => {
+    const cleanObj = { "Conexión #": connIdx + 1, "Variación": v.label || (`Variación ${vIdx + 1}`) };
+    Object.keys(v.data).forEach(k => {
+      if (!["raw", "adjusted", "adjustedCheck", "check"].includes(k)) cleanObj[k] = v.data[k];
+    });
+    return cleanObj;
+  });
+
   const worksheet = XLSX.utils.json_to_sheet(exportRows);
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Resultados");
-  XLSX.writeFile(workbook, `Resultados_${new Date().toISOString().slice(0, 10)}.xlsx`);
-  setStatus("ok", "Resultados exportados a Excel.");
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Variantes Aceptadas");
+  XLSX.writeFile(workbook, `Variantes_Aceptadas_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  setStatus("ok", "Variantes aceptadas exportadas a Excel.");
 };
 
 function setStatus(kind, text, detail){
@@ -404,7 +395,7 @@ function setStatus(kind, text, detail){
 }
 
 /* =====================================================================
-   Visualizador 2D con Pestañas para las 3 Variaciones
+   Visualizador 2D
    ===================================================================== */
 const PROFILE_CACHE = {};
 let VIEW = null;
@@ -468,11 +459,18 @@ async function fetchProfiles(names){
 }
 
 async function openViewer(connIdx, initialVarIdx = 0){
-  const conn = state.results[connIdx];
-  if (!conn) return;
+  const vars = getConnVariations(connIdx);
+  if (!vars.length) return;
 
   VIEW = { connIdx, activeVarIndex: initialVarIdx };
-  $("viewerTitle").textContent = "Visualización 2D · Conexión " + (connIdx + 1);
+  
+  const activeVar = vars[initialVarIdx] || vars[0];
+  const connTitle = state.results[connIdx]?.inputRow?.Unicode || 
+                    activeVar?.data?.["Unicode origen"] || 
+                    activeVar?.data?.Unicode || 
+                    ("Conexión " + (connIdx + 1));
+                    
+  $("viewerTitle").textContent = "Visualización 2D · " + connTitle;
 
   await loadViewerVariation(initialVarIdx);
 
@@ -484,8 +482,8 @@ async function openViewer(connIdx, initialVarIdx = 0){
 async function loadViewerVariation(varIdx){
   if (!VIEW) return;
   VIEW.activeVarIndex = varIdx;
-  const conn = state.results[VIEW.connIdx];
-  const activeVar = conn.variations[varIdx];
+  const vars = getConnVariations(VIEW.connIdx);
+  const activeVar = vars[varIdx] || vars[0];
   if (!activeVar) return;
 
   const row = activeVar.data;
@@ -494,7 +492,7 @@ async function loadViewerVariation(varIdx){
 
   VIEW.row = { ...row };
   VIEW.rowBaseline = { ...row };
-  VIEW.check = activeVar.check || null;
+  VIEW.check = activeVar.check ? JSON.parse(JSON.stringify(activeVar.check)) : null;
   VIEW.beam = beam; VIEW.col = col;
   VIEW.vals = {}; VIEW.sec = {}; VIEW.warn = "";
 
@@ -506,7 +504,7 @@ async function loadViewerVariation(varIdx){
     col_tw: col ? col.tw_mm : "", col_tf: col ? col.tf_mm : "",
   };
 
-  VIEW.baseline = JSON.parse(JSON.stringify(VIEW.vals));
+  VIEW.baselineVals = JSON.parse(JSON.stringify(VIEW.vals));
 
   const missed = [];
   if (!String(row.BEAM || "").trim()) missed.push("viga (columna BEAM vacía)");
@@ -518,38 +516,50 @@ async function loadViewerVariation(varIdx){
     ? "No encontrado en el catálogo: " + missed.join(", ") + ". Introduce las cotas de sección a mano."
     : "";
 
-  renderViewerTabs();
   buildViewerPanel();
   drawAll();
   checkViewerConnection();
 }
 
-function renderViewerTabs(){
-  if (!VIEW) return;
-  const conn = state.results[VIEW.connIdx];
-  const tabsContainer = $("viewerTabs");
-  if (!tabsContainer || !conn) return;
-
-  tabsContainer.innerHTML = conn.variations.map((v, idx) => {
-    const isActive = idx === VIEW.activeVarIndex;
-    const st = v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE");
-    const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
-    return `<button class="vtab-btn ${isActive ? "active" : ""}" onclick="switchViewerTab(${idx})">
-      <span>${escHtml(v.label || ("Variación " + (idx + 1)))}</span>
-      <span class="vtab-badge ${badgeCls}">${escHtml(st)}</span>
-    </button>`;
-  }).join("");
-}
-
-function switchViewerTab(varIdx){
+window.switchViewerTab = function(varIdx){
   if (!VIEW || VIEW.activeVarIndex === varIdx) return;
-  state.results[VIEW.connIdx].activeVarIndex = varIdx;
+  if (state.results[VIEW.connIdx]) state.results[VIEW.connIdx].activeVarIndex = varIdx;
   loadViewerVariation(varIdx);
-}
+};
 
 function buildViewerPanel(){
   const p = $("viewerPanel");
   let html = "";
+  
+  const vars = getConnVariations(VIEW.connIdx);
+  if (vars.length > 0) {
+    html += `<div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Variaciones del Diseño</div>`;
+    html += `<div style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">` +
+      vars.map((v, idx) => {
+        const isActive = idx === VIEW.activeVarIndex;
+        const st = isActive
+          ? (VIEW.check ? (VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE") : v.status)
+          : (v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE"));
+        const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+        const btnBg = isActive ? "#002B5C" : "#F2F5F9";
+        const btnColor = isActive ? "#FFFFFF" : "var(--tr-navy)";
+        const border = isActive ? "2px solid #002B5C" : "1px solid var(--tr-line)";
+        const isAccepted = !!v.accepted;
+
+        return `
+          <div style="display:flex; align-items:center; gap:8px; background:${btnBg}; border:${border}; border-radius:5px; padding:6px 10px;">
+            <input type="checkbox" id="modal_accept_${idx}" class="modal-var-chk" data-var="${idx}" ${isAccepted ? "checked" : ""} style="width:16px; height:16px; cursor:pointer;" title="Aceptar variante">
+            <button type="button" onclick="switchViewerTab(${idx})" style="
+              flex:1; border:none; background:transparent; color:${btnColor}; cursor:pointer; font-weight:600; font-size:12.5px; text-align:left; padding:2px 0;
+            ">
+              <span>${escHtml(v.label)}</span>
+            </button>
+            <span class="badge ${badgeCls}">${escHtml(st)}</span>
+          </div>
+        `;
+      }).join("") + `</div>`;
+  }
+
   if (VIEW.warn) html += `<div class="view-warn">${escHtml(VIEW.warn)}</div>`;
 
   html += `<div id="viewerCheckSection">${checkSectionHtml()}</div>`;
@@ -568,6 +578,19 @@ function buildViewerPanel(){
 
   p.innerHTML = html;
 
+  p.querySelectorAll("input.modal-var-chk").forEach(chk => {
+    chk.addEventListener("change", (e) => {
+      e.stopPropagation();
+      const vI = +chk.dataset.var;
+      const vars = getConnVariations(VIEW.connIdx);
+      if (vars[vI]) {
+        vars[vI].accepted = chk.checked;
+        renderResults();
+        renderAcceptedTable();
+      }
+    });
+  });
+
   p.querySelectorAll("[data-vkey]").forEach(inp => {
     inp.addEventListener("input", () => onField(inp, VIEW.vals, inp.dataset.vkey));
     inp.addEventListener("change", () => {
@@ -578,18 +601,23 @@ function buildViewerPanel(){
 }
 
 function checkSectionHtml(){
-  const conn = state.results[VIEW.connIdx];
-  const activeVar = conn ? conn.variations[VIEW.activeVarIndex] : null;
-  const checkData = VIEW.check || activeVar?.check;
+  const vars = getConnVariations(VIEW.connIdx);
+  const activeVar = vars[VIEW.activeVarIndex] || vars[0];
+  const checkData = VIEW.check || (VIEW.checking ? null : activeVar?.check);
   const checking = !!VIEW.checking;
 
-  if (checkData || checking){
-    let st;
-    if (checking) st = "MODIFICADO";
-    else if (VIEW.check) st = VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE";
-    else st = activeVar?.status || (checkData.cumple ? "CUMPLE" : "NO CUMPLE");
+  if (checking) {
+    return `
+      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
+      <div style="margin-bottom:10px;">
+        <span class="badge mod">COMPROBANDO...</span>
+      </div>
+    `;
+  }
 
-    const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+  if (checkData){
+    const st = checkData.cumple ? "CUMPLE" : "NO CUMPLE";
+    const badgeCls = checkData.cumple ? "ok" : "bad";
 
     let out = `
       <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
@@ -597,7 +625,6 @@ function checkSectionHtml(){
         <span class="badge ${badgeCls}">${escHtml(st)}</span>
       </div>
     `;
-    if (!checkData) return out;
 
     out += `
       <div style="font-size:12.5px; margin-bottom:8px; color:var(--tr-navy);">
@@ -645,7 +672,6 @@ function checkSectionHtml(){
 function renderCheckSection(){
   const el = $("viewerCheckSection");
   if (el) el.innerHTML = checkSectionHtml();
-  renderViewerTabs();
 }
 
 async function checkViewerConnection(){
@@ -653,10 +679,10 @@ async function checkViewerConnection(){
 
   VIEW_FIELDS.forEach(f => {
     if (!f.k) return;
-    const raw = VIEW.vals[f.k];
-    if (f.type === "mm"){ VIEW.row[f.k] = vMmText(raw); }
+    const rawVal = VIEW.vals[f.k];
+    if (f.type === "mm"){ VIEW.row[f.k] = vMmText(rawVal); }
     else {
-      const s = String(raw).trim();
+      const s = String(rawVal).trim();
       VIEW.row[f.k] = s === "" ? "" : (isNaN(Number(s)) ? s : Number(s));
     }
   });
@@ -676,11 +702,6 @@ async function checkViewerConnection(){
     if (!VIEW || VIEW.checkToken !== token) return;
     if (r.ok && Array.isArray(data.rows) && data.rows.length > 0) {
       VIEW.check = data.rows[0];
-      const activeVar = state.results[VIEW.connIdx]?.variations[VIEW.activeVarIndex];
-      if (activeVar){
-        activeVar.check = data.rows[0];
-        activeVar.status = data.rows[0].cumple ? "CUMPLE" : "NO CUMPLE";
-      }
     }
   } catch (e) {
     if (!VIEW || VIEW.checkToken !== token) return;
@@ -689,6 +710,7 @@ async function checkViewerConnection(){
       VIEW.checking = false;
       renderCheckSection();
       drawAll();
+      updateSaveButton();
     }
   }
 }
@@ -738,32 +760,44 @@ function updateSaveButton(){
   let dirty = false;
   for (const f of VIEW_FIELDS){
     if (!f.k) continue;
-    if (vNum(VIEW.vals[f.k]) !== vNum(VIEW.baseline[f.k])){ dirty = true; break; }
+    if (vNum(VIEW.vals[f.k]) !== vNum(VIEW.baselineVals[f.k])){ dirty = true; break; }
   }
   const btn = $("viewerSave");
   if (btn) btn.disabled = !dirty;
 }
 
-function resetViewer(){
+/* Restaura la predicción AJUSTADA original que devolvió el modelo */
+function loadAdjustedPrediction(){
   if (!VIEW) return;
-  VIEW.vals = JSON.parse(JSON.stringify(VIEW.baseline));
-  VIEW.row = { ...VIEW.rowBaseline };
-  VIEW.check = null;
+  const vars = getConnVariations(VIEW.connIdx);
+  const activeVar = vars[VIEW.activeVarIndex];
+  const adjusted = activeVar?.adjusted || activeVar?.data;
+  if (!adjusted){ alert("No hay predicción ajustada disponible."); return; }
+  
+  VIEW.vals = {};
+  VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (adjusted[f.k] ?? ""); });
+  VIEW.row = { ...VIEW.rowBaseline, ...adjusted };
+  VIEW.check = activeVar.adjustedCheck ? JSON.parse(JSON.stringify(activeVar.adjustedCheck)) : null;
+  
   buildViewerPanel();
   drawAll();
   updateSaveButton();
   checkViewerConnection();
 }
 
+/* Restaura la predicción BRUTA (SIN AJUSTE) que devolvió el modelo */
 function loadRawPrediction(){
   if (!VIEW) return;
-  const activeVar = state.results[VIEW.connIdx]?.variations[VIEW.activeVarIndex];
+  const vars = getConnVariations(VIEW.connIdx);
+  const activeVar = vars[VIEW.activeVarIndex];
   const raw = activeVar?.raw;
   if (!raw){ alert("No hay predicción sin ajuste disponible para esta variación."); return; }
+  
   VIEW.vals = {};
   VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (raw[f.k] ?? ""); });
-  VIEW.row = { ...raw };
+  VIEW.row = { ...VIEW.rowBaseline, ...raw };
   VIEW.check = null;
+  
   buildViewerPanel();
   drawAll();
   updateSaveButton();
@@ -772,7 +806,8 @@ function loadRawPrediction(){
 
 function saveViewer(){
   if (!VIEW) return;
-  const activeVar = state.results[VIEW.connIdx]?.variations[VIEW.activeVarIndex];
+  const vars = getConnVariations(VIEW.connIdx);
+  const activeVar = vars[VIEW.activeVarIndex];
   if (!activeVar) return;
 
   VIEW_FIELDS.forEach(f => {
@@ -782,12 +817,16 @@ function saveViewer(){
     else { const s = String(v).trim(); activeVar.data[f.k] = s === "" ? "" : Number(s); }
   });
 
-  activeVar.status = "MODIFICADO";
-  if (VIEW.check) activeVar.check = VIEW.check;
+  if (VIEW.check) {
+    activeVar.check = JSON.parse(JSON.stringify(VIEW.check));
+    activeVar.status = VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE";
+  } else {
+    activeVar.status = "MODIFICADO";
+  }
 
   closeViewer();
   renderResults();
-  checkRow(VIEW.connIdx, VIEW.activeVarIndex);
+  renderAcceptedTable();
 }
 
 function closeViewer(){
@@ -797,7 +836,7 @@ function closeViewer(){
 }
 
 $("viewerBack").onclick = closeViewer;
-$("viewerReset").onclick = resetViewer;
+$("viewerReset").onclick = loadAdjustedPrediction;
 $("viewerRawReset").onclick = loadRawPrediction;
 $("viewerSave").onclick = saveViewer;
 
@@ -964,112 +1003,103 @@ function drawTop(m){
 }
 
 /* =====================================================================
-   Procesador de respuestas multi-variación (Normalización)
+   Procesador de respuestas de POST /scenarios
    ===================================================================== */
-function parsePredictResponse(data, inputRows) {
-  const connections = [];
-
+function parseScenariosResponse(data, inputRow) {
   function buildCheck(r, fallback) {
     if (fallback) return fallback;
+    const cumpleVal = r.cumple !== undefined ? r.cumple : (r.ratio_pesimo != null ? Number(r.ratio_pesimo) <= 1.0 : true);
     return {
-      cumple: r.cumple !== undefined ? r.cumple : (r.ratio_pesimo != null ? r.ratio_pesimo <= 1.0 : true),
+      cumple: Boolean(cumpleVal),
       ratio_pesimo: r.ratio_pesimo ?? null,
       descripcion_ratio_pesimo: r.descripcion_ratio_pesimo || r.chequeo_critico || "",
-      ratios: r.ratios || [],
-      complementarios: r.complementarios || []
+      ratios: Array.isArray(r.ratios) ? r.ratios : [],
+      complementarios: Array.isArray(r.complementarios) ? r.complementarios : []
     };
   }
 
-  // Caso A: Respuesta estructurada con un array de variaciones por cada conexión en rows
-  if (Array.isArray(data.rows) && data.rows.length > 0 && (data.rows[0].variaciones || data.rows[0].escenarios || data.rows[0].variations)) {
-    data.rows.forEach((connObj, i) => {
-      const varList = connObj.variaciones || connObj.escenarios || connObj.variations || [];
-      const normVars = varList.map((v, vI) => {
-        const chk = buildCheck(v, v.check);
-        return {
-          label: v.descripcion || v.nombre || v.tipo || v.variacion || (`Variación ${vI + 1}`),
-          tipo: v.tipo || v.variacion || (`E${vI + 1}`),
-          data: { ...v },
-          raw: v.raw ? { ...v.raw } : { ...v },
-          check: chk,
-          status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
-        };
-      });
-      connections.push({ inputRow: inputRows[i] || {}, activeVarIndex: 0, variations: normVars, marked: false });
-    });
-    return connections;
+  function getLabel(r, defaultIdx) {
+    const raw = r.Escenario || r.escenario || r.descripcion || r.nombre || r.tipo || r.variacion || r.label;
+    if (raw) return String(raw).trim();
+    const defaults = ["E1 - Mayor carga sin cantonera", "E2 - Primer diseño con cantonera", "E3 - Mayor carga con cantonera"];
+    return defaults[defaultIdx] || `Variación ${defaultIdx + 1}`;
   }
 
-  // Caso B: data.rows es una lista plana de 3*N elementos agrupados de 3 en 3 por conexión
-  if (Array.isArray(data.rows) && data.rows.length === inputRows.length * 3) {
-    const defaultLabels = ["E1: Sin cantonera", "E2: Mín. con cantonera", "E3: Máx. con cantonera"];
-    inputRows.forEach((inRow, i) => {
-      const slice = data.rows.slice(i * 3, i * 3 + 3);
-      const checksSlice = Array.isArray(data.checks) ? data.checks.slice(i * 3, i * 3 + 3) : [];
-      const rawsSlice = Array.isArray(data.rows_raw) ? data.rows_raw.slice(i * 3, i * 3 + 3) : [];
-
-      const normVars = slice.map((v, vI) => {
-        const chk = buildCheck(v, checksSlice[vI]);
-        return {
-          label: v.descripcion || v.nombre || v.tipo || defaultLabels[vI] || (`Variación ${vI + 1}`),
-          tipo: v.tipo || v.variacion || (`E${vI + 1}`),
-          data: { ...v },
-          raw: rawsSlice[vI] ? { ...rawsSlice[vI] } : { ...v },
-          check: chk,
-          status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
-        };
-      });
-      connections.push({ inputRow: inRow, activeVarIndex: 0, variations: normVars, marked: false });
-    });
-    return connections;
+  function getTipoCode(label, idx) {
+    if (!label) return `E${idx + 1}`;
+    if (label.includes(" - ")) return label.split(" - ")[0].trim();
+    if (label.includes(":")) return label.split(":")[0].trim();
+    return label.length <= 6 ? label : `E${idx + 1}`;
   }
 
-  // Caso C: Respuesta del endpoint /scenarios (para 1 conexión)
-  if (Array.isArray(data.escenarios) && data.escenarios.length > 0) {
-    const normVars = data.escenarios.map((v, vI) => {
-      const chk = buildCheck(v, v.check);
+  if (Array.isArray(data.rows) && data.rows.length > 0) {
+    const hasMultipleConns = data.rows.some(r => r["Unicode origen"] || r.Unicode_origen);
+    
+    if (hasMultipleConns) {
+      const groupedMap = new Map();
+      data.rows.forEach((r, rowIdx) => {
+        let key = r["Unicode origen"] || r.Unicode_origen || r.UNICODE_origen;
+        if (!key && r.Unicode) key = r.Unicode.includes("_E") ? r.Unicode.split("_E")[0] : r.Unicode;
+        if (!key) key = "Conexión_1";
+        if (!groupedMap.has(key)) groupedMap.set(key, []);
+        groupedMap.get(key).push({ row: r, rawIdx: rowIdx });
+      });
+
+      const connections = [];
+      groupedMap.forEach((items, key) => {
+        const vars = items.map((item, idx) => {
+          const r = item.row;
+          const fallbackCheck = (Array.isArray(data.checks) && data.checks[item.rawIdx]) ? data.checks[item.rawIdx] : null;
+          const fallbackRaw = (Array.isArray(data.rows_raw) && data.rows_raw[item.rawIdx]) ? data.rows_raw[item.rawIdx] : { ...r };
+          const lbl = getLabel(r, idx);
+          const chk = buildCheck(r, fallbackCheck);
+          return {
+            label: lbl,
+            tipo: getTipoCode(lbl, idx),
+            data: { ...r },
+            adjusted: { ...r },
+            raw: { ...fallbackRaw },
+            check: chk,
+            adjustedCheck: JSON.parse(JSON.stringify(chk)),
+            status: chk.cumple ? "CUMPLE" : "NO CUMPLE",
+            accepted: false
+          };
+        });
+        connections.push({ inputRow: inputRow || {}, activeVarIndex: 0, variations: vars, marked: false });
+      });
+      return connections;
+    }
+
+    const vars = data.rows.map((v, idx) => {
+      const lbl = getLabel(v, idx);
+      const chk = buildCheck(v, data.checks ? data.checks[idx] : null);
+      const raw = data.rows_raw ? data.rows_raw[idx] : { ...v };
       return {
-        label: v.descripcion || v.nombre || v.tipo || (`Variación ${vI + 1}`),
-        tipo: v.tipo || (`E${vI + 1}`),
+        label: lbl,
+        tipo: getTipoCode(lbl, idx),
         data: { ...v },
-        raw: v.raw ? { ...v.raw } : { ...v },
+        adjusted: { ...v },
+        raw: { ...raw },
         check: chk,
-        status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
+        adjustedCheck: JSON.parse(JSON.stringify(chk)),
+        status: chk.cumple ? "CUMPLE" : "NO CUMPLE",
+        accepted: false
       };
     });
-    connections.push({ inputRow: inputRows[0] || {}, activeVarIndex: 0, variations: normVars, marked: false });
-    return connections;
+
+    return [{
+      inputRow: inputRow || {},
+      activeVarIndex: 0,
+      variations: vars,
+      marked: false
+    }];
   }
 
-  // Caso D: Fallback de 1 variación por cada fila si el modelo devuelve filas simples
-  if (Array.isArray(data.rows)) {
-    data.rows.forEach((r, i) => {
-      const chk = buildCheck(r, Array.isArray(data.checks) ? data.checks[i] : null);
-      const raw = Array.isArray(data.rows_raw) ? data.rows_raw[i] : { ...r };
-      connections.push({
-        inputRow: inputRows[i] || {},
-        activeVarIndex: 0,
-        variations: [
-          {
-            label: r.descripcion || r.tipo || "Diseño Principal",
-            tipo: r.tipo || "D1",
-            data: { ...r },
-            raw: raw,
-            check: chk,
-            status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
-          }
-        ],
-        marked: false
-      });
-    });
-    return connections;
-  }
-
-  return connections;
+  return [];
 }
 
 /* =====================================================================
-   Acciones principales
+   Acciones principales (Llamadas a POST /scenarios)
    ===================================================================== */
 $("add").onclick = () => {
   const row = readForm(); if (!row) return;
@@ -1085,59 +1115,55 @@ $("clear").onclick = () => {
 
 $("send").onclick = async () => {
   const btn = $("send");
-  btn.disabled = true; setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones…");
+  btn.disabled = true; 
+  setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones (calculando 3 variaciones por conexión)…");
+
   try {
     const model = $("model").value;
 
-    // Intentamos predecir directamente
-    const r = await fetch("/predict", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: model, rows: state.rows }),
-    });
-    const data = await r.json().catch(() => ({}));
+    const promises = state.rows.map(row => 
+      fetch("/scenarios", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: model,
+          row: row,
+          incremento: 0.05,
+          max_pasos: 40
+        })
+      }).then(async r => {
+        const json = await r.json().catch(() => ({}));
+        return { ok: r.ok, status: r.status, data: json, inputRow: row };
+      }).catch(err => ({ ok: false, error: err.message, inputRow: row }))
+    );
 
-    if (!r.ok){
-      let detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data, null, 2);
-      setStatus("bad", `Error ${r.status}`, detail);
-    } else {
-      let parsedConns = parsePredictResponse(data, state.rows);
+    const responses = await Promise.all(promises);
+    const parsedConns = [];
+    let errorsCount = 0;
 
-      // Si /predict solo devolvió 1 variación por conexión y existe el endpoint /scenarios,
-      // solicitamos las 3 variaciones por cada conexión
-      if (parsedConns.length > 0 && parsedConns[0].variations.length === 1) {
-        setStatus("", "Calculando 3 variaciones para cada conexión…");
-        const scenariosConns = [];
-        for (let i = 0; i < state.rows.length; i++) {
-          try {
-            const scRes = await fetch("/scenarios", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ model: model, row: state.rows[i] })
-            });
-            if (scRes.ok) {
-              const scData = await scRes.json();
-              const scParsed = parsePredictResponse(scData, [state.rows[i]]);
-              if (scParsed.length > 0 && scParsed[0].variations.length >= 3) {
-                scenariosConns.push(scParsed[0]);
-                continue;
-              }
-            }
-          } catch(e){}
-          scenariosConns.push(parsedConns[i]);
+    responses.forEach(res => {
+      if (res.ok && res.data) {
+        const conns = parseScenariosResponse(res.data, res.inputRow);
+        if (conns.length > 0) {
+          parsedConns.push(...conns);
         }
-        if (scenariosConns.length === state.rows.length) {
-          parsedConns = scenariosConns;
-        }
+      } else {
+        errorsCount++;
       }
+    });
 
-      state.results = parsedConns;
-      _checkTokens = {};
-      renderResults();
+    state.results = parsedConns;
+    _checkTokens = {};
+    renderResults();
 
-      const totalVars = state.results.reduce((acc, c) => acc + c.variations.length, 0);
-      setStatus("ok", `Predicción completada: ${state.results.length} conexiones (${totalVars} variaciones obtenidas). Pulsa 👁 para ver en 2D.`);
+    const totalVars = state.results.reduce((acc, c) => acc + getConnVariations(state.results.indexOf(c)).length, 0);
+    
+    if (errorsCount > 0) {
+      setStatus("bad", `Finalizado con ${errorsCount} errores.`, `${parsedConns.length} conexiones procesadas correctamente (${totalVars} variaciones).`);
+    } else {
+      setStatus("ok", `Predicción completada: ${parsedConns.length} conexiones (${totalVars} variaciones obtenidas). Pulsa 👁 para ver en 2D.`);
     }
+
   } catch (e){
     setStatus("bad", "Error de conexión", e.message);
   }
@@ -1145,30 +1171,22 @@ $("send").onclick = async () => {
 };
 
 /* =====================================================================
-   Marcado y Envío al Dataset de Reentreno
+   Envío de Variantes Aceptadas al Dataset de Reentreno
    ===================================================================== */
-$("markValid").onclick = () => {
-  state.results.forEach(conn => {
-    const activeVar = conn.variations[conn.activeVarIndex];
-    if (activeVar && activeVar.status === "CUMPLE") conn.marked = true;
-  });
-  renderResults();
-};
-
-$("sendMarked").onclick = async () => {
+$("sendAccepted").onclick = async () => {
   const rowsToSend = [];
-  state.results.forEach(conn => {
-    if (conn.marked) {
-      const activeVar = conn.variations[conn.activeVarIndex];
-      if (activeVar) rowsToSend.push(activeVar.data);
-    }
+  state.results.forEach((conn, connIdx) => {
+    const vars = getConnVariations(connIdx);
+    vars.forEach((v) => {
+      if (v.accepted) rowsToSend.push(v.data);
+    });
   });
 
-  if (!rowsToSend.length){ setStatus("bad", "No hay conexiones marcadas."); return; }
-  if (!confirm("¿Enviar " + rowsToSend.length + " variaciones marcadas al dataset de reentreno?")) return;
+  if (!rowsToSend.length){ setStatus("bad", "No hay variantes aceptadas seleccionadas."); return; }
+  if (!confirm("¿Enviar " + rowsToSend.length + " variantes aceptadas al dataset de reentreno?")) return;
 
-  const btn = $("sendMarked"); btn.disabled = true;
-  setStatus("", "Enviando " + rowsToSend.length + " conexiones…");
+  const btn = $("sendAccepted"); btn.disabled = true;
+  setStatus("", "Enviando " + rowsToSend.length + " variantes aceptadas…");
   try {
     const r = await fetch("/dataset/append", {
       method: "POST",
@@ -1181,7 +1199,7 @@ $("sendMarked").onclick = async () => {
       setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas. Pendientes reentreno: ${data.retrain?.pending ?? 0}/${data.retrain?.threshold ?? 0}` + (data.retrain_started ? " · reentreno iniciado" : ""), data.rejected?.length ? "Rechazadas:\n" + data.rejected.join("\n") : "");
     }
   } catch (e){ setStatus("bad", "Error de conexión", e.message); }
-  updateSendMarked();
+  btn.disabled = false;
 };
 
 /* =====================================================================

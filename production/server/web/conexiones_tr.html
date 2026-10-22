@@ -53,39 +53,42 @@
     <div id="status" role="status"></div>
   </section>
 
+  <!-- PANTALLA PRINCIPAL: RESUMEN DE RESULTADOS Y SELECCIÓN DE VARIANTES -->
   <section id="resSec" style="display:none">
     <h2 class="sec-head">
-      <span>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· 3 variaciones por conexión · editable</small></span>
-      <button class="hbtn" id="exportResultsExcel" title="Descargar resultados en Excel">
-        <img src="./static/download.svg" width="16" height="16" alt="Descargar" style="display: block;">
-      </button>    
-      <button class="hbtn" id="exportCheckExcel" title="Descargar informe de comprobaciones AISC 360 en Excel">
+      <span>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· Selecciona las variantes a conservar</small></span>
+    </h2>
+    <div class="tablewrap" id="res"></div>
+  </section>
+
+  <!-- NUEVA SECCIÓN: TABLA DE CONEXIONES Y VARIANTES ACEPTADAS -->
+  <section id="acceptedSec" style="display:none">
+    <h2 class="sec-head">
+      <span>Variantes Aceptadas (<span id="acceptedCount">0</span>)</span>
+      <button class="hbtn" id="exportAcceptedExcel" title="Descargar variantes aceptadas en Excel">
+        <img src="./static/download.svg" width="16" height="16" alt="Descargar Excel" style="display: block;">
+      </button>
+      <button class="hbtn" id="exportCheckExcel" title="Descargar informe completo de comprobaciones AISC 360">
         <img src="./static/download.svg" width="16" height="16" alt="Descargar Comprobaciones" style="display: block; filter: hue-rotate(180deg);">
       </button>
     </h2>
-    <div class="tablewrap" id="res"></div>
+    <div class="tablewrap" id="acceptedTbl"></div>
     <div class="actions">
-      <button class="btn ghost" id="markValid">Marcar "CUMPLE"</button>
-      <button class="btn green" id="sendMarked" disabled>Enviar conexiones marcadas</button>
+      <button class="btn green" id="sendAccepted" disabled>Enviar variantes aceptadas al dataset de reentreno</button>
     </div>
   </section>
 </main>
 
+<!-- VENTANA MODAL EN SUPERPOSICIÓN (OVERLAY) SIN TABS EN CABECERA -->
 <div id="viewer" class="viewer" style="display:none">
   <div class="viewer-head">
     <button class="btn ghost" id="viewerBack">← Volver</button>
-    <div class="viewer-title" id="viewerTitle">Visualización 2D y Comprobación</div>
+    <div class="viewer-title" id="viewerTitle">Visualización 2D</div>
     <div class="viewer-actions">
-      <button class="btn ghost" id="viewerReset">Reset</button>
+      <button class="btn ghost" id="viewerReset">Reset a predicción ajustada</button>
       <button class="btn ghost" id="viewerRawReset">Reset a predicción sin ajuste</button>
       <button class="btn green" id="viewerSave" disabled>Guardar</button>
     </div>
-  </div>
-
-  <!-- Barra de pestañas para las 3 variaciones en la visualización 2D -->
-  <div id="viewerTabStrip" class="viewer-tab-strip">
-    <span class="vstrip-label">Variaciones del diseño:</span>
-    <div id="viewerTabs" class="vstrip-tabs"></div>
   </div>
 
   <div class="viewer-body">
@@ -107,7 +110,6 @@
   </div>
 </div>
 
-<!-- Scripts JS externos -->
-<script src="scripts/main.js"></script>
+<script src="scripts/main.js?v=5"></script>
 </body>
 </html>
