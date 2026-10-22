@@ -19,6 +19,7 @@ Endpoints:
   MCP  /mcp                     Servidor MCP para integracion con Microsoft Copilot
 """
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -37,6 +38,7 @@ import pandas as pd
 import catalogo
 import config
 import model_registry
+import escenarios
 import predictor
 import storage
 
@@ -138,6 +140,40 @@ async def listar_modelos() -> Dict[str, Any]:
         "loaded_models": model_registry.loaded_models(),
         "default_model": config.MODEL_NAME,
     }
+
+
+# =============================================================================
+# Escenarios de carga (MCP)
+# =============================================================================
+@mcp.tool()
+async def disenar_escenarios_carga(
+    row: Dict[str, Any],
+    model: str = "",
+    incremento: float = 0.05,
+    max_pasos: int = 40,
+) -> Dict[str, Any]:
+    """Predice UNA conexion y busca 3 disenos de referencia subiendo las cargas un 5 % por paso.
+
+    Devuelve `tabla_markdown` (la tabla a mostrar al usuario), `escenarios` (con la fila CODAME
+    completa de cada diseno) y `historial` (todos los pasos probados).
+      E1: mayor carga que aguanta SIN cantonera.
+      E2: primer diseno CON cantonera.
+      E3: mayor carga que aguanta CON cantonera.
+    Solo cuentan los disenos que cumplen la comprobacion AISC 360-10.
+
+    Args:
+        row: UNA fila con UNICODE, BEAM, COLUMN, ratio_moment, ratio_shear, ratio_axial
+            (0-1) y opcionalmente Normativas, grado_acero, clase_tornillo.
+        model: Nombre opcional del modelo (por defecto, el configurado).
+        incremento: Aumento de carga por paso (0.05 = 5 %).
+        max_pasos: Maximo de pasos de aumento a explorar.
+    """
+    name = model or config.MODEL_NAME
+    log.info("[MCP] escenarios: modelo=%s", name)
+    result = await asyncio.to_thread(
+        escenarios.run, name, row, incremento=incremento, max_pasos=max_pasos
+    )
+    return {"model_name": name, **result}
 
 
 # =============================================================================
@@ -375,6 +411,40 @@ def retrain_status():
 @app.post("/retrain", tags=["datos"])
 def retrain_now():
     return {"started": retrain_manager.maybe_start(force=True), **retrain_manager.status()}
+
+
+class ScenarioIn(BaseModel):
+    model: str | None = Field(default=None, description="Modelo a usar. Si falta, el por defecto.")
+    row: Dict[str, Any] = Field(..., description="UNA fila de entrada del modelo.")
+    incremento: float = Field(default=0.05, gt=0, description="Aumento de carga por paso (0.05 = 5 %).")
+    max_pasos: int = Field(default=40, ge=1, le=200)
+    max_fallos_seguidos: int = Field(default=3, ge=1)
+
+
+@app.post(
+    "/scenarios",
+    tags=["inferencia"],
+    summary="Predice una fila y busca 3 disenos subiendo las cargas",
+    response_description="Tabla E1 (max. sin cantonera), E2 (primera con cantonera), E3 (max. con cantonera).",
+)
+def scenarios(payload: ScenarioIn):
+    name = payload.model or config.MODEL_NAME
+    log.info("/scenarios: modelo=%s", name)
+    try:
+        result = escenarios.run(
+            name, payload.row, incremento=payload.incremento, max_pasos=payload.max_pasos,
+            max_fallos_seguidos=payload.max_fallos_seguidos,
+        )
+    except predictor.InputContractError:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Error generando escenarios")
+        raise HTTPException(status_code=500, detail=f"Error en escenarios: {exc}")
+    return {"model_name": name, **result}
 
 
 @app.get("/dataset/summary", tags=["datos"], summary="Resumen del dataset acumulado")

@@ -546,7 +546,7 @@ def _resumen(changes: List[str]) -> str:
     return " | ".join(out)
 
 
-def refine(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+def refine(row: Dict[str, Any], maximize_load: Optional[bool] = None) -> Tuple[Dict[str, Any], List[str]]:
     """Fila CODAME -> (fila ajustada, lista de cambios). Nunca lanza: ante un error devuelve la original."""
     uid = row.get("Unicode")
     changes: List[str] = []
@@ -581,7 +581,7 @@ def refine(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         # 3. Quitar sobrantes y maximizar cargas
         quitados, rs = _quitar_sobrantes(work, rs, res)
         changes += quitados
-        if MAXIMIZE_LOAD:
+        if (MAXIMIZE_LOAD if maximize_load is None else maximize_load):
             changes += _maximize_load(work, rs)
 
         if changes:
@@ -616,9 +616,10 @@ def _init_worker() -> None:
         pass
 
 
-def refine_and_check(row: Dict[str, Any], with_check: bool = True) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+def refine_and_check(row: Dict[str, Any], with_check: bool = True,
+                     maximize_load: Optional[bool] = None) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Ajusta una fila y, si se pide, devuelve ademas su comprobacion final (None si fallo)."""
-    new, _ = refine(row)
+    new, _ = refine(row, maximize_load)
     if not with_check:
         return new, None
     try:
@@ -646,15 +647,16 @@ def _reset_pool() -> None:
             _pool = None
 
 
-def refine_many(rows: List[Dict[str, Any]], with_check: bool = True):
+def refine_many(rows: List[Dict[str, Any]], with_check: bool = True, maximize_load: Optional[bool] = None):
     """[(fila ajustada, comprobacion | None)] en el mismo orden; en paralelo si compensa."""
     if not ENABLED:
         return [(r, None) for r in rows]
     if WORKERS > 1 and len(rows) >= PARALLEL_MIN_ROWS:
         try:
             flags = [with_check] * len(rows)
-            return list(_get_pool().map(refine_and_check, rows, flags, chunksize=1))
+            maxs = [maximize_load] * len(rows)
+            return list(_get_pool().map(refine_and_check, rows, flags, maxs, chunksize=1))
         except Exception:  # noqa: BLE001  (pool roto, sin recursos...): se sigue en serie
             log.exception("refinar en paralelo fallo; se calcula en serie")
             _reset_pool()
-    return [refine_and_check(r, with_check) for r in rows]
+    return [refine_and_check(r, with_check, maximize_load) for r in rows]

@@ -3,8 +3,24 @@
    ===================================================================== */
 const $ = id => document.getElementById(id);
 let SCHEMA = { model: null, inputs: [], result_columns: [] };
-const state = { rows: [], results: [], resultsRaw: [], checked: [], marked: [], status: [] };
-const escHtml = v => String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+/*
+  state.results es una lista de objetos "Conexión", donde cada objeto contiene:
+  {
+    inputRow: { ... },
+    activeVarIndex: 0,
+    variations: [
+      { label: "E1: Sin cantonera", tipo: "E1", data: { ...CODAME }, raw: { ... }, check: { ... }, status: "CUMPLE" },
+      { label: "E2: Mín. con cantonera", tipo: "E2", data: { ...CODAME }, raw: { ... }, check: { ... }, status: "CUMPLE" },
+      { label: "E3: Máx. con cantonera", tipo: "E3", data: { ...CODAME }, raw: { ... }, check: { ... }, status: "NO CUMPLE" }
+    ],
+    marked: false
+  }
+*/
+const state = { rows: [], results: [] };
+let _checkTokens = {};
+
+const escHtml = v => String(v == null ? "" : v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
 
 /* =====================================================================
@@ -139,43 +155,72 @@ function renderTable(){
 function bulkFillColumn(colName){
   if (!state.results.length) return;
   if (colName.toLowerCase() === "unicode") return;
-  const sampleVal = state.results[0][colName] ?? "";
-  const newVal = prompt(`Nuevo valor para '${colName}' en TODAS las filas (${state.results.length}):`, sampleVal);
+  const sampleVal = state.results[0].variations[state.results[0].activeVarIndex]?.data[colName] ?? "";
+  const newVal = prompt(`Nuevo valor para '${colName}' en TODAS las variaciones activas (${state.results.length}):`, sampleVal);
   if (newVal === null) return;
-  state.results.forEach((r, i) => {
-    r[colName] = newVal;
-    state.status[i] = "MODIFICADO";
-    state.marked[i] = false;
+
+  state.results.forEach((conn, connIdx) => {
+    const varIdx = conn.activeVarIndex;
+    const v = conn.variations[varIdx];
+    if (v){
+      v.data[colName] = newVal;
+      v.status = "MODIFICADO";
+      conn.marked = false;
+      checkRow(connIdx, varIdx);
+    }
   });
   renderResults();
-  runCheck();
 }
 
 function renderResults(){
   const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
   if (!res.length){ updateSendMarked(); return; }
-  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : [...new Set(res.flatMap(r => Object.keys(r)))];
 
-  const head = `<th title="Visualizar y Comprobar">👁</th><th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` + cols.map(c => {
-    const isUnicode = c.toLowerCase() === "unicode";
-    return `<th><div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
-      <span>${escHtml(c)}</span>
-      ${isUnicode ? '' : `<button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna">⚡ Rellenar</button>`}
-    </div></th>`;
-  }).join("") + `<th>Comprobación</th>`;
+  // Obtener todas las columnas CODAME a partir de la primera variación activa
+  const sampleData = res[0].variations[res[0].activeVarIndex]?.data || {};
+  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : Object.keys(sampleData);
 
-  const body = res.map((r, i) => {
-    const st = state.status[i] || "";
-    const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : st === "MODIFICADO" ? "mod" : "";
-    const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : st === "MODIFICADO" ? "row-mod" : "";
+  const head = `<th title="Visualizar y Comprobar">👁</th>` +
+    `<th>Variaciones del Diseño</th>` +
+    `<th><input type="checkbox" id="resAll" title="Marcar / desmarcar todas"></th>` +
+    cols.map(c => {
+      const isUnicode = c.toLowerCase() === "unicode";
+      return `<th><div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
+        <span>${escHtml(c)}</span>
+        ${isUnicode ? '' : `<button class="btn-icon" onclick="bulkFillColumn('${escAttr(c)}')" title="Rellenar toda la columna">⚡ Rellenar</button>`}
+      </div></th>`;
+    }).join("") +
+    `<th>Comprobación AISC</th>`;
+
+  const body = res.map((conn, connIdx) => {
+    const varIdx = conn.activeVarIndex || 0;
+    const activeVar = conn.variations[varIdx] || conn.variations[0];
+    const r = activeVar.data;
+    const st = activeVar.status || "CUMPLE";
+
+    const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+    const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : "row-mod";
+
+    // Pestañas pequeñas para elegir variación directamente en la tabla
+    const varTabsHtml = `<div class="var-tabs-group">` +
+      conn.variations.map((v, vI) => {
+        const vStCls = v.status === "CUMPLE" ? "ok" : v.status === "NO CUMPLE" ? "bad" : "mod";
+        const isActive = vI === varIdx;
+        return `<button class="var-tab-pill ${isActive ? "active" : ""}" data-conn="${connIdx}" data-var="${vI}" title="${escAttr(v.label)}">
+          <span class="var-dot ${vStCls}"></span>
+          <span>${escHtml(v.tipo || ("V" + (vI + 1)))}</span>
+        </button>`;
+      }).join("") + `</div>`;
+
     return `<tr class="${rowCls}">` +
-      `<td><button class="vbtn" data-view="${i}" title="Visualizar y Comprobar en 2D">👁</button></td>` +
-      `<td><input type="checkbox" class="rowchk" data-row="${i}" ${state.marked[i] ? "checked" : ""}></td>` +
+      `<td><button class="vbtn" data-view-conn="${connIdx}" data-view-var="${varIdx}" title="Visualizar en 2D y Comprobar">👁</button></td>` +
+      `<td>${varTabsHtml}</td>` +
+      `<td><input type="checkbox" class="rowchk" data-conn="${connIdx}" ${conn.marked ? "checked" : ""}></td>` +
       cols.map(c => {
-        const v = r[c] ?? "";
-        if (c.toLowerCase() === "unicode") return `<td><input class="cell" readonly value="${escAttr(v)}" style="cursor:not-allowed;color:var(--tr-muted);min-width:100px;"></td>`;
-        return `<td><input class="cell" data-row="${i}" data-col="${escAttr(c)}" value="${escAttr(v)}"></td>`;
+        const val = r[c] ?? "";
+        if (c.toLowerCase() === "unicode") return `<td><input class="cell" readonly value="${escAttr(val)}" style="cursor:not-allowed;color:var(--tr-muted);min-width:100px;"></td>`;
+        return `<td><input class="cell" data-conn="${connIdx}" data-var="${varIdx}" data-col="${escAttr(c)}" value="${escAttr(val)}"></td>`;
       }).join("") +
       `<td class="st ${stCls}">${escHtml(st)}</td>` +
     "</tr>";
@@ -183,114 +228,146 @@ function renderResults(){
 
   $("res").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 
+  // Listeners para cambiar de pestaña en la tabla
+  $("res").querySelectorAll("button.var-tab-pill").forEach(btn => {
+    btn.onclick = () => {
+      const cI = +btn.dataset.conn;
+      const vI = +btn.dataset.var;
+      state.results[cI].activeVarIndex = vI;
+      renderResults();
+    };
+  });
+
+  // Listeners para editar celdas directamente
   $("res").querySelectorAll("input.cell:not([readonly])").forEach(inp => {
     inp.addEventListener("input", () => {
-      const i = +inp.dataset.row;
-      state.results[i][inp.dataset.col] = inp.value;
-      markModified(i);
+      const cI = +inp.dataset.conn;
+      const vI = +inp.dataset.var;
+      state.results[cI].variations[vI].data[inp.dataset.col] = inp.value;
+      state.results[cI].variations[vI].status = "MODIFICADO";
+      state.results[cI].marked = false;
+      updateRowStatus(cI);
+      updateSendMarked();
     });
-    inp.addEventListener("change", () => checkRow(+inp.dataset.row));
+    inp.addEventListener("change", () => {
+      const cI = +inp.dataset.conn;
+      const vI = +inp.dataset.var;
+      checkRow(cI, vI);
+    });
   });
+
   $("res").querySelectorAll("input.rowchk").forEach(chk => {
-    chk.addEventListener("change", () => { state.marked[+chk.dataset.row] = chk.checked; updateSendMarked(); });
+    chk.addEventListener("change", () => {
+      const cI = +chk.dataset.conn;
+      state.results[cI].marked = chk.checked;
+      updateSendMarked();
+    });
   });
+
   $("res").querySelectorAll("button.vbtn").forEach(b => {
-    b.onclick = () => openViewer(+b.dataset.view);
+    b.onclick = () => openViewer(+b.dataset.viewConn, +b.dataset.viewVar);
   });
+
   const all = $("resAll");
   if (all){
-    const n = state.marked.filter(Boolean).length;
+    const n = state.results.filter(c => c.marked).length;
     all.checked = state.results.length > 0 && n === state.results.length;
     all.indeterminate = n > 0 && n < state.results.length;
     all.addEventListener("change", () => {
-      state.marked = state.results.map(() => all.checked);
+      state.results.forEach(c => c.marked = all.checked);
       renderResults();
     });
   }
   updateSendMarked();
 }
 
-function markModified(i){
-  state.status[i] = "MODIFICADO";
-  state.marked[i] = false;
-  updateRowStatus(i);
-  const row = $("res").querySelectorAll("tbody tr")[i];
-  const chk = row && row.querySelector("input.rowchk");
-  if (chk) chk.checked = false;
-  updateSendMarked();
-}
+function updateRowStatus(connIdx){
+  const conn = state.results[connIdx];
+  if (!conn) return;
+  const activeVar = conn.variations[conn.activeVarIndex];
+  if (!activeVar) return;
 
-/* Actualiza en sitio la clase de la fila y su celda de estado (sin re-render). */
-function updateRowStatus(i){
-  const row = $("res").querySelectorAll("tbody tr")[i];
+  const row = $("res").querySelectorAll("tbody tr")[connIdx];
   if (!row) return;
-  const st = state.status[i] || "";
-  const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : st === "MODIFICADO" ? "mod" : "";
-  const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : st === "MODIFICADO" ? "row-mod" : "";
+
+  const st = activeVar.status || "CUMPLE";
+  const stCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+  const rowCls = st === "CUMPLE" ? "row-ok" : st === "NO CUMPLE" ? "row-bad" : "row-mod";
+
   row.className = rowCls;
   const stCell = row.querySelector("td.st");
   if (stCell){ stCell.textContent = st; stCell.className = "st " + stCls; }
 }
 
-/* Valida una sola fila (auto al salir de un input, al guardar y tras "Rellenar").
-   Mientras espera, la fila queda en MODIFICADO; al responder pasa a CUMPLE/NO CUMPLE. */
-let _checkTokens = {};
-async function checkRow(i){
-  if (!state.results[i]) return;
-  if (!Array.isArray(state.checked)) state.checked = [];
-  const token = (_checkTokens[i] || 0) + 1;
-  _checkTokens[i] = token;
-  state.status[i] = "MODIFICADO";   // "validando…"
-  updateRowStatus(i);
+/* Valida una sola variación de una conexión */
+async function checkRow(connIdx, varIdx){
+  const conn = state.results[connIdx];
+  if (!conn) return;
+  const v = conn.variations[varIdx];
+  if (!v) return;
+
+  const tokenKey = `${connIdx}_${varIdx}`;
+  const token = (_checkTokens[tokenKey] || 0) + 1;
+  _checkTokens[tokenKey] = token;
+
+  v.status = "MODIFICADO";
+  updateRowStatus(connIdx);
+
   try {
     const r = await fetch("/check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: [state.results[i]] }),
+      body: JSON.stringify({ rows: [v.data] }),
     });
     const data = await r.json().catch(() => ({}));
-    if (token !== _checkTokens[i]) return;   // respuesta antigua: ignorar
+    if (token !== _checkTokens[tokenKey]) return;
     if (r.ok && Array.isArray(data.rows) && data.rows.length){
-      state.checked[i] = data.rows[0];
-      state.status[i] = data.rows[0].cumple ? "CUMPLE" : "NO CUMPLE";
+      v.check = data.rows[0];
+      v.status = data.rows[0].cumple ? "CUMPLE" : "NO CUMPLE";
     }
   } catch (e){
-    if (token !== _checkTokens[i]) return;
-    console.error("checkRow", i, e);
+    if (token !== _checkTokens[tokenKey]) return;
+    console.error("checkRow", connIdx, varIdx, e);
   }
-  updateRowStatus(i);
-  if (typeof VIEW !== "undefined" && VIEW && VIEW.i === i) buildViewerPanel();
+  updateRowStatus(connIdx);
+  if (VIEW && VIEW.connIdx === connIdx && VIEW.activeVarIndex === varIdx) buildViewerPanel();
 }
 
 function updateSendMarked(){
-  $("sendMarked").disabled = !state.marked.some(Boolean);
+  $("sendMarked").disabled = !state.results.some(c => c.marked);
 }
 
 /* =====================================================================
-   Exportación Excel de Comprobaciones acumuladas
+   Exportación Excel de Comprobaciones y Resultados
    ===================================================================== */
 $("exportCheckExcel").onclick = () => {
-  const res = state.checked;
-  if (!res.length) { setStatus("bad", "No hay comprobaciones almacenadas para exportar."); return; }
+  if (!state.results.length) { setStatus("bad", "No hay resultados para exportar."); return; }
 
-  const exportRows = res.map((r, idx) => {
-    if (!r) return { "UNICODE": (idx + 1), "Estado Global": "Sin comprobar" };
-    const rowObj = {
-      "UNICODE": r.Unicode || r.UNICODE || (idx + 1),
-      "Estado Global": r.cumple ? "CUMPLE" : "NO CUMPLE",
-      "Ratio Pésimo": r.ratio_pesimo ?? "",
-      "Chequeo Crítico": r.descripcion_ratio_pesimo || ""
-    };
-    Object.keys(r).forEach(k => {
-      if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo"].includes(k)) rowObj[k] = r[k];
+  const exportRows = [];
+  state.results.forEach((conn, connIdx) => {
+    conn.variations.forEach((v, vIdx) => {
+      const chk = v.check || {};
+      const rowObj = {
+        "Conexión #": connIdx + 1,
+        "Variación": v.label || (`Variación ${vIdx + 1}`),
+        "UNICODE": v.data.Unicode || v.data.UNICODE || (connIdx + 1),
+        "Estado Global": v.status || (chk.cumple ? "CUMPLE" : "NO CUMPLE"),
+        "Ratio Pésimo": chk.ratio_pesimo ?? "",
+        "Chequeo Crítico": chk.descripcion_ratio_pesimo || ""
+      };
+      Object.keys(v.data).forEach(k => {
+        if (!["ratios", "complementarios", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo"].includes(k)) {
+          rowObj[k] = v.data[k];
+        }
+      });
+      if (Array.isArray(chk.ratios)) {
+        chk.ratios.forEach(ratioItem => { rowObj[`Ratio: ${ratioItem.descripcion}`] = ratioItem.ratio ?? "N/A"; });
+      }
+      if (Array.isArray(chk.complementarios)) {
+        chk.complementarios.forEach(compItem => { rowObj[`Geometría: ${compItem.descripcion}`] = compItem.resultado; });
+      }
+      exportRows.push(rowObj);
     });
-    if (Array.isArray(r.ratios)) {
-      r.ratios.forEach(ratioItem => { rowObj[`Ratio: ${ratioItem.descripcion}`] = ratioItem.ratio ?? "N/A"; });
-    }
-    if (Array.isArray(r.complementarios)) {
-      r.complementarios.forEach(compItem => { rowObj[`Geometría: ${compItem.descripcion}`] = compItem.resultado; });
-    }
-    return rowObj;
   });
 
   const worksheet = XLSX.utils.json_to_sheet(exportRows);
@@ -302,7 +379,17 @@ $("exportCheckExcel").onclick = () => {
 
 $("exportResultsExcel").onclick = () => {
   if (!state.results.length) { setStatus("bad", "No hay resultados para exportar."); return; }
-  const worksheet = XLSX.utils.json_to_sheet(state.results);
+  const exportRows = [];
+  state.results.forEach((conn, connIdx) => {
+    conn.variations.forEach((v, vIdx) => {
+      exportRows.push({
+        "Conexión #": connIdx + 1,
+        "Variación": v.label || (`Variación ${vIdx + 1}`),
+        ...v.data
+      });
+    });
+  });
+  const worksheet = XLSX.utils.json_to_sheet(exportRows);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Resultados");
   XLSX.writeFile(workbook, `Resultados_${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -317,7 +404,7 @@ function setStatus(kind, text, detail){
 }
 
 /* =====================================================================
-   Visualizador 2D con Comprobación Integrada
+   Visualizador 2D con Pestañas para las 3 Variaciones
    ===================================================================== */
 const PROFILE_CACHE = {};
 let VIEW = null;
@@ -380,12 +467,37 @@ async function fetchProfiles(names){
   return out;
 }
 
-async function openViewer(i){
-  const row = state.results[i];
-  if (!row) return;
+async function openViewer(connIdx, initialVarIdx = 0){
+  const conn = state.results[connIdx];
+  if (!conn) return;
+
+  VIEW = { connIdx, activeVarIndex: initialVarIdx };
+  $("viewerTitle").textContent = "Visualización 2D · Conexión " + (connIdx + 1);
+
+  await loadViewerVariation(initialVarIdx);
+
+  $("viewer").style.display = "flex";
+  document.body.classList.add("modal-open");
+  updateSaveButton();
+}
+
+async function loadViewerVariation(varIdx){
+  if (!VIEW) return;
+  VIEW.activeVarIndex = varIdx;
+  const conn = state.results[VIEW.connIdx];
+  const activeVar = conn.variations[varIdx];
+  if (!activeVar) return;
+
+  const row = activeVar.data;
   const prof = await fetchProfiles([row.BEAM, row.COLUMN]);
   const beam = prof[row.BEAM] || null, col = prof[row.COLUMN] || null;
-  VIEW = { i, row: { ...row }, rowBaseline: { ...row }, isRaw: false, check: null, beam, col, vals:{}, sec:{}, warn:"" };
+
+  VIEW.row = { ...row };
+  VIEW.rowBaseline = { ...row };
+  VIEW.check = activeVar.check || null;
+  VIEW.beam = beam; VIEW.col = col;
+  VIEW.vals = {}; VIEW.sec = {}; VIEW.warn = "";
+
   VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (row[f.k] ?? ""); });
   VIEW.sec = {
     beam_d: beam ? beam.d_mm : "", beam_bf: beam ? beam.bf_mm : "",
@@ -393,32 +505,46 @@ async function openViewer(i){
     col_d: col ? col.d_mm : "", col_bf: col ? col.bf_mm : "",
     col_tw: col ? col.tw_mm : "", col_tf: col ? col.tf_mm : "",
   };
-  const lim0 = boxLimits(viewModel());
-  let wasClamped = false;
-  VIEW_FIELDS.forEach(f => {
-    if (!f.k) return;
-    const before = VIEW.vals[f.k];
-    const clamped = clampToLimits(before, lim0[f.k], f.k);
-    VIEW.vals[f.k] = clamped;
-    if (vNum(clamped) !== vNum(before)) wasClamped = true;
-  });
+
   VIEW.baseline = JSON.parse(JSON.stringify(VIEW.vals));
-  VIEW.wasClamped = wasClamped;
+
   const missed = [];
   if (!String(row.BEAM || "").trim()) missed.push("viga (columna BEAM vacía)");
   else if (!beam) missed.push("viga '" + row.BEAM + "'");
   if (!String(row.COLUMN || "").trim()) missed.push("pilar (columna COLUMN vacía)");
   else if (!col) missed.push("pilar '" + row.COLUMN + "'");
+
   VIEW.warn = missed.length
-    ? "No encontrado en el catálogo: " + missed.join(", ") + ". Introduce las cotas de sección a mano (no se guardan)."
+    ? "No encontrado en el catálogo: " + missed.join(", ") + ". Introduce las cotas de sección a mano."
     : "";
-  $("viewerTitle").textContent = "Visualización 2D · " + (row.Unicode ?? row.UNICODE ?? ("fila " + (i + 1)));
+
+  renderViewerTabs();
   buildViewerPanel();
-  $("viewer").style.display = "flex";
-  document.body.classList.add("modal-open");
   drawAll();
-  updateSaveButton();
   checkViewerConnection();
+}
+
+function renderViewerTabs(){
+  if (!VIEW) return;
+  const conn = state.results[VIEW.connIdx];
+  const tabsContainer = $("viewerTabs");
+  if (!tabsContainer || !conn) return;
+
+  tabsContainer.innerHTML = conn.variations.map((v, idx) => {
+    const isActive = idx === VIEW.activeVarIndex;
+    const st = v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE");
+    const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
+    return `<button class="vtab-btn ${isActive ? "active" : ""}" onclick="switchViewerTab(${idx})">
+      <span>${escHtml(v.label || ("Variación " + (idx + 1)))}</span>
+      <span class="vtab-badge ${badgeCls}">${escHtml(st)}</span>
+    </button>`;
+  }).join("");
+}
+
+function switchViewerTab(varIdx){
+  if (!VIEW || VIEW.activeVarIndex === varIdx) return;
+  state.results[VIEW.connIdx].activeVarIndex = varIdx;
+  loadViewerVariation(varIdx);
 }
 
 function buildViewerPanel(){
@@ -452,13 +578,17 @@ function buildViewerPanel(){
 }
 
 function checkSectionHtml(){
-  const checkData = VIEW.check || state.checked[VIEW.i];
+  const conn = state.results[VIEW.connIdx];
+  const activeVar = conn ? conn.variations[VIEW.activeVarIndex] : null;
+  const checkData = VIEW.check || activeVar?.check;
   const checking = !!VIEW.checking;
+
   if (checkData || checking){
     let st;
     if (checking) st = "MODIFICADO";
     else if (VIEW.check) st = VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE";
-    else st = state.status[VIEW.i] || (checkData.cumple ? "CUMPLE" : "NO CUMPLE");
+    else st = activeVar?.status || (checkData.cumple ? "CUMPLE" : "NO CUMPLE");
+
     const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
 
     let out = `
@@ -507,15 +637,15 @@ function checkSectionHtml(){
   return `
     <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
     <div style="margin-bottom:12px; background:#EAF3FB; padding:10px; border-left:3px solid var(--tr-blue); border-radius:3px; font-size:12px; color:var(--tr-navy);">
-      Esta unión no se ha comprobado de forma individual.
+      Esta variación no se ha comprobado aún.
     </div>
   `;
 }
 
 function renderCheckSection(){
   const el = $("viewerCheckSection");
-  if (!el) return;
-  el.innerHTML = checkSectionHtml();
+  if (el) el.innerHTML = checkSectionHtml();
+  renderViewerTabs();
 }
 
 async function checkViewerConnection(){
@@ -546,12 +676,14 @@ async function checkViewerConnection(){
     if (!VIEW || VIEW.checkToken !== token) return;
     if (r.ok && Array.isArray(data.rows) && data.rows.length > 0) {
       VIEW.check = data.rows[0];
-    } else {
-      alert("Error comprobando la conexión: " + (typeof data.detail === "string" ? data.detail : JSON.stringify(data)));
+      const activeVar = state.results[VIEW.connIdx]?.variations[VIEW.activeVarIndex];
+      if (activeVar){
+        activeVar.check = data.rows[0];
+        activeVar.status = data.rows[0].cumple ? "CUMPLE" : "NO CUMPLE";
+      }
     }
   } catch (e) {
     if (!VIEW || VIEW.checkToken !== token) return;
-    alert("Error conectando con el servidor: " + e.message);
   } finally {
     if (VIEW && VIEW.checkToken === token) {
       VIEW.checking = false;
@@ -567,6 +699,7 @@ function viewRow(label, bindAttr, key, value, inMm, editable=true){
   return `<div class="view-row ${editable? "":"ro"}"><label>${escHtml(label)}</label>` +
          `<div class="mm-wrap">${input}<span class="mm-suf">mm</span></div></div>`;
 }
+
 function mmInput(v){
   const s = String(v == null ? "" : v).trim();
   if (s === "") return "";
@@ -580,38 +713,10 @@ function sanitizeNum(v){
   return s;
 }
 
-function boxLimits(m){
-  return {};
-}
-
-function clampToLimits(v, lim, key){
-  if (!lim) lim = { min: 0 };
-  let n = vNum(v);
-  if (lim.min != null && n < lim.min) n = lim.min;
-  if (lim.max != null && n > lim.max) n = lim.max;
-  return String(n);
-}
-
-function markViewerModified(){
-  if (!VIEW) return;
-  const was = !!VIEW.checking;
-  VIEW.checking = true;
-  VIEW.checkToken = (VIEW.checkToken || 0) + 1;
-  if (!was) renderCheckSection();
-}
-
 function onField(inp, store, key){
-  markViewerModified();
+  VIEW.checking = true;
   let s = sanitizeNum(inp.value);
-  const lim = boxLimits(viewModel())[key] || { min: 0 };
   if (s === ""){ store[key] = ""; inp.value = ""; updateSaveButton(); drawAll(); return; }
-  const n = parseFloat(s);
-  if (!isNaN(n)){
-    let nc = n;
-    if (lim.min != null && nc < lim.min) nc = lim.min;
-    if (lim.max != null && nc > lim.max) nc = lim.max;
-    if (nc !== n){ s = String(nc); }
-  }
   store[key] = s;
   if (inp.value !== s) inp.value = s;
   updateSaveButton();
@@ -630,12 +735,10 @@ function onFieldBlur(inp, store, key){
 
 function updateSaveButton(){
   if (!VIEW) return;
-  let dirty = !!VIEW.wasClamped;
-  if (!dirty){
-    for (const f of VIEW_FIELDS){
-      if (!f.k) continue;
-      if (vNum(VIEW.vals[f.k]) !== vNum(VIEW.baseline[f.k])){ dirty = true; break; }
-    }
+  let dirty = false;
+  for (const f of VIEW_FIELDS){
+    if (!f.k) continue;
+    if (vNum(VIEW.vals[f.k]) !== vNum(VIEW.baseline[f.k])){ dirty = true; break; }
   }
   const btn = $("viewerSave");
   if (btn) btn.disabled = !dirty;
@@ -645,7 +748,6 @@ function resetViewer(){
   if (!VIEW) return;
   VIEW.vals = JSON.parse(JSON.stringify(VIEW.baseline));
   VIEW.row = { ...VIEW.rowBaseline };
-  VIEW.isRaw = false;
   VIEW.check = null;
   buildViewerPanel();
   drawAll();
@@ -655,18 +757,13 @@ function resetViewer(){
 
 function loadRawPrediction(){
   if (!VIEW) return;
-  const raw = state.resultsRaw && state.resultsRaw[VIEW.i];
-  if (!raw){ alert("No hay predicción sin ajuste disponible para esta fila."); return; }
+  const activeVar = state.results[VIEW.connIdx]?.variations[VIEW.activeVarIndex];
+  const raw = activeVar?.raw;
+  if (!raw){ alert("No hay predicción sin ajuste disponible para esta variación."); return; }
   VIEW.vals = {};
   VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (raw[f.k] ?? ""); });
   VIEW.row = { ...raw };
-  VIEW.isRaw = true;
   VIEW.check = null;
-  const lim = boxLimits(viewModel());
-  VIEW_FIELDS.forEach(f => {
-    if (!f.k) return;
-    VIEW.vals[f.k] = clampToLimits(VIEW.vals[f.k], lim[f.k], f.k);
-  });
   buildViewerPanel();
   drawAll();
   updateSaveButton();
@@ -675,24 +772,30 @@ function loadRawPrediction(){
 
 function saveViewer(){
   if (!VIEW) return;
-  const i = VIEW.i;
-  const row = state.results[i];
-  const lim = boxLimits(viewModel());
+  const activeVar = state.results[VIEW.connIdx]?.variations[VIEW.activeVarIndex];
+  if (!activeVar) return;
+
   VIEW_FIELDS.forEach(f => {
     if (!f.k) return;
-    const v = clampToLimits(VIEW.vals[f.k], lim[f.k], f.k);
-    if (f.type === "mm"){ row[f.k] = vMmText(v); }
-    else { const s = String(v).trim(); row[f.k] = s === "" ? "" : Number(s); }
+    const v = VIEW.vals[f.k];
+    if (f.type === "mm"){ activeVar.data[f.k] = vMmText(v); }
+    else { const s = String(v).trim(); activeVar.data[f.k] = s === "" ? "" : Number(s); }
   });
-  state.status[i] = "MODIFICADO";
-  state.marked[i] = false;
-  if (VIEW.check) state.checked[i] = VIEW.check;
+
+  activeVar.status = "MODIFICADO";
+  if (VIEW.check) activeVar.check = VIEW.check;
+
   closeViewer();
   renderResults();
-  checkRow(i);
+  checkRow(VIEW.connIdx, VIEW.activeVarIndex);
 }
 
-function closeViewer(){ $("viewer").style.display = "none"; document.body.classList.remove("modal-open"); VIEW = null; }
+function closeViewer(){
+  $("viewer").style.display = "none";
+  document.body.classList.remove("modal-open");
+  VIEW = null;
+}
+
 $("viewerBack").onclick = closeViewer;
 $("viewerReset").onclick = resetViewer;
 $("viewerRawReset").onclick = loadRawPrediction;
@@ -861,6 +964,111 @@ function drawTop(m){
 }
 
 /* =====================================================================
+   Procesador de respuestas multi-variación (Normalización)
+   ===================================================================== */
+function parsePredictResponse(data, inputRows) {
+  const connections = [];
+
+  function buildCheck(r, fallback) {
+    if (fallback) return fallback;
+    return {
+      cumple: r.cumple !== undefined ? r.cumple : (r.ratio_pesimo != null ? r.ratio_pesimo <= 1.0 : true),
+      ratio_pesimo: r.ratio_pesimo ?? null,
+      descripcion_ratio_pesimo: r.descripcion_ratio_pesimo || r.chequeo_critico || "",
+      ratios: r.ratios || [],
+      complementarios: r.complementarios || []
+    };
+  }
+
+  // Caso A: Respuesta estructurada con un array de variaciones por cada conexión en rows
+  if (Array.isArray(data.rows) && data.rows.length > 0 && (data.rows[0].variaciones || data.rows[0].escenarios || data.rows[0].variations)) {
+    data.rows.forEach((connObj, i) => {
+      const varList = connObj.variaciones || connObj.escenarios || connObj.variations || [];
+      const normVars = varList.map((v, vI) => {
+        const chk = buildCheck(v, v.check);
+        return {
+          label: v.descripcion || v.nombre || v.tipo || v.variacion || (`Variación ${vI + 1}`),
+          tipo: v.tipo || v.variacion || (`E${vI + 1}`),
+          data: { ...v },
+          raw: v.raw ? { ...v.raw } : { ...v },
+          check: chk,
+          status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
+        };
+      });
+      connections.push({ inputRow: inputRows[i] || {}, activeVarIndex: 0, variations: normVars, marked: false });
+    });
+    return connections;
+  }
+
+  // Caso B: data.rows es una lista plana de 3*N elementos agrupados de 3 en 3 por conexión
+  if (Array.isArray(data.rows) && data.rows.length === inputRows.length * 3) {
+    const defaultLabels = ["E1: Sin cantonera", "E2: Mín. con cantonera", "E3: Máx. con cantonera"];
+    inputRows.forEach((inRow, i) => {
+      const slice = data.rows.slice(i * 3, i * 3 + 3);
+      const checksSlice = Array.isArray(data.checks) ? data.checks.slice(i * 3, i * 3 + 3) : [];
+      const rawsSlice = Array.isArray(data.rows_raw) ? data.rows_raw.slice(i * 3, i * 3 + 3) : [];
+
+      const normVars = slice.map((v, vI) => {
+        const chk = buildCheck(v, checksSlice[vI]);
+        return {
+          label: v.descripcion || v.nombre || v.tipo || defaultLabels[vI] || (`Variación ${vI + 1}`),
+          tipo: v.tipo || v.variacion || (`E${vI + 1}`),
+          data: { ...v },
+          raw: rawsSlice[vI] ? { ...rawsSlice[vI] } : { ...v },
+          check: chk,
+          status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
+        };
+      });
+      connections.push({ inputRow: inRow, activeVarIndex: 0, variations: normVars, marked: false });
+    });
+    return connections;
+  }
+
+  // Caso C: Respuesta del endpoint /scenarios (para 1 conexión)
+  if (Array.isArray(data.escenarios) && data.escenarios.length > 0) {
+    const normVars = data.escenarios.map((v, vI) => {
+      const chk = buildCheck(v, v.check);
+      return {
+        label: v.descripcion || v.nombre || v.tipo || (`Variación ${vI + 1}`),
+        tipo: v.tipo || (`E${vI + 1}`),
+        data: { ...v },
+        raw: v.raw ? { ...v.raw } : { ...v },
+        check: chk,
+        status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
+      };
+    });
+    connections.push({ inputRow: inputRows[0] || {}, activeVarIndex: 0, variations: normVars, marked: false });
+    return connections;
+  }
+
+  // Caso D: Fallback de 1 variación por cada fila si el modelo devuelve filas simples
+  if (Array.isArray(data.rows)) {
+    data.rows.forEach((r, i) => {
+      const chk = buildCheck(r, Array.isArray(data.checks) ? data.checks[i] : null);
+      const raw = Array.isArray(data.rows_raw) ? data.rows_raw[i] : { ...r };
+      connections.push({
+        inputRow: inputRows[i] || {},
+        activeVarIndex: 0,
+        variations: [
+          {
+            label: r.descripcion || r.tipo || "Diseño Principal",
+            tipo: r.tipo || "D1",
+            data: { ...r },
+            raw: raw,
+            check: chk,
+            status: chk.cumple ? "CUMPLE" : "NO CUMPLE"
+          }
+        ],
+        marked: false
+      });
+    });
+    return connections;
+  }
+
+  return connections;
+}
+
+/* =====================================================================
    Acciones principales
    ===================================================================== */
 $("add").onclick = () => {
@@ -871,7 +1079,7 @@ $("add").onclick = () => {
 };
 $("reset").onclick = renderForm;
 $("clear").onclick = () => {
-  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = []; _checkTokens = {};
+  state.rows = []; state.results = []; _checkTokens = {};
   renderTable(); renderResults(); setStatus("", "");
 };
 
@@ -879,26 +1087,56 @@ $("send").onclick = async () => {
   const btn = $("send");
   btn.disabled = true; setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones…");
   try {
+    const model = $("model").value;
+
+    // Intentamos predecir directamente
     const r = await fetch("/predict", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: $("model").value, rows: state.rows }),
+      body: JSON.stringify({ model: model, rows: state.rows }),
     });
     const data = await r.json().catch(() => ({}));
+
     if (!r.ok){
       let detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data, null, 2);
       setStatus("bad", `Error ${r.status}`, detail);
     } else {
-      state.results = data.rows || [];
+      let parsedConns = parsePredictResponse(data, state.rows);
+
+      // Si /predict solo devolvió 1 variación por conexión y existe el endpoint /scenarios,
+      // solicitamos las 3 variaciones por cada conexión
+      if (parsedConns.length > 0 && parsedConns[0].variations.length === 1) {
+        setStatus("", "Calculando 3 variaciones para cada conexión…");
+        const scenariosConns = [];
+        for (let i = 0; i < state.rows.length; i++) {
+          try {
+            const scRes = await fetch("/scenarios", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ model: model, row: state.rows[i] })
+            });
+            if (scRes.ok) {
+              const scData = await scRes.json();
+              const scParsed = parsePredictResponse(scData, [state.rows[i]]);
+              if (scParsed.length > 0 && scParsed[0].variations.length >= 3) {
+                scenariosConns.push(scParsed[0]);
+                continue;
+              }
+            }
+          } catch(e){}
+          scenariosConns.push(parsedConns[i]);
+        }
+        if (scenariosConns.length === state.rows.length) {
+          parsedConns = scenariosConns;
+        }
+      }
+
+      state.results = parsedConns;
       _checkTokens = {};
-      state.resultsRaw = Array.isArray(data.rows_raw) ? data.rows_raw : [];
-      state.checked = [];
-      state.marked = state.results.map(() => false);
-      state.status = state.results.map(() => "");
       renderResults();
-      const pre = `Predicción completada: ${state.results.length} uniones. `;
-      if (Array.isArray(data.checks) && data.checks.length === state.results.length) applyChecks(data.checks, pre);
-      else await runCheck(pre);
+
+      const totalVars = state.results.reduce((acc, c) => acc + c.variations.length, 0);
+      setStatus("ok", `Predicción completada: ${state.results.length} conexiones (${totalVars} variaciones obtenidas). Pulsa 👁 para ver en 2D.`);
     }
   } catch (e){
     setStatus("bad", "Error de conexión", e.message);
@@ -906,51 +1144,42 @@ $("send").onclick = async () => {
   btn.disabled = !state.rows.length;
 };
 
-function applyChecks(rows, prefix = ""){
-  state.checked = rows;
-  state.status = state.results.map((_, i) => (rows[i] && rows[i].cumple) ? "CUMPLE" : "NO CUMPLE");
-  renderResults();
-  setStatus("ok", prefix + "Comprobación AISC 360-10 finalizada. Pulsa 👁 en cualquier fila para ver el desglose o editar la geometría.");
-}
-
-async function runCheck(prefix = ""){
-  setStatus("", prefix + "Comprobando " + state.results.length + " uniones con AISC 360-10…");
-  try {
-    const r = await fetch("/check", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: state.results }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok){ setStatus("bad", `Error al comprobar (${r.status})`, JSON.stringify(data, null, 2)); }
-    else { applyChecks(data.rows || [], prefix); }
-  } catch (e){ setStatus("bad", "Error enviando la comprobación", e.message); }
-
-};
-
 /* =====================================================================
-   Marcado y Dataset
+   Marcado y Envío al Dataset de Reentreno
    ===================================================================== */
 $("markValid").onclick = () => {
-  state.marked = state.marked.map((m, i) => m || state.status[i] === "CUMPLE");
+  state.results.forEach(conn => {
+    const activeVar = conn.variations[conn.activeVarIndex];
+    if (activeVar && activeVar.status === "CUMPLE") conn.marked = true;
+  });
   renderResults();
 };
+
 $("sendMarked").onclick = async () => {
-  const rows = state.results.filter((_, i) => state.marked[i]);
-  if (!rows.length){ setStatus("bad", "No hay conexiones marcadas."); return; }
-  if (!confirm("¿Enviar " + rows.length + " conexiones marcadas al dataset de reentreno?")) return;
+  const rowsToSend = [];
+  state.results.forEach(conn => {
+    if (conn.marked) {
+      const activeVar = conn.variations[conn.activeVarIndex];
+      if (activeVar) rowsToSend.push(activeVar.data);
+    }
+  });
+
+  if (!rowsToSend.length){ setStatus("bad", "No hay conexiones marcadas."); return; }
+  if (!confirm("¿Enviar " + rowsToSend.length + " variaciones marcadas al dataset de reentreno?")) return;
 
   const btn = $("sendMarked"); btn.disabled = true;
-  setStatus("", "Enviando " + rows.length + " conexiones…");
+  setStatus("", "Enviando " + rowsToSend.length + " conexiones…");
   try {
     const r = await fetch("/dataset/append", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
+      body: JSON.stringify({ rows: rowsToSend }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok){ setStatus("bad", `Error (${r.status})`, JSON.stringify(data)); }
-    else { setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas. Pendientes para reentreno: ${data.retrain.pending}/${data.retrain.threshold}` + (data.retrain_started ? " · reentreno iniciado" : ""), data.rejected.length ? "Rechazadas:\n" + data.rejected.join("\n") : ""); }
+    else {
+      setStatus("ok", `Guardadas: ${data.added} nuevas, ${data.updated} actualizadas. Pendientes reentreno: ${data.retrain?.pending ?? 0}/${data.retrain?.threshold ?? 0}` + (data.retrain_started ? " · reentreno iniciado" : ""), data.rejected?.length ? "Rechazadas:\n" + data.rejected.join("\n") : "");
+    }
   } catch (e){ setStatus("bad", "Error de conexión", e.message); }
   updateSendMarked();
 };
@@ -981,7 +1210,7 @@ async function loadSchema(){
 }
 
 $("model").onchange = () => {
-  state.rows = []; state.results = []; state.resultsRaw = []; state.checked = []; state.marked = []; state.status = []; _checkTokens = {};
+  state.rows = []; state.results = []; _checkTokens = {};
   renderTable(); renderResults(); loadSchema();
 };
 

@@ -55,7 +55,7 @@
 
   <section id="resSec" style="display:none">
     <h2 class="sec-head">
-      <span>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· editable</small></span>
+      <span>Resultados del servidor <small style="font-weight:400;color:var(--tr-muted)">· 3 variaciones por conexión · editable</small></span>
       <button class="hbtn" id="exportResultsExcel" title="Descargar resultados en Excel">
         <img src="./static/download.svg" width="16" height="16" alt="Descargar" style="display: block;">
       </button>    
@@ -81,6 +81,13 @@
       <button class="btn green" id="viewerSave" disabled>Guardar</button>
     </div>
   </div>
+
+  <!-- Barra de pestañas para las 3 variaciones en la visualización 2D -->
+  <div id="viewerTabStrip" class="viewer-tab-strip">
+    <span class="vstrip-label">Variaciones del diseño:</span>
+    <div id="viewerTabs" class="vstrip-tabs"></div>
+  </div>
+
   <div class="viewer-body">
     <aside class="viewer-panel" id="viewerPanel"></aside>
     <div class="viewer-views">

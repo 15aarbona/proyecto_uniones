@@ -9,7 +9,7 @@ Cada modelo expone su `input_schema()` y su diseno en claves canonicas. El servi
 
 import logging
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -121,7 +121,17 @@ def predict_full(model_name: str, rows: List[Dict[str, Any]]):
     return _predict(model_name, rows, with_checks=True)
 
 
-def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
+def predict_detailed(model_name: str, rows: List[Dict[str, Any]], maximize_load: bool = False):
+    """Para los escenarios de carga. Por fila: {"row", "check", "raw", "n_cantonera"}.
+    `maximize_load=False`: NO se reescriben las cargas de entrada (ver escenarios.py)."""
+    detail: List[Dict[str, Any]] = []
+    output, checks, raw = _predict(model_name, rows, True, maximize_load=maximize_load, detail=detail)
+    return [{"row": o, "check": c, "raw": r, "n_cantonera": d["n_cantonera"]}
+            for o, c, r, d in zip(output, checks, raw, detail)]
+
+
+def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool,
+             maximize_load: Optional[bool] = None, detail: Optional[list] = None):
     bundle = model_registry.get(model_name)
     adapter = bundle["adapter"]
     contract = bundle["contract"]
@@ -144,6 +154,11 @@ def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
     for i in range(len(df)):
         input_row = features.iloc[i].to_dict()
         design_row = design.iloc[i].to_dict()
+        if detail is not None:
+            try:
+                detail.append({"n_cantonera": int(round(float(design_row.get("n_cantonera") or 0)))})
+            except (TypeError, ValueError):
+                detail.append({"n_cantonera": 0})
         # Prediccion RAW: sin ajustes de chapa/cantonera ni pfi (para comparar en el visor).
         try:
             raw_partial = codame.to_codame(input_row, design_row, apply_adjustments=False)
@@ -168,7 +183,7 @@ def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
         coded.append(fill_missing(partial))
 
     # Ajuste de placas/cargas (+ comprobacion final): una union por proceso (ver refinar.py).
-    refined = refinar.refine_many(coded, with_check=with_checks)
+    refined = refinar.refine_many(coded, with_check=with_checks, maximize_load=maximize_load)
 
     output: List[Dict[str, Any]] = []
     checks: List[Dict[str, Any]] = []
