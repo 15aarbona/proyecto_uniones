@@ -29,6 +29,18 @@ CHECK_TIMEOUT_S = float(os.environ.get("AI_CHECK_TIMEOUT_S", "120"))
 REFINE_TIMEOUT_S = float(os.environ.get("AI_REFINE_TIMEOUT_S", "90"))
 REFINE_BACKEND = os.environ.get("AI_REFINE_BACKEND", "process").strip().lower()
 
+# Batching dinamico de inferencia (una sola copia del modelo, un worker de GPU).
+# Se agrupan peticiones concurrentes hasta AI_BATCH_MAX_ROWS o durante
+# AI_BATCH_MAX_WAIT_MS, lo que ocurra primero.
+BATCH_MAX_ROWS = max(1, int(os.environ.get("AI_BATCH_MAX_ROWS", "64")))
+BATCH_MAX_WAIT_MS = max(0, int(os.environ.get("AI_BATCH_MAX_WAIT_MS", "10")))
+INFERENCE_TIMEOUT_S = float(os.environ.get("AI_INFERENCE_TIMEOUT_S", "60"))
+
+# Escenarios: cola ilimitada con N orquestadores. El timeout es por escenario ya
+# iniciado; el reparto de inferencia lo hace el batcher y el refinado el pool.
+SCENARIO_WORKERS = max(1, int(os.environ.get("AI_SCENARIO_WORKERS", "4")))
+SCENARIO_TIMEOUT_S = float(os.environ.get("AI_SCENARIO_TIMEOUT_S", "600"))
+
 # Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
 # se sirve fuera de la red interna.
 # Para abrir el HTML con doble clic (file://) añadir "null" solo para pruebas.

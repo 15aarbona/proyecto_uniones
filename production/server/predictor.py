@@ -10,12 +10,15 @@ Cada modelo expone su `input_schema()` y su diseno en claves canonicas. El servi
 import logging
 import math
 import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
+import batcher
 import codame
+import config
 import model_registry
 import refinar
 from codame_schema import CODAME_COLUMNS, fill_missing
@@ -23,10 +26,45 @@ from checker import check_rows as perform_check
 
 log = logging.getLogger("ai-server")
 
-# La inferencia (torch) y la carga de modelos comparten estado global; se serializan
-# para que MCP y REST no ejecuten el mismo modelo a la vez. El trabajo pesado se hace
-# fuera del event loop (ver runner en main.py).
+# La carga del modelo y el preproceso comparten estado global (model_registry purga
+# `sys.modules["core"]`). La inferencia en si la serializa el batcher dinamico, que
+# agrupa peticiones concurrentes en un unico forward.
 _PREDICT_LOCK = threading.Lock()
+_BATCHER_LOCK = threading.Lock()
+_INFERENCE_BATCHER: Optional[batcher.InferenceBatcher] = None
+
+
+def start_inference(max_rows: Optional[int] = None, max_wait_ms: Optional[int] = None) -> None:
+    """Arranca el worker de inferencia (idempotente)."""
+    global _INFERENCE_BATCHER
+    with _BATCHER_LOCK:
+        if _INFERENCE_BATCHER is not None:
+            return
+        _INFERENCE_BATCHER = batcher.InferenceBatcher(
+            max_rows=config.BATCH_MAX_ROWS if max_rows is None else max_rows,
+            max_wait_ms=config.BATCH_MAX_WAIT_MS if max_wait_ms is None else max_wait_ms,
+        )
+        _INFERENCE_BATCHER.start()
+        log.info(
+            "batcher: iniciado (max_rows=%d, max_wait_ms=%d)",
+            _INFERENCE_BATCHER.max_rows, _INFERENCE_BATCHER.max_wait_ms,
+        )
+
+
+def shutdown_inference() -> None:
+    global _INFERENCE_BATCHER
+    with _BATCHER_LOCK:
+        if _INFERENCE_BATCHER is not None:
+            log.info("batcher: cerrando")
+            _INFERENCE_BATCHER.close()
+            _INFERENCE_BATCHER = None
+
+
+def _get_batcher() -> batcher.InferenceBatcher:
+    if _INFERENCE_BATCHER is None:
+        start_inference()
+    assert _INFERENCE_BATCHER is not None
+    return _INFERENCE_BATCHER
 
 
 class InputContractError(ValueError):
@@ -138,22 +176,36 @@ def predict_detailed(model_name: str, rows: List[Dict[str, Any]], maximize_load:
 
 def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool,
              maximize_load: Optional[bool] = None, detail: Optional[list] = None):
-    bundle = model_registry.get(model_name)
-    adapter = bundle["adapter"]
-    contract = bundle["contract"]
-    raw_inputs = contract["raw_inputs"]
-    optional_inputs = contract.get("optional_inputs", [])
-    name = bundle["name"]
+    # Solo se serializa la carga/preproceso: la inferencia la agrupa el batcher y el
+    # refinado (la parte cara) queda fuera del lock.
+    with _PREDICT_LOCK:
+        bundle = model_registry.get(model_name)
+        adapter = bundle["adapter"]
+        contract = bundle["contract"]
+        raw_inputs = contract["raw_inputs"]
+        optional_inputs = contract.get("optional_inputs", [])
+        name = bundle["name"]
 
-    rows = _normalize_rows(rows, raw_inputs, optional_inputs)
-    _validate_contract(rows, raw_inputs, optional_inputs, name)
+        rows = _normalize_rows(rows, raw_inputs, optional_inputs)
+        _validate_contract(rows, raw_inputs, optional_inputs, name)
 
-    df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        try:
+            features = adapter.to_internal(df)
+        except adapter.InputContractError as exc:
+            raise InputContractError(str(exc), model=name, expected=raw_inputs) from exc
+
+    timeout = config.INFERENCE_TIMEOUT_S if config.INFERENCE_TIMEOUT_S > 0 else None
+    future = _get_batcher().submit(bundle, features)
     try:
-        features = adapter.to_internal(df)
-        design = adapter.predict(features, bundle)
+        design = future.result(timeout=timeout)
     except adapter.InputContractError as exc:
         raise InputContractError(str(exc), model=name, expected=raw_inputs) from exc
+    except FutureTimeoutError:
+        future.cancel()
+        raise TimeoutError(
+            f"inferencia: tiempo de espera agotado ({config.INFERENCE_TIMEOUT_S:.0f}s)"
+        ) from None
 
     coded: List[Dict[str, Any]] = []
     raw: List[Dict[str, Any]] = []

@@ -13,6 +13,7 @@ Endpoints:
   GET  /profiles?names=...      Geometria de secciones (para el visualizador 2D)
   POST /model/activate          Carga/recarga un modelo por nombre
   POST /predict                 {"model": "...", "rows": [...]} -> columnas CODAME + comprobacion ("checks")
+  POST /scenarios               {"row": {...}} -> E1/E2/E3 subiendo cargas (parcial si se agota el tiempo)
   POST /check                   Comprobacion AISC 360-10 sobre filas CODAME
   POST /validate                Guarda filas validadas (sin reentreno)
   GET  /dataset/summary         Resumen del dataset acumulado
@@ -27,7 +28,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -78,19 +79,24 @@ class _Runner:
     terminar y se descarta).
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, max_workers: int = 1) -> None:
         self._name = name
+        self._max_workers = max(1, int(max_workers))
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=name)
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_workers, thread_name_prefix=name
+        )
 
-    def submit(self, fn, *args):
+    def submit(self, fn, *args, **kwargs):
         with self._lock:
-            return self._executor.submit(fn, *args)
+            return self._executor.submit(fn, *args, **kwargs)
 
     def reset(self) -> None:
         with self._lock:
             self._executor.shutdown(wait=False, cancel_futures=True)
-            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=self._name)
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._max_workers, thread_name_prefix=self._name
+            )
 
     def shutdown(self) -> None:
         with self._lock:
@@ -99,11 +105,20 @@ class _Runner:
 
 _PREDICT_RUNNER = _Runner("mcp-predict")
 _CHECK_RUNNER = _Runner("mcp-check")
+# Cola ilimitada de escenarios; el limite real lo ponen los workers y el batcher.
+_SCENARIO_RUNNER = _Runner("scenarios", max_workers=config.SCENARIO_WORKERS)
 
 
-async def _run_sync(runner: _Runner, fn, args: tuple, timeout: float, label: str):
-    """Ejecuta `fn(*args)` fuera del event loop con timeout y reinicio del runner."""
-    future = runner.submit(fn, *args)
+async def _run_sync(runner: _Runner, fn, args: tuple, timeout: Optional[float],
+                    label: str, kwargs: Optional[Dict[str, Any]] = None):
+    """Ejecuta `fn(*args, **kwargs)` fuera del event loop.
+
+    Con `timeout=None` espera sin limite (los escenarios usan su propio deadline
+    cooperativo, que empieza cuando el workitem arranca, no cuando entra en cola).
+    """
+    future = runner.submit(fn, *args, **(kwargs or {}))
+    if timeout is None:
+        return await asyncio.wrap_future(future)
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
     except asyncio.TimeoutError:
@@ -234,8 +249,21 @@ async def disenar_escenarios_carga(
     """
     name = model or config.MODEL_NAME
     log.info("[MCP] escenarios: modelo=%s", name)
-    result = await asyncio.to_thread(
-        escenarios.run, name, row, incremento=incremento, max_pasos=max_pasos
+    result = await _run_sync(
+        _SCENARIO_RUNNER,
+        escenarios.run,
+        (name, row),
+        None,
+        "disenar_escenarios_carga",
+        {
+            "incremento": incremento,
+            "max_pasos": max_pasos,
+            "timeout_s": config.SCENARIO_TIMEOUT_S,
+        },
+    )
+    log.info(
+        "[MCP] escenarios: %s (parcial=%s, %.1fs)",
+        result.get("parada"), result.get("parcial"), result.get("tiempo_s", 0.0),
     )
     return {"model_name": name, **result}
 
@@ -245,14 +273,21 @@ async def disenar_escenarios_carga(
 # =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Carga de modelos, pool de refinado e inicio del watcher de reentreno
+    # Carga de modelos, batcher de inferencia, pool de refinado y watcher de reentreno
     try:
         model_registry.activate_configured()
-        refinar.start_backend()
-        retrain_manager.start_watcher()
         log.info("Modelos cargados: %s", model_registry.loaded_models())
     except Exception as exc:  # noqa: BLE001
         log.error("No se pudo cargar ningun modelo: %s", exc)
+    try:
+        predictor.start_inference()
+    except Exception:  # noqa: BLE001
+        log.exception("No se pudo iniciar el batcher de inferencia")
+    try:
+        refinar.start_backend()
+        retrain_manager.start_watcher()
+    except Exception as exc:  # noqa: BLE001
+        log.error("No se pudo iniciar el refinado/reentreno: %s", exc)
 
     try:
         # Administrador de sesión de MCP sobre HTTP/SSE
@@ -260,6 +295,11 @@ async def lifespan(app: FastAPI):
             await stack.enter_async_context(mcp.session_manager.run())
             yield
     finally:
+        _SCENARIO_RUNNER.shutdown()
+        try:
+            predictor.shutdown_inference()
+        except Exception:  # noqa: BLE001
+            log.exception("Error cerrando el batcher de inferencia")
         try:
             refinar.shutdown_backend()
         except Exception:  # noqa: BLE001
@@ -500,13 +540,22 @@ class ScenarioIn(BaseModel):
     summary="Predice una fila y busca 3 disenos subiendo las cargas",
     response_description="Tabla E1 (max. sin cantonera), E2 (primera con cantonera), E3 (max. con cantonera).",
 )
-def scenarios(payload: ScenarioIn):
+async def scenarios(payload: ScenarioIn):
     name = payload.model or config.MODEL_NAME
     log.info("/scenarios: modelo=%s", name)
     try:
-        result = escenarios.run(
-            name, payload.row, incremento=payload.incremento, max_pasos=payload.max_pasos,
-            max_fallos_seguidos=payload.max_fallos_seguidos,
+        result = await _run_sync(
+            _SCENARIO_RUNNER,
+            escenarios.run,
+            (name, payload.row),
+            None,
+            "scenarios",
+            {
+                "incremento": payload.incremento,
+                "max_pasos": payload.max_pasos,
+                "max_fallos_seguidos": payload.max_fallos_seguidos,
+                "timeout_s": config.SCENARIO_TIMEOUT_S,
+            },
         )
     except predictor.InputContractError:
         raise
@@ -517,6 +566,10 @@ def scenarios(payload: ScenarioIn):
     except Exception as exc:  # noqa: BLE001
         log.exception("Error generando escenarios")
         raise HTTPException(status_code=500, detail=f"Error en escenarios: {exc}")
+    log.info(
+        "/scenarios: %s (parcial=%s, %.1fs)",
+        result.get("parada"), result.get("parcial"), result.get("tiempo_s", 0.0),
+    )
     return {"model_name": name, **result}
 
 

@@ -85,6 +85,13 @@ def _load_one(name: str) -> dict:
                 "contract": adapter.contract(),
             }
         )
+        device = bundle.get("device")
+        if device is None:
+            log.info("Modelo %s cargado (dispositivo no especificado)", name)
+        else:
+            kind = getattr(device, "type", str(device)).lower()
+            where = "GPU" if kind == "cuda" else "CPU"
+            log.info("Modelo %s cargado en %s (%s)", name, where, device)
         _BUNDLES[name] = bundle
         return bundle
 
