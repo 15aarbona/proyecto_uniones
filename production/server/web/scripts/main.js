@@ -10,6 +10,38 @@ let _checkTokens = {};
 const escHtml = v => String(v == null ? "" : v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 const escAttr = v => escHtml(v).replace(/"/g,"&quot;");
 
+/* Evaluador unificado de cumplimiento (Ratios + Comprobaciones Geométricas) */
+function evaluateCumple(chk) {
+  if (!chk) return false;
+  let ok = chk.cumple !== undefined ? Boolean(chk.cumple) : true;
+
+  if (chk.ratio_pesimo != null) {
+    const rp = Number(chk.ratio_pesimo);
+    if (!isNaN(rp) && rp > 1.0) ok = false;
+  }
+
+  if (Array.isArray(chk.ratios)) {
+    for (const r of chk.ratios) {
+      if (r.ratio != null && Number(r.ratio) > 1.0) {
+        ok = false;
+        break;
+      }
+    }
+  }
+
+  if (Array.isArray(chk.complementarios)) {
+    for (const c of chk.complementarios) {
+      const resStr = String(c.resultado || "").toLowerCase();
+      if (resStr.includes("no cumple") || resStr.includes("fail") || resStr.includes("error") || c.cumple === false) {
+        ok = false;
+        break;
+      }
+    }
+  }
+
+  return ok;
+}
+
 /* Helper seguro para obtener variaciones de una conexión */
 function getConnVariations(connIdx) {
   const conn = state.results[connIdx];
@@ -19,15 +51,17 @@ function getConnVariations(connIdx) {
   }
   const r = conn.data || conn;
   const lbl = r.Escenario || r.escenario || r.descripcion || "Diseño Principal";
+  const chk = conn.check || null;
+  const isOk = evaluateCumple(chk);
   return [{
     label: lbl,
     tipo: "E1",
     data: r,
     adjusted: { ...r },
     raw: conn.raw || r,
-    check: conn.check || null,
-    adjustedCheck: conn.check ? JSON.parse(JSON.stringify(conn.check)) : null,
-    status: conn.status || (conn.check?.cumple ? "CUMPLE" : "NO CUMPLE"),
+    check: chk,
+    adjustedCheck: chk ? JSON.parse(JSON.stringify(chk)) : null,
+    status: conn.status || (isOk ? "CUMPLE" : "NO CUMPLE"),
     accepted: false
   }];
 }
@@ -154,9 +188,9 @@ $("excelFileInput").onchange = (e) => {
    ===================================================================== */
 function table(rows, cols, withDelete){
   if (!rows.length) return `<div class="empty">Todavía no hay combinaciones. Rellena el formulario o carga un Excel.</div>`;
-  const head = cols.map(c => `<th>${escHtml(c)}</th>`).join("") + (withDelete ? "<th></th>" : "");
+  const head = cols.map(c => `<th>${escHtml(colName(c))}</th>`).join("") + (withDelete ? "<th></th>" : "");
   const body = rows.map((r, i) =>
-    "<tr>" + cols.map(c => `<td>${escHtml(r[c] ?? "")}</td>`).join("") +
+    "<tr>" + cols.map(c => `<td>${escHtml(cellVal(r, colName(c)))}</td>`).join("") +
     (withDelete ? `<td class="x"><button data-del="${i}" title="Quitar fila">✕</button></td>` : "") + "</tr>"
   ).join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
@@ -191,7 +225,16 @@ function renderResults(){
 
     const cardsHtml = `<div class="var-cards-wrap">` +
       vars.map((v, vI) => {
-        const st = v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE");
+        if (v.unavailable) {
+          return `
+          <div class="var-card-item unavailable" title="${escAttr(v.motivo)}">
+            <span class="var-name">${escHtml(v.label)}</span>
+            <span class="badge mod">${escHtml(v.status)}</span>
+            <small class="var-note">${escHtml(v.motivo)}</small>
+          </div>`;
+        }
+        const isCumple = evaluateCumple(v.check);
+        const st = v.status || (isCumple ? "CUMPLE" : "NO CUMPLE");
         const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
         const isChecked = !!v.accepted;
 
@@ -239,6 +282,22 @@ function renderResults(){
 /* =====================================================================
    Renderizado de la Pantalla Inicial (Sección 2: Variantes Aceptadas)
    ===================================================================== */
+const colName = c => (typeof c === "string") ? c : String((c && (c.key || c.name || c.label)) || "");
+
+/* Valor de celda legible: busca la columna sin distinguir mayúsculas, redondea decimales */
+function cellVal(r, c){
+  let v = r[c];
+  if (v === undefined) {
+    const k = Object.keys(r).find(x => x.toLowerCase() === String(c).toLowerCase());
+    if (k !== undefined) v = r[k];
+  }
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "number") return Number.isInteger(v) ? v : Math.round(v * 1000) / 1000;
+  if (typeof v === "boolean") return v ? "Sí" : "No";
+  if (typeof v === "object") return JSON.stringify(v);
+  return v;
+}
+
 function renderAcceptedTable(){
   const acceptedList = [];
 
@@ -246,6 +305,7 @@ function renderAcceptedTable(){
     const vars = getConnVariations(connIdx);
     vars.forEach((v, vIdx) => {
       if (v.accepted) {
+        const isCumple = evaluateCumple(v.check);
         acceptedList.push({
           connIdx,
           varIdx: vIdx,
@@ -253,7 +313,7 @@ function renderAcceptedTable(){
           label: v.label,
           data: v.data,
           check: v.check,
-          status: v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE")
+          status: v.status || (isCumple ? "CUMPLE" : "NO CUMPLE")
         });
       }
     });
@@ -276,10 +336,10 @@ function renderAcceptedTable(){
   }
 
   const sampleData = acceptedList[0].data;
-  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : Object.keys(sampleData).filter(k => k !== "raw" && k !== "check" && k !== "adjusted" && k !== "adjustedCheck");
+  const cols = SCHEMA.result_columns.length ? SCHEMA.result_columns : Object.keys(sampleData).filter(k => !["raw", "adjusted", "adjustedCheck", "check"].includes(k));
 
   const head = `<th>Visualizar</th><th>Variante Aceptada</th>` +
-    cols.map(c => `<th>${escHtml(c)}</th>`).join("") +
+    cols.map(c => `<th>${escHtml(colName(c))}</th>`).join("") +
     `<th>Comprobación AISC</th><th>Quitar</th>`;
 
   const body = acceptedList.map((item) => {
@@ -290,7 +350,7 @@ function renderAcceptedTable(){
     return `<tr>` +
       `<td><button class="vbtn" data-view-conn="${item.connIdx}" data-view-var="${item.varIdx}" title="Ver en 2D">👁</button></td>` +
       `<td><b style="color:var(--tr-navy);">${escHtml(item.label)}</b></td>` +
-      cols.map(c => `<td>${escHtml(r[c] ?? "")}</td>`).join("") +
+      cols.map(c => `<td>${escHtml(cellVal(r, colName(c)))}</td>`).join("") +
       `<td class="st ${stCls}">${escHtml(st)}</td>` +
       `<td class="x"><button class="discard-btn" data-conn="${item.connIdx}" data-var="${item.varIdx}" title="Quitar de aceptadas">✕</button></td>` +
     `</tr>`;
@@ -332,11 +392,12 @@ $("exportCheckExcel").onclick = () => {
   const exportRows = [];
   acceptedList.forEach(({ connIdx, vIdx, v }) => {
     const chk = v.check || {};
+    const isCumple = evaluateCumple(chk);
     const rowObj = {
       "Conexión #": connIdx + 1,
       "Variación": v.label || (`Variación ${vIdx + 1}`),
       "UNICODE": v.data.Unicode || v.data.UNICODE || (connIdx + 1),
-      "Estado Global": v.status || (chk.cumple ? "CUMPLE" : "NO CUMPLE"),
+      "Estado Global": v.status || (isCumple ? "CUMPLE" : "NO CUMPLE"),
       "Ratio Pésimo": chk.ratio_pesimo ?? "",
       "Chequeo Crítico": chk.descripcion_ratio_pesimo || ""
     };
@@ -395,47 +456,87 @@ function setStatus(kind, text, detail){
 }
 
 /* =====================================================================
-   Visualizador 2D
+   Visualizador 2D con Categorización de Parámetros Completa
    ===================================================================== */
 const PROFILE_CACHE = {};
 let VIEW = null;
 
 const P_KEYS = ["p3","p4","p5","p6","p7","p8","p9","p10","p11","p12"];
-const VIEW_FIELDS = [
-  {sec:"Chapa frontal"}, 
-  {k:"b_ep", label:"Bp · ancho chapa", type:"num"},
-  {k:"ThicknessName_t_ep", label:"tp · espesor chapa", type:"mm"},
-  {k:"Lh", label:"Lh · largo cartela", type:"num"},
-  {sec:"Tornillería"},
-  {k:"p2_ep", label:"g · gramil (horizontal)", type:"num"},
-  {k:"dev", label:"e · borde → 1ª fila", type:"num"},
-  {k:"pfo", label:"pfo · 1ª fila → ala sup. viga", type:"num"},
-  {k:"pfi", label:"pfi · ala sup. → 2ª fila", type:"num"},
-  {k:"pb", label:"p2 · 2ª → 3ª fila", type:"num"},
-];
-P_KEYS.forEach(k => VIEW_FIELDS.push({k, label:k, type:"num"}));
-VIEW_FIELDS.push(
-  {sec:"Rigidizadores"},
-  {k:"ThicknessName_t_webstiff", label:"tws · rigid. alma pilar", type:"mm"},
-  {k:"Bws", label:"Bws · ancho placa alma", type:"num"},
-  {k:"Lws", label:"Lws · alto placa alma", type:"num"},
-  {k:"ThicknessName_t_compstiff", label:"ts · rigid. compresión pilar", type:"mm"},
-  {k:"ThicknessName_t_BeamHcompstiff", label:"tbs · rigid. alma viga", type:"mm"},
-  {k:"ThicknessName_t_tenstiff", label:"tst · rigid. tracción pilar", type:"mm"},
-);
 
-const SEC_FIELDS = [
-  {sec:"Sección viga (catálogo)"},
-  {k:"beam_d", label:"d_viga · canto"},
-  {k:"beam_bf", label:"bf_viga · ancho ala"},
-  {k:"beam_tw", label:"tw_viga · alma"},
-  {k:"beam_tf", label:"tf_viga · ala"},
-  {sec:"Sección pilar (catálogo)"},
-  {k:"col_d", label:"d_pilar · canto"},
-  {k:"col_bf", label:"bf_pilar · ancho ala"},
-  {k:"col_tw", label:"tw_pilar · alma"},
-  {k:"col_tf", label:"tf_pilar · ala"},
+const VIEW_GROUPS_DEF = [
+  {
+    title: "1. Elementos y Materiales",
+    fields: [
+      { label: "Perfil Viga (BEAM)", aliases: ["BEAM", "beam", "Viga"], type: "text" },
+      { label: "Perfil Pilar (COLUMN)", aliases: ["COLUMN", "column", "Pilar"], type: "text" },
+      { label: "Diámetro Tornillo", aliases: ["BoltName_ep", "boltname_ep", "BoltName"], type: "text" },
+      { label: "Clase de Tornillo", aliases: ["BoltGrade", "boltgrade", "Grade"], type: "text" },
+    ]
+  },
+  {
+    title: "2. Chapa Frontal y Cantonera",
+    fields: [
+      { label: "Bp · Ancho de chapa", aliases: ["b_ep", "Bp", "bp"], type: "mm" },
+      { label: "tp · Espesor de chapa", aliases: ["ThicknessName_t_ep", "t_ep", "tp"], type: "mm" },
+      { label: "Lh · Longitud cantonera/cartela", aliases: ["Lh", "lh"], type: "mm" },
+    ]
+  },
+  {
+    title: "3. Distribución de Tornillería",
+    fields: [
+      { label: "g · Gramil horizontal", aliases: ["p2_ep", "g", "gramil"], type: "mm" },
+      { label: "e · Borde sup. a 1ª fila", aliases: ["dev", "e", "borde"], type: "mm" },
+      { label: "pfo · 1ª fila a ala sup. viga", aliases: ["pfo"], type: "mm" },
+      { label: "pfi · Ala sup. a 2ª fila", aliases: ["pfi"], type: "mm" },
+      { label: "p2 · Separación 2ª a 3ª fila", aliases: ["pb", "p2"], type: "mm" },
+      ...P_KEYS.map(k => ({ label: `${k} · Separación de fila`, aliases: [k], type: "mm" }))
+    ]
+  },
+  {
+    title: "4. Rigidizadores y Refuerzos",
+    fields: [
+      { label: "tst · Rigid. tracción pilar", aliases: ["ThicknessName_t_tenstiff", "t_tenstiff", "tst"], type: "mm" },
+      { label: "ts · Rigid. compresión pilar", aliases: ["ThicknessName_t_compstiff", "t_compstiff", "ts"], type: "mm" },
+      { label: "tws · Placa de alma pilar", aliases: ["ThicknessName_t_webstiff", "t_webstiff", "tws"], type: "mm" },
+      { label: "Bws · Ancho placa alma", aliases: ["Bws", "bws"], type: "mm" },
+      { label: "Lws · Alto placa alma", aliases: ["Lws", "lws"], type: "mm" },
+      { label: "tbs · Rigid. alma viga", aliases: ["ThicknessName_t_BeamHcompstiff", "t_BeamHcompstiff", "tbs"], type: "mm" },
+    ]
+  },
+  {
+    title: "5. Solicitaciones y Cargas",
+    fields: [
+      { label: "Mz · Solicitación momento", aliases: ["ratio_moment", "MzEd_Porcen"], type: "pct" },
+      { label: "Fy · Solicitación cortante", aliases: ["ratio_shear", "FyEd_Porcen"], type: "pct" },
+      { label: "Fx · Solicitación axial", aliases: ["ratio_axial", "FxEd_Porcen"], type: "pct" },
+    ]
+  }
 ];
+
+const SEC_FIELDS_GROUP = {
+  title: "6. Cotas de Secciones (Catálogo)",
+  fields: [
+    { k: "beam_d", label: "d_viga · Canto viga", type: "mm" },
+    { k: "beam_bf", label: "bf_viga · Ancho ala viga", type: "mm" },
+    { k: "beam_tw", label: "tw_viga · Espesor alma viga", type: "mm" },
+    { k: "beam_tf", label: "tf_viga · Espesor ala viga", type: "mm" },
+    { k: "col_d", label: "d_pilar · Canto pilar", type: "mm" },
+    { k: "col_bf", label: "bf_pilar · Ancho ala pilar", type: "mm" },
+    { k: "col_tw", label: "tw_pilar · Espesor alma pilar", type: "mm" },
+    { k: "col_tf", label: "tf_pilar · Espesor ala pilar", type: "mm" },
+  ]
+};
+
+function getFieldInfo(row, aliases) {
+  for (const a of aliases) {
+    for (const k of Object.keys(row)) {
+      if (k.toLowerCase() === a.toLowerCase()) {
+        return { key: k, value: row[k] };
+      }
+    }
+  }
+  return { key: aliases[0], value: "" };
+}
 
 function vNum(v){
   const s = String(v == null ? "" : v).toLowerCase().replace("mm", "").replace(",", ".").trim();
@@ -481,6 +582,7 @@ async function openViewer(connIdx, initialVarIdx = 0){
 
 async function loadViewerVariation(varIdx){
   if (!VIEW) return;
+  clearTimeout(VIEW.checkTimer);
   VIEW.activeVarIndex = varIdx;
   const vars = getConnVariations(VIEW.connIdx);
   const activeVar = vars[varIdx] || vars[0];
@@ -493,18 +595,19 @@ async function loadViewerVariation(varIdx){
   VIEW.row = { ...row };
   VIEW.rowBaseline = { ...row };
   VIEW.check = activeVar.check ? JSON.parse(JSON.stringify(activeVar.check)) : null;
-  VIEW.beam = beam; VIEW.col = col;
-  VIEW.vals = {}; VIEW.sec = {}; VIEW.warn = "";
+  VIEW.checking = false; VIEW.pending = false; VIEW.checkError = ""; VIEW.needRebuild = false;
+  VIEW.beam = beam; VIEW.col = col; VIEW.warn = "";
 
-  VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (row[f.k] ?? ""); });
+  setVals(row);
+  VIEW.baselineVals = JSON.parse(JSON.stringify(VIEW.vals));
+  VIEW.profKey = VIEW.row[VIEW.keyOf["Perfil Viga (BEAM)"]] + "|" + VIEW.row[VIEW.keyOf["Perfil Pilar (COLUMN)"]];
+
   VIEW.sec = {
     beam_d: beam ? beam.d_mm : "", beam_bf: beam ? beam.bf_mm : "",
     beam_tw: beam ? beam.tw_mm : "", beam_tf: beam ? beam.tf_mm : "",
     col_d: col ? col.d_mm : "", col_bf: col ? col.bf_mm : "",
     col_tw: col ? col.tw_mm : "", col_tf: col ? col.tf_mm : "",
   };
-
-  VIEW.baselineVals = JSON.parse(JSON.stringify(VIEW.vals));
 
   const missed = [];
   if (!String(row.BEAM || "").trim()) missed.push("viga (columna BEAM vacía)");
@@ -523,66 +626,60 @@ async function loadViewerVariation(varIdx){
 
 window.switchViewerTab = function(varIdx){
   if (!VIEW || VIEW.activeVarIndex === varIdx) return;
+  const tv = getConnVariations(VIEW.connIdx)[varIdx];
+  if (!tv || tv.unavailable) return;
   if (state.results[VIEW.connIdx]) state.results[VIEW.connIdx].activeVarIndex = varIdx;
   loadViewerVariation(varIdx);
 };
 
-function buildViewerPanel(){
-  const p = $("viewerPanel");
-  let html = "";
-  
+function varListHtml(){
   const vars = getConnVariations(VIEW.connIdx);
-  if (vars.length > 0) {
-    html += `<div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Variaciones del Diseño</div>`;
-    html += `<div style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">` +
-      vars.map((v, idx) => {
-        const isActive = idx === VIEW.activeVarIndex;
-        const st = isActive
-          ? (VIEW.check ? (VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE") : v.status)
-          : (v.status || (v.check?.cumple ? "CUMPLE" : "NO CUMPLE"));
-        const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
-        const btnBg = isActive ? "#002B5C" : "#F2F5F9";
-        const btnColor = isActive ? "#FFFFFF" : "var(--tr-navy)";
-        const border = isActive ? "2px solid #002B5C" : "1px solid var(--tr-line)";
-        const isAccepted = !!v.accepted;
-
+  if (!vars.length) return "";
+  let html = `<div style="font-weight:700; font-size:13px; color:var(--tr-navy); margin-bottom:8px;">Variaciones del Diseño</div>`;
+  html += `<div style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">` +
+    vars.map((v, idx) => {
+      if (v.unavailable) {
         return `
-          <div style="display:flex; align-items:center; gap:8px; background:${btnBg}; border:${border}; border-radius:5px; padding:6px 10px;">
-            <input type="checkbox" id="modal_accept_${idx}" class="modal-var-chk" data-var="${idx}" ${isAccepted ? "checked" : ""} style="width:16px; height:16px; cursor:pointer;" title="Aceptar variante">
-            <button type="button" onclick="switchViewerTab(${idx})" style="
-              flex:1; border:none; background:transparent; color:${btnColor}; cursor:pointer; font-weight:600; font-size:12.5px; text-align:left; padding:2px 0;
-            ">
-              <span>${escHtml(v.label)}</span>
-            </button>
-            <span class="badge ${badgeCls}">${escHtml(st)}</span>
+        <div style="background:#F2F5F9; border:1px dashed var(--tr-line); border-radius:5px; padding:6px 10px; color:var(--tr-muted);" title="${escAttr(v.motivo)}">
+          <div style="display:flex; align-items:center; gap:8px; justify-content:space-between;">
+            <span style="font-weight:600; font-size:12.5px;">${escHtml(v.label)}</span>
+            <span class="badge mod">${escHtml(v.status)}</span>
           </div>
-        `;
-      }).join("") + `</div>`;
-  }
+          <div style="font-size:11.5px; margin-top:4px; line-height:1.35;">${escHtml(v.motivo)}</div>
+        </div>`;
+      }
+      const isActive = idx === VIEW.activeVarIndex;
+      const chk = isActive ? VIEW.check : v.check;
+      let st, badgeCls;
+      if (isActive && VIEW.checking) { st = "COMPROBANDO..."; badgeCls = "mod"; }
+      else if (!chk || (isActive && VIEW.pending)) { st = "SIN COMPROBAR"; badgeCls = "mod"; }
+      else { const ok = evaluateCumple(chk); st = ok ? "CUMPLE" : "NO CUMPLE"; badgeCls = ok ? "ok" : "bad"; }
+      const btnBg = isActive ? "#002B5C" : "#F2F5F9";
+      const btnColor = isActive ? "#FFFFFF" : "var(--tr-navy)";
+      const border = isActive ? "2px solid #002B5C" : "1px solid var(--tr-line)";
+      return `
+        <div style="display:flex; align-items:center; gap:8px; background:${btnBg}; border:${border}; border-radius:5px; padding:6px 10px;">
+          <input type="checkbox" id="modal_accept_${idx}" class="modal-var-chk" data-var="${idx}" ${v.accepted ? "checked" : ""} style="width:16px; height:16px; cursor:pointer;" title="Aceptar variante">
+          <button type="button" onclick="switchViewerTab(${idx})" style="
+            flex:1; border:none; background:transparent; color:${btnColor}; cursor:pointer; font-weight:600; font-size:12.5px; text-align:left; padding:2px 0;
+          ">
+            <span>${escHtml(v.label)}</span>
+          </button>
+          <span class="badge ${badgeCls}">${escHtml(st)}</span>
+        </div>
+      `;
+    }).join("") + `</div>`;
+  return html;
+}
 
-  if (VIEW.warn) html += `<div class="view-warn">${escHtml(VIEW.warn)}</div>`;
-
-  html += `<div id="viewerCheckSection">${checkSectionHtml()}</div>`;
-
-  html += VIEW_FIELDS.map(f => {
-    if (f.sec) return `<div class="view-sec">${escHtml(f.sec)}</div>`;
-    return viewRow(f.label, "data-vkey", f.k, VIEW.vals[f.k], true);
-  }).join("");
-  html += SEC_FIELDS.map(f => {
-    if (f.sec) return `<div class="view-sec">${escHtml(f.sec)}</div>`;
-    return viewRow(f.label, "data-skey", f.k, VIEW.sec[f.k], true, false);
-  }).join("");
-  html += `<div class="view-sec">Derivados</div>` +
-          `<div class="view-row ro"><label>p1 = pfo + tf_viga + pfi</label><div class="mm-wrap"><input id="vP1" readonly><span class="mm-suf">mm</span></div></div>` +
-          `<div class="view-row ro"><label>Lp = 2·e + Σp (alto chapa)</label><div class="mm-wrap"><input id="vLp" readonly><span class="mm-suf">mm</span></div></div>`;
-
-  p.innerHTML = html;
-
+function bindVarChecks(){
+  const p = $("viewerPanel");
+  if (!p || !VIEW) return;
   p.querySelectorAll("input.modal-var-chk").forEach(chk => {
     chk.addEventListener("change", (e) => {
       e.stopPropagation();
-      const vI = +chk.dataset.var;
       const vars = getConnVariations(VIEW.connIdx);
+      const vI = +chk.dataset.var;
       if (vars[vI]) {
         vars[vI].accepted = chk.checked;
         renderResults();
@@ -590,55 +687,139 @@ function buildViewerPanel(){
       }
     });
   });
+}
+
+function renderVarList(){
+  const el = $("viewerVarList");
+  if (!el || !VIEW) return;
+  el.innerHTML = varListHtml();
+  bindVarChecks();
+}
+
+function buildViewerPanel(){
+  const p = $("viewerPanel");
+  if (!p || !VIEW) return;
+  const scroll = p.scrollTop;
+  let html = `<div id="viewerVarList">${varListHtml()}</div>`;
+
+  if (VIEW.warn) html += `<div class="view-warn">${escHtml(VIEW.warn)}</div>`;
+  html += `<div id="viewerCheckSection">${checkSectionHtml()}</div>`;
+
+  VIEW_GROUPS_DEF.forEach(grp => {
+    html += `<div class="view-group"><div class="view-group-title">${escHtml(grp.title)}</div><div class="view-group-body">`;
+    grp.fields.forEach(f => {
+      const key = VIEW.keyOf[f.label];
+      const t = VIEW.types[key] === "pct01" ? "pct" : f.type;
+      html += renderFieldRow(f.label, key, VIEW.vals[key] ?? "", t);
+    });
+    html += `</div></div>`;
+  });
+
+  /* Cotas de Sección */
+  html += `<div class="view-group"><div class="view-group-title">${escHtml(SEC_FIELDS_GROUP.title)}</div><div class="view-group-body">`;
+  SEC_FIELDS_GROUP.fields.forEach(f => {
+    html += renderFieldRow(f.label, f.k, VIEW.sec[f.k] ?? "", "mm", false, "data-skey");
+  });
+  html += `</div></div>`;
+
+  /* Cotación Calculada */
+  html += `
+    <div class="view-group">
+      <div class="view-group-title">Cotación Calculada</div>
+      <div class="view-group-body">
+        <div class="view-row ro">
+          <label>p1 = pfo + tf_viga + pfi</label>
+          <div class="mm-wrap"><input id="vP1" readonly><span class="mm-suf">mm</span></div>
+        </div>
+        <div class="view-row ro">
+          <label>Lp = 2·e + Σp (alto chapa)</label>
+          <div class="mm-wrap"><input id="vLp" readonly><span class="mm-suf">mm</span></div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  /* Otros Parámetros (columnas no agrupadas): también son editables y se comprueban */
+  if (VIEW.extra.length > 0) {
+    html += `<div class="view-group"><div class="view-group-title">7. Otros Parámetros de la Conexión</div><div class="view-group-body">`;
+    VIEW.extra.forEach(k => {
+      const t = VIEW.types[k] === "mm" ? "mm" : (VIEW.types[k] === "text" ? "text" : "num");
+      html += renderFieldRow(k, k, VIEW.vals[k] ?? "", t);
+    });
+    html += `</div></div>`;
+  }
+
+  p.innerHTML = html;
+  p.scrollTop = scroll;
+  bindVarChecks();
 
   p.querySelectorAll("[data-vkey]").forEach(inp => {
-    inp.addEventListener("input", () => onField(inp, VIEW.vals, inp.dataset.vkey));
-    inp.addEventListener("change", () => {
-      onFieldBlur(inp, VIEW.vals, inp.dataset.vkey);
-      checkViewerConnection();
-    });
+    inp.addEventListener("input", () => onField(inp));
+    inp.addEventListener("change", () => { onFieldBlur(inp); checkViewerConnection(); });
   });
+}
+
+function renderFieldRow(label, key, val, type, editable = true, bindAttr = "data-vkey"){
+  const sufHtml = type === "mm" ? `<span class="mm-suf">mm</span>` :
+                  type === "pct" ? `<span class="mm-suf">%</span>` : "";
+  const displayVal = type === "mm" ? mmInput(val) : String(val == null ? "" : val);
+
+  return `
+    <div class="view-row ${editable ? "" : "ro"}">
+      <label>${escHtml(label)}</label>
+      <div class="mm-wrap">
+        <input ${bindAttr}="${escAttr(key)}" value="${escAttr(displayVal)}" ${editable ? "" : "readonly"}>
+        ${sufHtml}
+      </div>
+    </div>
+  `;
 }
 
 function checkSectionHtml(){
   const vars = getConnVariations(VIEW.connIdx);
   const activeVar = vars[VIEW.activeVarIndex] || vars[0];
-  const checkData = VIEW.check || (VIEW.checking ? null : activeVar?.check);
+  const checkData = VIEW.check;
   const checking = !!VIEW.checking;
+  const hdr = `<div style="font-weight:700; font-size:13px; color:var(--tr-navy); margin-bottom:6px;">Comprobación AISC 360-10</div>`;
+  if (VIEW.checkError) return hdr + `<div class="view-warn">${escHtml(VIEW.checkError)}</div>`;
+  if (VIEW.pending && !checking) return hdr + `<div style="margin-bottom:12px;"><span class="badge mod">CAMBIOS SIN COMPROBAR</span></div>`;
 
   if (checking) {
     return `
-      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
-      <div style="margin-bottom:10px;">
+      <div style="font-weight:700; font-size:13px; color:var(--tr-navy); margin-bottom:6px;">Comprobación AISC 360-10</div>
+      <div style="margin-bottom:12px;">
         <span class="badge mod">COMPROBANDO...</span>
       </div>
     `;
   }
 
   if (checkData){
-    const st = checkData.cumple ? "CUMPLE" : "NO CUMPLE";
-    const badgeCls = checkData.cumple ? "ok" : "bad";
+    const isCumple = evaluateCumple(checkData);
+    checkData.cumple = isCumple;
+    const st = isCumple ? "CUMPLE" : "NO CUMPLE";
+    const badgeCls = isCumple ? "ok" : "bad";
 
     let out = `
-      <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
+      <div style="font-weight:700; font-size:13px; color:var(--tr-navy); margin-bottom:6px;">Comprobación AISC 360-10</div>
       <div style="margin-bottom:10px;">
         <span class="badge ${badgeCls}">${escHtml(st)}</span>
       </div>
-    `;
-
-    out += `
       <div style="font-size:12.5px; margin-bottom:8px; color:var(--tr-navy);">
-        <div><b>Ratio pésimo:</b> <span style="color:var(--tr-navy); font-weight:bold;">${checkData.ratio_pesimo ?? 'N/A'}</span></div>
-        <div style="margin-top:2px;"><b>Chequeo crítico:</b> <span style="color:var(--tr-navy);">${escHtml(checkData.descripcion_ratio_pesimo || 'N/A')}</span></div>
+        <div><b>Ratio pésimo:</b> <span style="font-weight:bold;">${checkData.ratio_pesimo ?? 'N/A'}</span></div>
+        <div style="margin-top:2px;"><b>Chequeo crítico:</b> <span>${escHtml(checkData.descripcion_ratio_pesimo || 'N/A')}</span></div>
       </div>
     `;
 
     if (Array.isArray(checkData.complementarios) && checkData.complementarios.length > 0) {
       out += `
-        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
+        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px;">
           <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Comprobaciones Geométricas (${checkData.complementarios.length})</summary>
-          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
-            ${checkData.complementarios.map(c => `<li><b style="color:var(--tr-navy);">${escHtml(c.descripcion)}:</b> <span style="color:var(--tr-navy);">${escHtml(c.resultado)}</span></li>`).join("")}
+          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45;">
+            ${checkData.complementarios.map(c => {
+              const resStr = String(c.resultado || "");
+              const isBad = resStr.toLowerCase().includes("no cumple") || c.cumple === false;
+              return `<li><b>${escHtml(c.descripcion)}:</b> <span style="${isBad ? 'color:var(--tr-red);font-weight:bold;' : ''}">${escHtml(resStr)}</span></li>`;
+            }).join("")}
           </ul>
         </details>
       `;
@@ -646,13 +827,13 @@ function checkSectionHtml(){
 
     if (Array.isArray(checkData.ratios) && checkData.ratios.length > 0) {
       out += `
-        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px; color:var(--tr-navy);">
+        <details style="margin-bottom:10px; background:#F7FAFD; padding:6px 8px; border:1px solid #D5DDE8; border-radius:4px;">
           <summary style="font-weight:600; font-size:12px; cursor:pointer; color:var(--tr-navy);">Ratios de Resistencia (${checkData.ratios.length})</summary>
-          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45; color:var(--tr-navy);">
+          <ul style="margin:6px 0 0 0; padding-left:16px; font-size:11.5px; line-height:1.45;">
             ${checkData.ratios.map(f => {
               const val = f.ratio !== null && f.ratio !== undefined ? Number(f.ratio).toFixed(3) : 'N/A';
               const isBad = f.ratio > 1.0;
-              return `<li><b style="color:var(--tr-navy);">${escHtml(f.descripcion)}:</b> <span style="${isBad ? 'color:var(--tr-red);font-weight:bold;' : 'color:var(--tr-navy);'}">${val}</span></li>`;
+              return `<li><b>${escHtml(f.descripcion)}:</b> <span style="${isBad ? 'color:var(--tr-red);font-weight:bold;' : ''}">${val}</span></li>`;
             }).join("")}
           </ul>
         </details>
@@ -661,12 +842,7 @@ function checkSectionHtml(){
     return out;
   }
 
-  return `
-    <div class="view-sec" style="margin-top:0; color:var(--tr-navy);">Comprobación AISC 360-10</div>
-    <div style="margin-bottom:12px; background:#EAF3FB; padding:10px; border-left:3px solid var(--tr-blue); border-radius:3px; font-size:12px; color:var(--tr-navy);">
-      Esta variación no se ha comprobado aún.
-    </div>
-  `;
+  return `<div style="font-weight:700; font-size:13px; color:var(--tr-navy); margin-bottom:6px;">Comprobación AISC 360-10</div><div style="margin-bottom:12px; background:#EAF3FB; padding:10px; border-left:3px solid var(--tr-blue); border-radius:3px; font-size:12px;">Esta variación no se ha comprobado aún.</div>`;
 }
 
 function renderCheckSection(){
@@ -674,52 +850,146 @@ function renderCheckSection(){
   if (el) el.innerHTML = checkSectionHtml();
 }
 
-async function checkViewerConnection(){
-  if (!VIEW) return;
+/* ---------- Valores editables del visualizador ----------
+   VIEW.vals   : texto que ve el usuario en cada campo
+   VIEW.types  : tipo de cada campo (text | mm | pct | pct01 | num | numstr)
+   VIEW.keyOf  : etiqueta del campo -> clave real en la fila CODAME
+   VIEW.extra  : claves no agrupadas (sección "Otros parámetros")
+   Lo editado en CUALQUIER campo se vuelca a la fila antes de comprobar y al guardar. */
+const VIEW_IGNORED = new Set(["unicode", "unicode origen", "unicode_origen", "escenario", "raw", "adjusted",
+  "check", "adjustedcheck", "status", "accepted", "n_cantonera"]);
 
-  VIEW_FIELDS.forEach(f => {
-    if (!f.k) return;
-    const rawVal = VIEW.vals[f.k];
-    if (f.type === "mm"){ VIEW.row[f.k] = vMmText(rawVal); }
-    else {
-      const s = String(rawVal).trim();
-      VIEW.row[f.k] = s === "" ? "" : (isNaN(Number(s)) ? s : Number(s));
+function setVals(src){
+  const vals = {}, types = {}, keyOf = {}, mapped = new Set();
+  VIEW_GROUPS_DEF.forEach(grp => grp.fields.forEach(f => {
+    const info = getFieldInfo(src, f.aliases);
+    let v = info.value == null ? "" : info.value, t = f.type;
+    if (t === "pct" && /^ratio_/i.test(info.key)) {          // ratios 0-1 -> se muestran en %
+      t = "pct01";
+      if (String(v).trim() !== "") v = String(Math.round(vNum(v) * 10000) / 100);
     }
+    keyOf[f.label] = info.key;
+    mapped.add(info.key.toLowerCase());
+    vals[info.key] = v; types[info.key] = t;
+  }));
+  const extra = [];
+  Object.keys(src).forEach(k => {
+    const v = src[k], kl = k.toLowerCase();
+    if (mapped.has(kl) || VIEW_IGNORED.has(kl)) return;
+    if (typeof v === "boolean" || (v !== null && typeof v === "object")) return;
+    let t = "text";
+    if (typeof v === "number") t = "num";
+    else if (/^\s*-?\d+([.,]\d+)?\s*mm\s*$/i.test(String(v))) t = "mm";
+    else if (String(v).trim() !== "" && !isNaN(Number(String(v).replace(",", ".")))) t = "numstr";
+    vals[k] = v == null ? "" : v; types[k] = t; extra.push(k);
   });
+  VIEW.vals = vals; VIEW.types = types; VIEW.keyOf = keyOf; VIEW.extra = extra;
+}
 
-  const token = (VIEW.checkToken || 0) + 1;
-  VIEW.checkToken = token;
-  VIEW.checking = true;
+function sameVal(t, a, b){
+  return t === "text" ? String(a ?? "") === String(b ?? "") : vNum(a) === vNum(b);
+}
+
+/* Vuelca sobre la fila los valores editados (los que difieren del original), conservando
+   el formato de cada columna ("20mm", número, texto...). */
+function applyValsToRow(row, vals, types, baseRow, baseVals){
+  Object.keys(vals).forEach(k => {
+    const t = types[k] || "text";
+    if (baseVals && k in baseVals && sameVal(t, vals[k], baseVals[k])) return;
+    const s = String(vals[k] == null ? "" : vals[k]).trim();
+    if (!(k in row) && s === "") return;                      // no inventar columnas vacías
+    const orig = (baseRow && k in baseRow) ? baseRow[k] : row[k];
+    if (t === "mm") row[k] = s === "" ? "" : (typeof orig === "number" ? Math.round(vNum(s)) : vMmText(s));
+    else if (t === "pct01") row[k] = s === "" ? "" : Math.round(vNum(s) * 100) / 10000;
+    else if (t === "text" || t === "numstr") row[k] = s;
+    else { const n = Number(s.replace(",", ".")); row[k] = s === "" ? "" : (isNaN(n) ? s : n); }
+  });
+}
+
+function isDirty(){
+  if (!VIEW || !VIEW.vals || !VIEW.baselineVals) return false;
+  return Object.keys(VIEW.vals).some(k => !sameVal(VIEW.types[k], VIEW.vals[k], VIEW.baselineVals[k]));
+}
+
+/* Lp y p1 dependen de las cotas editadas: si existen como columnas se mantienen coherentes */
+function syncDerived(){
+  if (!isDirty()) return;
+  const m = viewModel();
+  [["lp", m.Lp], ["p1", m.p1]].forEach(([name, n]) => {
+    const k = Object.keys(VIEW.vals).find(x => x.toLowerCase() === name);
+    if (k && vNum(VIEW.vals[k]) !== Math.round(n * 10) / 10) { VIEW.vals[k] = fmt(n); VIEW.needRebuild = true; }
+  });
+}
+
+/* Comprueba la fila actual del visualizador contra /check. Devuelve el resultado (o null). */
+async function checkViewerConnection(){
+  if (!VIEW) return null;
+  const v = VIEW;
+  clearTimeout(v.checkTimer);
+  v.pending = false;
+
+  syncDerived();
+  applyValsToRow(v.row, v.vals, v.types, v.rowBaseline, v.baselineVals);
+
+  const beamName = v.row[v.keyOf["Perfil Viga (BEAM)"]], colName_ = v.row[v.keyOf["Perfil Pilar (COLUMN)"]];
+  const pk = beamName + "|" + colName_;
+  if (pk !== v.profKey) {
+    const prof = await fetchProfiles([beamName, colName_]);
+    if (VIEW !== v) return null;
+    v.profKey = pk;
+    v.beam = prof[beamName] || null; v.col = prof[colName_] || null;
+    v.sec = {
+      beam_d: v.beam ? v.beam.d_mm : "", beam_bf: v.beam ? v.beam.bf_mm : "",
+      beam_tw: v.beam ? v.beam.tw_mm : "", beam_tf: v.beam ? v.beam.tf_mm : "",
+      col_d: v.col ? v.col.d_mm : "", col_bf: v.col ? v.col.bf_mm : "",
+      col_tw: v.col ? v.col.tw_mm : "", col_tf: v.col ? v.col.tf_mm : "",
+    };
+    v.needRebuild = true;
+  }
+
+  const token = (v.checkToken || 0) + 1;
+  v.checkToken = token;
+  v.checking = true;
+  v.checkError = "";
   renderCheckSection();
+  renderVarList();
 
+  let result = null;
   try {
     const r = await fetch("/check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows: [VIEW.row] }),
+      body: JSON.stringify({ rows: [v.row] }),
     });
     const data = await r.json().catch(() => ({}));
-    if (!VIEW || VIEW.checkToken !== token) return;
+    if (VIEW !== v || v.checkToken !== token) return null;
     if (r.ok && Array.isArray(data.rows) && data.rows.length > 0) {
-      VIEW.check = data.rows[0];
+      const chk = data.rows[0];
+      chk.cumple = evaluateCumple(chk);
+      v.check = chk;
+      result = chk;
+    } else {
+      v.check = null;                                          // nunca dejar visible un resultado antiguo
+      const det = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
+      v.checkError = `La comprobación falló (HTTP ${r.status}): ${String(det).slice(0, 300)}`;
     }
   } catch (e) {
-    if (!VIEW || VIEW.checkToken !== token) return;
+    if (VIEW !== v || v.checkToken !== token) return null;
+    v.check = null;
+    v.checkError = "No se pudo contactar con el servidor: " + e.message;
   } finally {
-    if (VIEW && VIEW.checkToken === token) {
-      VIEW.checking = false;
-      renderCheckSection();
+    if (VIEW === v && v.checkToken === token) {
+      v.checking = false;
+      const ae = document.activeElement;
+      const typing = ae && ae.tagName === "INPUT" && ae.closest && ae.closest("#viewerPanel");
+      if (typing && !v.needRebuild) { renderCheckSection(); renderVarList(); }   // no robar el foco al escribir
+      else buildViewerPanel();
+      v.needRebuild = false;
       drawAll();
       updateSaveButton();
     }
   }
-}
-
-function viewRow(label, bindAttr, key, value, inMm, editable=true){
-  const shown = inMm ? mmInput(value) : String(value == null ? "" : value);
-  const input = `<input ${bindAttr}="${escAttr(key)}" value="${escAttr(shown)}" inputmode="decimal" ${editable? "":"readonly"}>`;
-  return `<div class="view-row ${editable? "":"ro"}"><label>${escHtml(label)}</label>` +
-         `<div class="mm-wrap">${input}<span class="mm-suf">mm</span></div></div>`;
+  return result;
 }
 
 function mmInput(v){
@@ -735,93 +1005,116 @@ function sanitizeNum(v){
   return s;
 }
 
-function onField(inp, store, key){
-  VIEW.checking = true;
-  let s = sanitizeNum(inp.value);
-  if (s === ""){ store[key] = ""; inp.value = ""; updateSaveButton(); drawAll(); return; }
-  store[key] = s;
-  if (inp.value !== s) inp.value = s;
-  updateSaveButton();
-  drawAll();
+function markPending(){
+  VIEW.pending = true;
+  VIEW.checkError = "";
+  renderCheckSection();
+  renderVarList();
 }
 
-function onFieldBlur(inp, store, key){
-  const s = sanitizeNum(inp.value);
-  let n = (s === "" || isNaN(parseFloat(s))) ? 0 : parseFloat(s);
-  if (n < 0) n = 0;
-  store[key] = String(n);
-  if (inp.value !== String(n)) inp.value = String(n);
+/* Mientras se escribe: se actualiza el dibujo y se programa una comprobación (campos numéricos) */
+function onField(inp){
+  if (!VIEW) return;
+  const key = inp.dataset.vkey, t = VIEW.types[key] || "text";
+  if (t === "text") {
+    VIEW.vals[key] = inp.value;                 // los nombres de perfil/tornillo NO se filtran
+  } else {
+    const s = sanitizeNum(inp.value);
+    VIEW.vals[key] = s;
+    if (inp.value !== s) inp.value = s;
+  }
+  markPending();
+  updateSaveButton();
+  drawAll();
+  if (t !== "text") {
+    clearTimeout(VIEW.checkTimer);
+    VIEW.checkTimer = setTimeout(() => checkViewerConnection(), 700);
+  }
+}
+
+function onFieldBlur(inp){
+  if (!VIEW) return;
+  const key = inp.dataset.vkey, t = VIEW.types[key] || "text";
+  if (t === "text") {
+    const s = inp.value.trim();
+    VIEW.vals[key] = s;
+    if (inp.value !== s) inp.value = s;
+  } else {
+    const s = sanitizeNum(inp.value);
+    let n = (s === "" || isNaN(parseFloat(s))) ? 0 : parseFloat(s);
+    if (n < 0) n = 0;
+    VIEW.vals[key] = String(n);
+    if (inp.value !== String(n)) inp.value = String(n);
+  }
   updateSaveButton();
   drawAll();
 }
 
 function updateSaveButton(){
   if (!VIEW) return;
-  let dirty = false;
-  for (const f of VIEW_FIELDS){
-    if (!f.k) continue;
-    if (vNum(VIEW.vals[f.k]) !== vNum(VIEW.baselineVals[f.k])){ dirty = true; break; }
-  }
   const btn = $("viewerSave");
-  if (btn) btn.disabled = !dirty;
+  if (btn) btn.disabled = !isDirty();
 }
 
-/* Restaura la predicción AJUSTADA original que devolvió el modelo */
 function loadAdjustedPrediction(){
   if (!VIEW) return;
   const vars = getConnVariations(VIEW.connIdx);
   const activeVar = vars[VIEW.activeVarIndex];
   const adjusted = activeVar?.adjusted || activeVar?.data;
   if (!adjusted){ alert("No hay predicción ajustada disponible."); return; }
-  
-  VIEW.vals = {};
-  VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (adjusted[f.k] ?? ""); });
+
   VIEW.row = { ...VIEW.rowBaseline, ...adjusted };
+  setVals(VIEW.row);
   VIEW.check = activeVar.adjustedCheck ? JSON.parse(JSON.stringify(activeVar.adjustedCheck)) : null;
-  
+  VIEW.pending = false; VIEW.checkError = "";
+
   buildViewerPanel();
   drawAll();
   updateSaveButton();
   checkViewerConnection();
 }
 
-/* Restaura la predicción BRUTA (SIN AJUSTE) que devolvió el modelo */
 function loadRawPrediction(){
   if (!VIEW) return;
   const vars = getConnVariations(VIEW.connIdx);
   const activeVar = vars[VIEW.activeVarIndex];
   const raw = activeVar?.raw;
   if (!raw){ alert("No hay predicción sin ajuste disponible para esta variación."); return; }
-  
-  VIEW.vals = {};
-  VIEW_FIELDS.forEach(f => { if (f.k) VIEW.vals[f.k] = (raw[f.k] ?? ""); });
+
   VIEW.row = { ...VIEW.rowBaseline, ...raw };
+  setVals(VIEW.row);
   VIEW.check = null;
-  
+  VIEW.pending = false; VIEW.checkError = "";
+
   buildViewerPanel();
   drawAll();
   updateSaveButton();
   checkViewerConnection();
 }
 
-function saveViewer(){
+/* Guardar: SIEMPRE vuelve a comprobar con los valores finales y espera la respuesta
+   antes de cerrar el visor (antes se cerraba y el resultado nuevo se descartaba). */
+async function saveViewer(){
   if (!VIEW) return;
-  const vars = getConnVariations(VIEW.connIdx);
-  const activeVar = vars[VIEW.activeVarIndex];
+  const v = VIEW;
+  const btn = $("viewerSave");
+  if (btn) btn.disabled = true;
+  await checkViewerConnection();
+  if (VIEW !== v) return;
+
+  const vars = getConnVariations(v.connIdx);
+  const activeVar = vars[v.activeVarIndex];
   if (!activeVar) return;
 
-  VIEW_FIELDS.forEach(f => {
-    if (!f.k) return;
-    const v = VIEW.vals[f.k];
-    if (f.type === "mm"){ activeVar.data[f.k] = vMmText(v); }
-    else { const s = String(v).trim(); activeVar.data[f.k] = s === "" ? "" : Number(s); }
-  });
+  Object.keys(v.row).forEach(k => { activeVar.data[k] = v.row[k]; });
 
-  if (VIEW.check) {
-    activeVar.check = JSON.parse(JSON.stringify(VIEW.check));
-    activeVar.status = VIEW.check.cumple ? "CUMPLE" : "NO CUMPLE";
+  if (v.check) {
+    activeVar.check = JSON.parse(JSON.stringify(v.check));
+    activeVar.status = evaluateCumple(v.check) ? "CUMPLE" : "NO CUMPLE";
   } else {
+    activeVar.check = null;
     activeVar.status = "MODIFICADO";
+    setStatus("bad", "Se guardaron los cambios, pero la comprobación AISC falló.", v.checkError || "");
   }
 
   closeViewer();
@@ -859,8 +1152,8 @@ function viewModel(){
   const V = VIEW.vals, S = VIEW.sec;
   const tf = vNum(S.beam_tf), bf = vNum(S.beam_bf), tw = vNum(S.beam_tw), bd = vNum(S.beam_d);
   const ctf = vNum(S.col_tf), cbf = vNum(S.col_bf), ctw = vNum(S.col_tw), cd = vNum(S.col_d);
-  const e = vNum(V.dev), g = vNum(V.p2_ep), Bp = vNum(V.b_ep), tp = vNum(V.ThicknessName_t_ep), Lh = vNum(V.Lh);
-  const pfo = vNum(V.pfo), pfi = vNum(V.pfi), pb = vNum(V.pb);
+  const e = vNum(V.dev || V.e), g = vNum(V.p2_ep || V.g), Bp = vNum(V.b_ep || V.Bp), tp = vNum(V.ThicknessName_t_ep || V.tp), Lh = vNum(V.Lh);
+  const pfo = vNum(V.pfo), pfi = vNum(V.pfi), pb = vNum(V.pb || V.p2);
   const p1 = pfo + tf + pfi;
   const steps = [p1, pb, ...P_KEYS.map(k => vNum(V[k]))].filter(x => x > 0);
   const sumP = steps.reduce((a,b) => a+b, 0);
@@ -868,12 +1161,12 @@ function viewModel(){
   const rows = [e]; let y = e;
   steps.forEach(s => { y += s; rows.push(y); });
   const beamTop = e + pfo, beamBot = beamTop + bd;
-  const boltDia = parseInt(String(VIEW.row.BoltName_ep || "").replace(/\D/g,""), 10) || 24;
+  const boltDia = parseInt(String(VIEW.row.BoltName_ep || VIEW.row.BoltName || "").replace(/\D/g,""), 10) || 24;
   return {
     tf,bf,tw,bd,ctf,cbf,ctw,cd,e,g,Bp,tp,Lh,pfo,pfi,pb,p1,steps,sumP,Lp,rows,beamTop,beamBot,boltDia,
     Hhaunch: Math.max(0, Lp - beamBot),
-    tws: vNum(V.ThicknessName_t_webstiff), ts: vNum(V.ThicknessName_t_compstiff),
-    tbs: vNum(V.ThicknessName_t_BeamHcompstiff), tst: vNum(V.ThicknessName_t_tenstiff),
+    tws: vNum(V.ThicknessName_t_webstiff || V.t_webstiff), ts: vNum(V.ThicknessName_t_compstiff || V.t_compstiff),
+    tbs: vNum(V.ThicknessName_t_BeamHcompstiff || V.t_BeamHcompstiff), tst: vNum(V.ThicknessName_t_tenstiff || V.t_tenstiff),
     bws: vNum(V.Bws), lws: vNum(V.Lws),
   };
 }
@@ -1008,9 +1301,9 @@ function drawTop(m){
 function parseScenariosResponse(data, inputRow) {
   function buildCheck(r, fallback) {
     if (fallback) return fallback;
-    const cumpleVal = r.cumple !== undefined ? r.cumple : (r.ratio_pesimo != null ? Number(r.ratio_pesimo) <= 1.0 : true);
+    const isCumple = evaluateCumple(r);
     return {
-      cumple: Boolean(cumpleVal),
+      cumple: isCumple,
       ratio_pesimo: r.ratio_pesimo ?? null,
       descripcion_ratio_pesimo: r.descripcion_ratio_pesimo || r.chequeo_critico || "",
       ratios: Array.isArray(r.ratios) ? r.ratios : [],
@@ -1021,7 +1314,7 @@ function parseScenariosResponse(data, inputRow) {
   function getLabel(r, defaultIdx) {
     const raw = r.Escenario || r.escenario || r.descripcion || r.nombre || r.tipo || r.variacion || r.label;
     if (raw) return String(raw).trim();
-    const defaults = ["E1 - Mayor carga sin cantonera", "E2 - Primer diseño con cantonera", "E3 - Mayor carga con cantonera"];
+    const defaults = ["E1 - Diseño de entrada", "E2 - Máximo sin cantonera", "E3 - Máximo con cantonera"];
     return defaults[defaultIdx] || `Variación ${defaultIdx + 1}`;
   }
 
@@ -1053,6 +1346,7 @@ function parseScenariosResponse(data, inputRow) {
           const fallbackRaw = (Array.isArray(data.rows_raw) && data.rows_raw[item.rawIdx]) ? data.rows_raw[item.rawIdx] : { ...r };
           const lbl = getLabel(r, idx);
           const chk = buildCheck(r, fallbackCheck);
+          const isCumple = evaluateCumple(chk);
           return {
             label: lbl,
             tipo: getTipoCode(lbl, idx),
@@ -1061,7 +1355,7 @@ function parseScenariosResponse(data, inputRow) {
             raw: { ...fallbackRaw },
             check: chk,
             adjustedCheck: JSON.parse(JSON.stringify(chk)),
-            status: chk.cumple ? "CUMPLE" : "NO CUMPLE",
+            status: isCumple ? "CUMPLE" : "NO CUMPLE",
             accepted: false
           };
         });
@@ -1070,10 +1364,11 @@ function parseScenariosResponse(data, inputRow) {
       return connections;
     }
 
-    const vars = data.rows.map((v, idx) => {
+    let vars = data.rows.map((v, idx) => {
       const lbl = getLabel(v, idx);
       const chk = buildCheck(v, data.checks ? data.checks[idx] : null);
       const raw = data.rows_raw ? data.rows_raw[idx] : { ...v };
+      const isCumple = evaluateCumple(chk);
       return {
         label: lbl,
         tipo: getTipoCode(lbl, idx),
@@ -1082,10 +1377,29 @@ function parseScenariosResponse(data, inputRow) {
         raw: { ...raw },
         check: chk,
         adjustedCheck: JSON.parse(JSON.stringify(chk)),
-        status: chk.cumple ? "CUMPLE" : "NO CUMPLE",
+        status: isCumple ? "CUMPLE" : "NO CUMPLE",
         accepted: false
       };
     });
+
+    /* Escenarios que el servidor no ha podido generar (p. ej. E3 sin ninguna cantonera):
+       aparecen igualmente, como tarjeta no seleccionable con el motivo. */
+    if (Array.isArray(data.escenarios) && data.escenarios.some(e => !e.encontrado)) {
+      const merged = []; let ri = 0;
+      data.escenarios.forEach(e => {
+        if (e.encontrado) { if (vars[ri]) merged.push(vars[ri++]); }
+        else {
+          const lbl = `${e.id} - ${e.escenario}`;
+          merged.push({
+            label: lbl, tipo: e.id, data: {}, adjusted: {}, raw: {}, check: null, adjustedCheck: null,
+            unavailable: true, sinCantonera: !!e.sin_opcion_cantonera,
+            motivo: e.motivo || "Escenario no disponible.",
+            status: e.sin_opcion_cantonera ? "SIN CANTONERA" : "NO ENCONTRADO", accepted: false
+          });
+        }
+      });
+      vars = merged;
+    }
 
     return [{
       inputRow: inputRow || {},
@@ -1156,7 +1470,7 @@ $("send").onclick = async () => {
     _checkTokens = {};
     renderResults();
 
-    const totalVars = state.results.reduce((acc, c) => acc + getConnVariations(state.results.indexOf(c)).length, 0);
+    const totalVars = state.results.reduce((acc, c) => acc + getConnVariations(state.results.indexOf(c)).filter(v => !v.unavailable).length, 0);
     
     if (errorsCount > 0) {
       setStatus("bad", `Finalizado con ${errorsCount} errores.`, `${parsedConns.length} conexiones procesadas correctamente (${totalVars} variaciones).`);

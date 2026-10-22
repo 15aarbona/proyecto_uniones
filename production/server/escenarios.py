@@ -1,21 +1,13 @@
 """Escenarios de carga: de una fila de entrada a 3 diseños de referencia.
 
 Flujo:
-  1. Se predice la fila tal cual llega (paso 0): modelo -> CODAME -> ajuste -> comprobacion.
-  2. Se suben las cargas (ratio_moment, ratio_shear, ratio_axial) un `incremento` (5 %) y se
-     vuelve a predecir, paso a paso (k = 1, 2, 3 ...), hasta que el diseno deja de cumplir.
-     Ninguna carga supera el 100 % (1.0): se topan y, cuando todas llegan al tope, se para.
-  3. Del historial se extraen 3 disenos (todos deben CUMPLIR la comprobacion AISC):
-       E1  mayor carga SIN cantonera   (Lh == 0 y n_cantonera == 0)
-       E2  primer diseno CON cantonera (el de menor carga)
-       E3  mayor carga CON cantonera
-
-Sobre el ajuste: en este flujo NO se maximiza la carga (`maximize_load=False`), porque
-`refinar._maximize_load` reescribe MzEd_Porcen/FyEd_Porcen/FxEd_Porcen y falsearia el
-escalon de carga que se esta evaluando. Si se ajustan geometria y espesores.
-
-Este modulo no depende del modelo ni del servidor: recibe `predict_fn` (inyeccion), por lo
-que se puede probar sin pesos. `run()` lo conecta con `predictor.predict_detailed`.
+  1. Paso 0 (E1): Se predice la fila de entrada tal cual llega (sin ajustar cargas).
+  2. Barrido incremental (k >= 1): Se parte de ratio_moment=0.20, ratio_shear=0.50 y ratio_axial=0.05.
+     Se aumenta UNICAMENTE ratio_moment (+5 % por paso) hasta toparlo en 1.00 (100 %).
+  3. Selección de escenarios:
+       E1  Diseño de entrada
+       E2  Máximo sin cantonera
+       E3  Máximo con cantonera
 """
 from __future__ import annotations
 
@@ -27,20 +19,24 @@ log = logging.getLogger("ai-server")
 
 LOAD_KEYS = ("ratio_moment", "ratio_shear", "ratio_axial")
 
-# Maximos de carga vistos en el dataset de entrenamiento (datos_modelo.parquet).
-# Por encima el modelo extrapola: el escenario se marca `fuera_rango_entrenamiento`.
+# Máximos de carga del dataset de entrenamiento (datos_modelo.parquet)
 RANGO_ENTRENAMIENTO = {"ratio_moment": 1.21, "ratio_shear": 1.0, "ratio_axial": 0.49}
 
-CARGA_MAX = 1.0            # las cargas nunca pasan del 100 %
-INCREMENTO = 0.05          # +5 % por paso
-MAX_PASOS = 40             # 1.05**40 ~ x7
-MAX_FALLOS_SEGUIDOS = 3    # pasos seguidos que no cumplen antes de parar (x2 si aun no hay cantonera valida)
-LOTE = 8                   # pasos que se predicen a la vez (en paralelo en el pool de refinar)
+# Cargas base fijas para el inicio del barrido (pasos k >= 1)
+BASE_SWEEP_MOMENT = 0.20
+BASE_SWEEP_SHEAR = 0.50
+BASE_SWEEP_AXIAL = 0.05
+
+CARGA_MAX = 1.0            # Carga máxima (100 %)
+INCREMENTO = 0.05          # +5 % por paso en ratio_moment
+MAX_PASOS = 40             # Pasos máximos de exploración
+MAX_FALLOS_SEGUIDOS = 3    # Pasos fallidos seguidos antes de detener el barrido
+LOTE = 8                   # Pasos evaluados en paralelo
 
 NOMBRES = {
-    "E1": "Mayor carga sin cantonera",
-    "E2": "Primer diseño con cantonera",
-    "E3": "Mayor carga con cantonera",
+    "E1": "Diseño de entrada",
+    "E2": "Máximo sin cantonera",
+    "E3": "Máximo con cantonera",
 }
 
 
@@ -59,34 +55,28 @@ def _find_key(row: Dict[str, Any], name: str) -> Optional[str]:
     return None
 
 
-def _cargas_base(row: Dict[str, Any]) -> Dict[str, float]:
-    """{clave_real_en_la_fila: valor} de las 3 cargas. ratio_moment es obligatorio."""
-    out: Dict[str, float] = {}
-    for name in LOAD_KEYS:
-        key = _find_key(row, name)
-        if key is None or row[key] is None or str(row[key]).strip() == "":
-            if name == "ratio_moment":
-                raise ValueError("Falta ratio_moment: es necesario para generar los escenarios de carga")
-            continue
-        out[key] = _num(str(row[key]).replace(",", "."))
-    if not any(v > 0 for v in out.values()):
-        raise ValueError("Todas las cargas son 0: no hay nada que aumentar")
-    return out
-
-
-def _fila_paso(row: Dict[str, Any], base: Dict[str, float], k: int, incremento: float, compuesto: bool):
-    """Fila de entrada del paso k. Cargas = base * f, redondeadas a 2 decimales (1 % de
-    resolucion, la misma que usa CODAME en `_pct_int`) y TOPADAS en 1.0 (100 %).
-    Devuelve (fila, factor efectivo sobre ratio_moment)."""
-    f = (1.0 + incremento) ** k if compuesto else 1.0 + incremento * k
+def _fila_paso(row: Dict[str, Any], k: int, incremento: float = INCREMENTO) -> tuple[Dict[str, Any], float]:
+    """Genera la fila de entrada del paso k.
+    k = 0: Mantiene la fila de entrada tal cual llega.
+    k >= 1: ratio_shear=0.50, ratio_axial=0.05, ratio_moment = min(1.0, 0.20 + (k-1)*incremento).
+    """
     new = dict(row)
-    for key, v in base.items():
-        new[key] = round(min(1.0, v * f), 2)
     ukey = _find_key(row, "unicode") or "UNICODE"
+    mkey = _find_key(row, "ratio_moment") or "ratio_moment"
+    vkey = _find_key(row, "ratio_shear") or "ratio_shear"
+    akey = _find_key(row, "ratio_axial") or "ratio_axial"
+
+    if k == 0:
+        new[ukey] = f"{row.get(ukey, 'UNI')}_E00"
+        return new, 1.0
+
+    m_val = round(min(CARGA_MAX, BASE_SWEEP_MOMENT + (k - 1) * incremento), 2)
+    new[mkey] = m_val
+    new[vkey] = round(min(CARGA_MAX, BASE_SWEEP_SHEAR), 2)
+    new[akey] = round(min(CARGA_MAX, BASE_SWEEP_AXIAL), 2)
     new[ukey] = f"{row.get(ukey, 'UNI')}_E{k:02d}"
-    mkey = _find_key(row, "ratio_moment")
-    f_ef = new[mkey] / base[mkey] if base.get(mkey, 0) > 0 else f
-    return new, f_ef
+
+    return new, m_val
 
 
 def _filas_tornillos(row: Dict[str, Any]) -> int:
@@ -114,29 +104,63 @@ def _registro(k: int, factor: float, entrada: Dict[str, Any], res: Dict[str, Any
         "n_cantonera": ncan,
         "con_cantonera": lh > 0 or ncan > 0,
         "fuera_rango_entrenamiento": fuera,
-        "_res": res,            # fila CODAME + check completos (se quitan del historial publico)
+        "_res": res,
     }
 
 
 def seleccionar(historial: List[Dict[str, Any]]) -> Dict[str, Optional[Dict[str, Any]]]:
-    """E1/E2/E3 a partir de los pasos que CUMPLEN."""
-    ok = [r for r in historial if r["cumple"]]
-    sin = [r for r in ok if not r["con_cantonera"]]
-    con = [r for r in ok if r["con_cantonera"]]
-    return {
-        "E1": max(sin, key=lambda r: r["paso"]) if sin else None,
-        "E2": min(con, key=lambda r: r["paso"]) if con else None,
-        "E3": max(con, key=lambda r: r["paso"]) if con else None,
-    }
+    """Extrae E1 (entrada), E2 (máximo sin cantonera) y E3 (máximo con cantonera)."""
+    if not historial:
+        return {"E1": None, "E2": None, "E3": None}
+
+    # E1: Fila de entrada exacta (paso 0)
+    paso0 = next((r for r in historial if r["paso"] == 0), historial[0])
+
+    # Pasos del barrido de cargas (k >= 1)
+    barrido = [r for r in historial if r["paso"] >= 1] or historial
+
+    sin_ok = [r for r in barrido if not r["con_cantonera"] and r["cumple"]]
+    sin_all = [r for r in barrido if not r["con_cantonera"]]
+
+    con_ok = [r for r in barrido if r["con_cantonera"] and r["cumple"]]
+    con_all = [r for r in barrido if r["con_cantonera"]]
+
+    # E2: Mayor ratio_moment sin cantonera
+    if sin_ok:
+        e2 = max(sin_ok, key=lambda r: (r["ratio_moment"], r["paso"]))
+    elif sin_all:
+        e2 = max(sin_all, key=lambda r: (r["ratio_moment"], r["paso"]))
+    else:
+        e2 = paso0
+
+    # E3: Mayor ratio_moment con cantonera que cumpla; si ninguna cumple, la mayor con cantonera.
+    # Si ninguna predicción del barrido lleva cantonera, E3 queda vacío (None): NO se rellena
+    # con un diseño sin cantonera.
+    if con_ok:
+        e3 = max(con_ok, key=lambda r: (r["ratio_moment"], r["paso"]))
+    elif con_all:
+        e3 = max(con_all, key=lambda r: (r["ratio_moment"], r["paso"]))
+    else:
+        e3 = None
+
+    return {"E1": paso0, "E2": e2, "E3": e3}
+
+
+def _hay_cantonera(historial: List[Dict[str, Any]]) -> bool:
+    return any(r["con_cantonera"] for r in historial if r["paso"] >= 1)
 
 
 def _motivo(clave: str, historial: List[Dict[str, Any]]) -> str:
+    if clave == "E3" and not _hay_cantonera(historial):
+        return "Ninguna predicción del barrido de cargas genera cantonera: no hay opción de colocar cantonera."
     ok = [r for r in historial if r["cumple"]]
     if not ok:
-        return "Ningun paso (ni el de partida) cumple la comprobacion AISC."
+        return "Ningún paso cumple la comprobación AISC."
     if clave == "E1":
-        return "El diseno de partida ya lleva cantonera, o no hay ningun diseno sin cantonera que cumpla."
-    return "Ningun diseno con cantonera cumple en el rango de cargas explorado."
+        return "No se ha procesado el diseño de entrada."
+    if clave == "E2":
+        return "Ningún diseño sin cantonera cumple la comprobación AISC en el barrido de cargas."
+    return "Ningún diseño con cantonera cumple la comprobación AISC en el barrido de cargas."
 
 
 def generar_escenarios(
@@ -146,56 +170,64 @@ def generar_escenarios(
     max_pasos: int = MAX_PASOS,
     max_fallos_seguidos: int = MAX_FALLOS_SEGUIDOS,
     lote: int = LOTE,
-    compuesto: bool = True,
 ) -> Dict[str, Any]:
     """`predict_fn(filas_entrada) -> [{"row", "check", "n_cantonera"}]` (mismo orden)."""
     if incremento <= 0:
         raise ValueError("incremento debe ser > 0")
-    base = _cargas_base(row)
+
     avisos: List[str] = []
-    if any(v > CARGA_MAX for v in base.values()):
-        avisos.append("Alguna carga de entrada superaba el 100 %: se ha limitado al 100 %.")
-        base = {k_: min(CARGA_MAX, v) for k_, v in base.items()}
     historial: List[Dict[str, Any]] = []
     fallos, hay_cantonera_valida, parada = 0, False, None
     previas, techo, k = None, False, 0
+
     while parada is None and not techo and k <= max_pasos:
         pasos, entradas, factores = [], [], []
         for kk in range(k, min(k + max(1, lote), max_pasos + 1)):
-            ent, f = _fila_paso(row, base, kk, incremento, compuesto)
-            cargas = tuple(ent[key] for key in base)
-            if cargas == previas:          # todas las cargas ya estan al 100 %: no hay mas escalones
+            ent, f = _fila_paso(row, kk, incremento)
+            cargas = (ent.get("ratio_moment"), ent.get("ratio_shear"), ent.get("ratio_axial"))
+            if kk >= 1 and cargas == previas:
                 techo = True
                 break
-            previas = cargas
-            pasos.append(kk); entradas.append(ent); factores.append(f)
+            if kk >= 1:
+                previas = cargas
+            pasos.append(kk)
+            entradas.append(ent)
+            factores.append(f)
+
         if entradas:
             resultados = predict_fn(entradas)
             for kk, ent, f, res in zip(pasos, entradas, factores, resultados):
                 reg = _registro(kk, f, ent, res)
                 historial.append(reg)
-                if reg["cumple"]:
-                    fallos = 0
-                    hay_cantonera_valida = hay_cantonera_valida or reg["con_cantonera"]
-                else:
-                    fallos += 1
-                tolerancia = max_fallos_seguidos * (1 if hay_cantonera_valida else 2)
-                if fallos >= tolerancia:
-                    parada = f"{fallos} pasos seguidos sin cumplir (paso {kk})"
-                    break
+                if kk >= 1:
+                    if reg["cumple"]:
+                        fallos = 0
+                        hay_cantonera_valida = hay_cantonera_valida or reg["con_cantonera"]
+                    else:
+                        fallos += 1
+                    tolerancia = max_fallos_seguidos * (1 if hay_cantonera_valida else 2)
+                    if fallos >= tolerancia:
+                        parada = f"{fallos} pasos seguidos sin cumplir (paso {kk})"
+                        break
         k += max(1, lote)
+
     if parada is None:
-        parada = "cargas al 100 %" if techo else f"alcanzado max_pasos={max_pasos}"
+        parada = "ratio_moment al 100 %" if techo else f"alcanzado max_pasos={max_pasos}"
 
     elegidos = seleccionar(historial)
     if historial and not historial[0]["cumple"]:
-        avisos.append("El diseno con las cargas de partida (paso 0) NO cumple la comprobacion.")
+        avisos.append("El diseño de entrada (paso 0) NO cumple la comprobación AISC.")
+
     escenarios, rows, checks, rows_raw = [], [], [], []
     for clave in ("E1", "E2", "E3"):
         r = elegidos[clave]
         if r is None:
+            sin_cant = clave == "E3" and not _hay_cantonera(historial)
             escenarios.append({"id": clave, "escenario": NOMBRES[clave], "encontrado": False,
+                               "sin_opcion_cantonera": sin_cant,
                                "motivo": _motivo(clave, historial)})
+            if sin_cant:
+                avisos.append("E3: ninguna predicción genera cantonera; no hay opción de colocar cantonera.")
             continue
         res = r["_res"]
         etiqueta = f"{clave} - {NOMBRES[clave]}"
@@ -207,29 +239,24 @@ def generar_escenarios(
             **{x: r[x] for x in ("paso", "factor_carga", "ratio_moment", "ratio_shear", "ratio_axial",
                                  "cumple", "ratio_pesimo", "descripcion_ratio_pesimo", "Lh",
                                  "n_cantonera", "fuera_rango_entrenamiento")},
-            "row": res.get("row"),                      # solo para la tabla (se quita abajo)
+            "row": res.get("row"),
         })
-        # Mismas estructuras y nombres que devolvia /predict, con la clave "Escenario" anadida.
         rows.append({**(res.get("row") or {}), "Escenario": etiqueta})
         checks.append({**(res.get("check") or {}), "Escenario": etiqueta})
         rows_raw.append({**(res.get("raw") or {}), "Escenario": etiqueta})
-    if elegidos["E2"] is not None and elegidos["E2"] is elegidos["E3"]:
-        avisos.append("E2 y E3 coinciden: solo un paso cumple con cantonera.")
 
     tabla = [_fila_tabla(e) for e in escenarios]
     return {
-        # --- igual que /predict (model_name lo anade el servidor) ---
         "rows": rows,
         "checks": checks,
         "rows_raw": rows_raw,
-        # --- escenarios ---
         "escenarios": [{k_: v for k_, v in e.items() if k_ != "row"} for e in escenarios],
         "tabla": tabla,
         "tabla_markdown": tabla_markdown(tabla),
         "historial": [{k_: v for k_, v in r.items() if k_ != "_res"} for r in historial],
         "parada": parada,
         "avisos": avisos,
-        "parametros": {"incremento": incremento, "compuesto": compuesto, "max_pasos": max_pasos,
+        "parametros": {"incremento": incremento, "max_pasos": max_pasos,
                        "max_fallos_seguidos": max_fallos_seguidos, "carga_max": CARGA_MAX},
     }
 
@@ -248,11 +275,12 @@ def _fila_tabla(e: Dict[str, Any]) -> Dict[str, Any]:
     out = {c: None for c in TABLA_COLUMNAS}
     out["Escenario"] = f"{e['id']} - {e['escenario']}"
     if not e["encontrado"]:
-        out["Cumple"] = "No encontrado"
+        out["Cumple"] = "Sin opción de cantonera" if e.get("sin_opcion_cantonera") else "No encontrado"
+        out["Cantonera (Lh mm)"] = 0 if e.get("sin_opcion_cantonera") else None
         out["Ratio pésimo"] = e.get("motivo")
         return out
     r = e["row"] or {}
-    pct = lambda v: int(round(_num(v) * 100))  # noqa: E731
+    pct = lambda v: int(round(_num(v) * 100))
     out.update({
         "Paso": e["paso"], "Factor carga": e["factor_carga"],
         "Mz %": pct(e["ratio_moment"]), "Fy %": pct(e["ratio_shear"]), "Fx %": pct(e["ratio_axial"]),
@@ -278,11 +306,7 @@ def tabla_markdown(tabla: List[Dict[str, Any]]) -> str:
     return "\n".join(lineas)
 
 
-# ---------------------------------------------------------------------------
-# Conexion con el servidor
-# ---------------------------------------------------------------------------
 def run(model_name: str, row: Dict[str, Any], **opciones) -> Dict[str, Any]:
-    """Escenarios con el modelo real (usa `predictor.predict_detailed`, sin maximizar carga)."""
     import predictor
 
     def predict_fn(filas):
