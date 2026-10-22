@@ -9,6 +9,7 @@ Cada modelo expone su `input_schema()` y su diseno en claves canonicas. El servi
 
 import logging
 import math
+import threading
 from typing import Any, Dict, List
 
 import numpy as np
@@ -21,6 +22,11 @@ from codame_schema import CODAME_COLUMNS, fill_missing
 from checker import check_rows as perform_check
 
 log = logging.getLogger("ai-server")
+
+# La inferencia (torch) y la carga de modelos comparten estado global; se serializan
+# para que MCP y REST no ejecuten el mismo modelo a la vez. El trabajo pesado se hace
+# fuera del event loop (ver runner en main.py).
+_PREDICT_LOCK = threading.Lock()
 
 
 class InputContractError(ValueError):
@@ -122,6 +128,11 @@ def predict_full(model_name: str, rows: List[Dict[str, Any]]):
 
 
 def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
+    with _PREDICT_LOCK:
+        return _predict_inner(model_name, rows, with_checks)
+
+
+def _predict_inner(model_name: str, rows: List[Dict[str, Any]], with_checks: bool):
     bundle = model_registry.get(model_name)
     adapter = bundle["adapter"]
     contract = bundle["contract"]

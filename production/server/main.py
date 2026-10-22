@@ -19,9 +19,12 @@ Endpoints:
   MCP  /mcp                     Servidor MCP para integracion con Microsoft Copilot
 """
 
+import asyncio
 import contextlib
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List
@@ -38,6 +41,7 @@ import catalogo
 import config
 import model_registry
 import predictor
+import refinar
 import storage
 
 import dataset_valid, retrain_manager
@@ -63,6 +67,51 @@ log = logging.getLogger("ai-server")
 
 
 # =============================================================================
+# Runner de trabajo pesado (no bloquear el event loop de FastAPI/MCP)
+# =============================================================================
+class _Runner:
+    """Ejecuta funciones sincronas en una hebra dedicada.
+
+    Si una peticion supera su timeout, se reemplaza el executor para que las siguientes
+    no queden detras de una tarea colgada (la hebra antigua puede seguir viva; se deja
+    terminar y se descarta).
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=name)
+
+    def submit(self, fn, *args):
+        with self._lock:
+            return self._executor.submit(fn, *args)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=self._name)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+_PREDICT_RUNNER = _Runner("mcp-predict")
+_CHECK_RUNNER = _Runner("mcp-check")
+
+
+async def _run_sync(runner: _Runner, fn, args: tuple, timeout: float, label: str):
+    """Ejecuta `fn(*args)` fuera del event loop con timeout y reinicio del runner."""
+    future = runner.submit(fn, *args)
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+    except asyncio.TimeoutError:
+        runner.reset()
+        log.error("%s: timeout tras %.0fs; runner reiniciado", label, timeout)
+        raise TimeoutError(f"{label}: tiempo de espera agotado ({timeout:.0f}s)") from None
+
+
+# =============================================================================
 # Servidor MCP (Model Context Protocol) para Microsoft Copilot
 # =============================================================================
 mcp = FastMCP(
@@ -83,7 +132,13 @@ async def predecir_conexion(rows: List[Dict[str, Any]], model: str = "") -> Dict
     """
     name = model or config.MODEL_NAME
     log.info("[MCP] /predict: modelo=%s, %d filas", name, len(rows))
-    predictions, checks = predictor.predict_and_check(name, rows)
+    predictions, checks = await _run_sync(
+        _PREDICT_RUNNER,
+        predictor.predict_and_check,
+        (name, rows),
+        config.PREDICT_TIMEOUT_S,
+        "predecir_conexion",
+    )
     return {"model_name": name, "rows": predictions, "checks": checks}
 
 
@@ -95,17 +150,17 @@ async def comprobar_aisc(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         rows: Lista de filas con los parámetros del diseño CODAME a verificar.
     """
     log.info("[MCP] /check: comprobando %d filas", len(rows))
-    results = predictor.check_rows(rows)
+    results = await _run_sync(
+        _CHECK_RUNNER,
+        predictor.check_rows,
+        (rows,),
+        config.CHECK_TIMEOUT_S,
+        "comprobar_aisc",
+    )
     return {"status": "ok", "rows": results}
 
 
-@mcp.tool()
-async def consultar_perfiles(names: str) -> Dict[str, Any]:
-    """Consulta la geometría de secciones/perfiles de acero por nombre para el visualizador.
-
-    Args:
-        names: Nombres de los perfiles separados por comas (ej. "HEB200, IPE300").
-    """
+def _consultar_perfiles(names: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     for raw in names.split(","):
         name = raw.strip()
@@ -131,6 +186,16 @@ async def consultar_perfiles(names: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+async def consultar_perfiles(names: str) -> Dict[str, Any]:
+    """Consulta la geometría de secciones/perfiles de acero por nombre para el visualizador.
+
+    Args:
+        names: Nombres de los perfiles separados por comas (ej. "HEB200, IPE300").
+    """
+    return await asyncio.to_thread(_consultar_perfiles, names)
+
+
+@mcp.tool()
 async def listar_modelos() -> Dict[str, Any]:
     """Consulta los modelos de IA instalados y cargados en el servidor."""
     return {
@@ -145,18 +210,27 @@ async def listar_modelos() -> Dict[str, Any]:
 # =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Carga de modelos e inicio de retrain watcher
+    # Carga de modelos, pool de refinado e inicio del watcher de reentreno
     try:
         model_registry.activate_configured()
+        refinar.start_backend()
         retrain_manager.start_watcher()
         log.info("Modelos cargados: %s", model_registry.loaded_models())
     except Exception as exc:  # noqa: BLE001
         log.error("No se pudo cargar ningun modelo: %s", exc)
 
-    # Administrador de sesión de MCP sobre HTTP/SSE
-    async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(mcp.session_manager.run())
-        yield
+    try:
+        # Administrador de sesión de MCP sobre HTTP/SSE
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(mcp.session_manager.run())
+            yield
+    finally:
+        try:
+            refinar.shutdown_backend()
+        except Exception:  # noqa: BLE001
+            log.exception("Error cerrando el backend de refinado")
+        _PREDICT_RUNNER.shutdown()
+        _CHECK_RUNNER.shutdown()
 
 
 app = FastAPI(
