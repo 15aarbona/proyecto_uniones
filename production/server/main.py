@@ -13,7 +13,7 @@ Endpoints:
   GET  /profiles?names=...      Geometria de secciones (para el visualizador 2D)
   POST /model/activate          Carga/recarga un modelo por nombre
   POST /predict                 {"model": "...", "rows": [...]} -> columnas CODAME + comprobacion ("checks")
-  POST /scenarios               {"row": {...}} -> E1/E2/E3 subiendo cargas (parcial si se agota el tiempo)
+  POST /scenarios               {"row": {...}} -> E1 (entrada), E2/E3 = max. carga que cumple sin/con cantonera
   POST /check                   Comprobacion AISC 360-10 sobre filas CODAME
   POST /validate                Guarda filas validadas (sin reentreno)
   GET  /dataset/summary         Resumen del dataset acumulado
@@ -235,10 +235,12 @@ async def disenar_escenarios_carga(
 
     Devuelve `tabla_markdown` (la tabla a mostrar al usuario), `escenarios` (con la fila CODAME
     completa de cada diseno) y `historial` (todos los pasos probados).
-      E1: mayor carga que aguanta SIN cantonera.
-      E2: primer diseno CON cantonera.
+      E1: diseno de entrada (paso 0, sin tocar cargas).
+      E2: mayor carga que aguanta SIN cantonera.
       E3: mayor carga que aguanta CON cantonera.
-    Solo cuentan los disenos que cumplen la comprobacion AISC 360-10.
+    E2 y E3 priorizan siempre el diseno que cumple la comprobacion AISC 360-10; si ninguno
+    cumple, devuelven el de mayor carga (con aviso). Si no hay ninguna prediccion sin (E2) o con
+    (E3) cantonera, el escenario sale vacio con `encontrado=false` y su motivo.
 
     Args:
         row: UNA fila con UNICODE, BEAM, COLUMN, ratio_moment, ratio_shear, ratio_axial
@@ -531,14 +533,14 @@ class ScenarioIn(BaseModel):
     row: Dict[str, Any] = Field(..., description="UNA fila de entrada del modelo.")
     incremento: float = Field(default=0.05, gt=0, description="Aumento de carga por paso (0.05 = 5 %).")
     max_pasos: int = Field(default=40, ge=1, le=200)
-    max_fallos_seguidos: int = Field(default=3, ge=1)
+    max_fallos_seguidos: int = Field(default=0, ge=0, description="0 = explorar siempre hasta el 100 %.")
 
 
 @app.post(
     "/scenarios",
     tags=["inferencia"],
     summary="Predice una fila y busca 3 disenos subiendo las cargas",
-    response_description="Tabla E1 (max. sin cantonera), E2 (primera con cantonera), E3 (max. con cantonera).",
+    response_description="Tabla E1 (diseno de entrada), E2 (max. sin cantonera que cumple), E3 (max. con cantonera que cumple).",
 )
 async def scenarios(payload: ScenarioIn):
     name = payload.model or config.MODEL_NAME

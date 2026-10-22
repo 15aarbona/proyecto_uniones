@@ -5,10 +5,15 @@ Flujo:
   2. Se suben las cargas (ratio_moment, ratio_shear, ratio_axial) un `incremento` (5 %) y se
      vuelve a predecir, paso a paso (k = 1, 2, 3 ...), hasta que el diseno deja de cumplir.
      Ninguna carga supera el 100 % (1.0): se topan y, cuando todas llegan al tope, se para.
-  3. Del historial se extraen 3 disenos (todos deben CUMPLIR la comprobacion AISC):
-       E1  mayor carga SIN cantonera   (Lh == 0 y n_cantonera == 0)
-       E2  primer diseno CON cantonera (el de menor carga)
-       E3  mayor carga CON cantonera
+  3. Del historial se extraen 3 disenos. E2 y E3 priorizan SIEMPRE la combinacion que CUMPLE
+     la comprobacion AISC (misma regla que la web, ver `_cumple`):
+       E1  diseno de entrada (paso 0, sin tocar cargas)
+       E2  mayor ratio_moment SIN cantonera que cumple. Si ninguno cumple, el de mayor carga
+           (con aviso). Si todas las predicciones llevan cantonera, el escenario queda vacio.
+       E3  mayor ratio_moment CON cantonera que cumple. Si ninguno cumple, el de mayor carga
+           (con aviso). Si ninguna prediccion lleva cantonera, el escenario queda vacio.
+  El barrido no se corta por fallos salvo que `max_fallos_seguidos` > 0: por defecto se
+  exploran todos los pasos hasta el 100 %, para encontrar siempre el maximo que cumple.
 
 Sobre el ajuste: en este flujo NO se maximiza la carga (`maximize_load=False`), porque
 `refinar._maximize_load` reescribe MzEd_Porcen/FyEd_Porcen/FxEd_Porcen y falsearia el
@@ -43,7 +48,7 @@ BASE_SWEEP_AXIAL = 0.05
 CARGA_MAX = 1.0            # Carga máxima (100 %)
 INCREMENTO = 0.05          # +5 % por paso en ratio_moment
 MAX_PASOS = 40             # Pasos máximos de exploración
-MAX_FALLOS_SEGUIDOS = 3    # Pasos fallidos seguidos antes de detener el barrido
+MAX_FALLOS_SEGUIDOS = 0    # 0 = no cortar el barrido por fallos (explorar hasta el 100 %)
 LOTE = 8                   # Pasos evaluados en paralelo
 
 NOMBRES = {
@@ -66,6 +71,29 @@ def _find_key(row: Dict[str, Any], name: str) -> Optional[str]:
         if str(k).strip().lower() == name.lower():
             return k
     return None
+
+def _cumple(chk: Optional[Dict[str, Any]]) -> bool:
+    """Misma regla que `evaluateCumple` de la web: `cumple` del checker Y ratio pesimo <= 1
+    Y todos los ratios <= 1 Y ninguna comprobacion geometrica fallida."""
+    if not chk:
+        return False
+    ok = bool(chk["cumple"]) if "cumple" in chk else True
+    rp = chk.get("ratio_pesimo")
+    if rp is not None and _num(rp, 0.0) > 1.0:
+        ok = False
+    for r in chk.get("ratios") or []:
+        if isinstance(r, dict) and r.get("ratio") is not None and _num(r["ratio"], 0.0) > 1.0:
+            ok = False
+            break
+    for c in chk.get("complementarios") or []:
+        if not isinstance(c, dict):
+            continue
+        txt = str(c.get("resultado") or "").lower()
+        if "no cumple" in txt or "fail" in txt or "error" in txt or c.get("cumple") is False:
+            ok = False
+            break
+    return ok
+
 
 def _cargas_base(row: Dict[str, Any]) -> Dict[str, float]:
     """{clave_real_en_la_fila: valor} de las 3 cargas. ratio_moment es obligatorio."""
@@ -114,6 +142,10 @@ def _filas_tornillos(row: Dict[str, Any]) -> int:
 def _registro(k: int, factor: float, entrada: Dict[str, Any], res: Dict[str, Any]) -> Dict[str, Any]:
     row = res.get("row") or {}
     chk = res.get("check") or {}
+    cumple = _cumple(chk)
+    if chk:
+        chk = {**chk, "cumple": cumple}
+        res["check"] = chk
     lh = _num(row.get("Lh"))
     ncan = int(_num(res.get("n_cantonera")))
     cargas = {n: _num(entrada.get(_find_key(entrada, n))) for n in LOAD_KEYS}
@@ -124,7 +156,7 @@ def _registro(k: int, factor: float, entrada: Dict[str, Any], res: Dict[str, Any
         "ratio_moment": cargas["ratio_moment"],
         "ratio_shear": cargas["ratio_shear"],
         "ratio_axial": cargas["ratio_axial"],
-        "cumple": bool(chk.get("cumple")),
+        "cumple": cumple,
         "ratio_pesimo": chk.get("ratio_pesimo"),
         "descripcion_ratio_pesimo": chk.get("descripcion_ratio_pesimo"),
         "Lh": lh,
@@ -152,13 +184,14 @@ def seleccionar(historial: List[Dict[str, Any]]) -> Dict[str, Optional[Dict[str,
     con_ok = [r for r in barrido if r["con_cantonera"] and r["cumple"]]
     con_all = [r for r in barrido if r["con_cantonera"]]
 
-    # E2: Mayor ratio_moment sin cantonera
+    # E2: Mayor ratio_moment sin cantonera que cumpla; si ninguna cumple, la mayor sin cantonera.
+    # Si todas las predicciones del barrido llevan cantonera, E2 queda vacio (None).
     if sin_ok:
         e2 = max(sin_ok, key=lambda r: (r["ratio_moment"], r["paso"]))
     elif sin_all:
         e2 = max(sin_all, key=lambda r: (r["ratio_moment"], r["paso"]))
     else:
-        e2 = paso0
+        e2 = None
 
     # E3: Mayor ratio_moment con cantonera que cumpla; si ninguna cumple, la mayor con cantonera.
     # Si ninguna predicción del barrido lleva cantonera, E3 queda vacío (None): NO se rellena
@@ -177,9 +210,15 @@ def _hay_cantonera(historial: List[Dict[str, Any]]) -> bool:
     return any(r["con_cantonera"] for r in historial if r["paso"] >= 1)
 
 
+def _hay_sin_cantonera(historial: List[Dict[str, Any]]) -> bool:
+    return any(not r["con_cantonera"] for r in historial if r["paso"] >= 1)
+
+
 def _motivo(clave: str, historial: List[Dict[str, Any]]) -> str:
     if clave == "E3" and not _hay_cantonera(historial):
         return "Ninguna predicción del barrido de cargas genera cantonera: no hay opción de colocar cantonera."
+    if clave == "E2" and not _hay_sin_cantonera(historial):
+        return "Todas las predicciones del barrido de cargas llevan cantonera: no hay diseño sin cantonera."
     ok = [r for r in historial if r["cumple"]]
     if not ok:
         return "Ningún paso cumple la comprobación AISC."
@@ -260,7 +299,7 @@ def generar_escenarios(
                     else:
                         fallos += 1
                     tolerancia = max_fallos_seguidos * (1 if hay_cantonera_valida else 2)
-                    if fallos >= tolerancia:
+                    if max_fallos_seguidos > 0 and fallos >= tolerancia:
                         parada = f"{fallos} pasos seguidos sin cumplir (paso {kk})"
                         break
         k += max(1, lote)
@@ -290,6 +329,9 @@ def generar_escenarios(
             continue
         res = r["_res"]
         etiqueta = f"{clave} - {NOMBRES[clave]}"
+        if clave in ("E2", "E3") and not r["cumple"]:
+            avisos.append(f"{clave}: ningún diseño del barrido cumple la comprobación AISC; "
+                          f"se muestra el de mayor carga, que NO cumple.")
         if r["fuera_rango_entrenamiento"]:
             avisos.append(f"{clave}: cargas fuera del rango de entrenamiento "
                           f"({', '.join(r['fuera_rango_entrenamiento'])}); el modelo extrapola.")
