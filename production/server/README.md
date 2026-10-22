@@ -10,6 +10,8 @@ production/server/
 ├── main.py             Endpoints FastAPI (docs interactivas en /docs)
 ├── model_registry.py   Carga simultánea de modelos + recarga en caliente
 ├── predictor.py        Validación de contrato, routing e inferencia
+├── batcher.py          Batching dinámico de inferencia (una copia del modelo)
+├── escenarios.py       Escenarios E1/E2/E3 subiendo cargas
 ├── storage.py          Dataset acumulado (validaciones; sin reentreno por ahora)
 ├── config.py           Ajustes del servidor + MODEL_NAME por defecto
 ├── models/             Paquetes de modelo instalados (generado por `make`)
@@ -53,9 +55,22 @@ timeout para que una petición no quede colgada:
 | `AI_REFINE_TIMEOUT_S` | `90` | refinado (pool) |
 | `AI_REFINE_BACKEND` | `process` | `process` (pool), `serial` (debug) o `ray` (futuro) |
 | `AI_REFINE_WORKERS` | `min(8, cpus)` | nº de procesos del pool |
+| `AI_BATCH_MAX_ROWS` | `64` | máximo de filas por forward del batcher |
+| `AI_BATCH_MAX_WAIT_MS` | `10` | espera máxima para agrupar peticiones concurrentes |
+| `AI_INFERENCE_TIMEOUT_S` | `60` | timeout de una petición esperando al batcher |
+| `AI_SCENARIO_WORKERS` | `4` | orquestadores de escenarios en paralelo (cola ilimitada) |
+| `AI_SCENARIO_TIMEOUT_S` | `600` | presupuesto cooperativo por escenario ya iniciado |
 
 El backend de refinado es una interfaz (`RefineBackend`) con implementaciones
 `ProcessPoolBackend` y `SerialBackend`; añadir `RayBackend` no requiere tocar el servidor.
+
+La inferencia pasa por un **batcher dinámico** (`batcher.py`): una sola copia del modelo y
+un worker que agrupa peticiones concurrentes en un único forward. El refinado sigue en el
+pool de procesos y el codame/check por petición, fuera del worker de GPU.
+
+`/scenarios` usa una cola ilimitada con `AI_SCENARIO_WORKERS` orquestadores. El timeout se
+cuenta desde que el escenario empieza a ejecutarse; al agotarse devuelve `200` con los
+resultados parciales (`parcial: true`, `parada` y `avisos`).
 
 ## Instalar / actualizar un modelo
 
@@ -99,6 +114,7 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | GET | `/` y `/web/...` | Interfaz web (`web/conexiones_tr.html`) |
 | POST | `/model/activate` | `{"name":"V11"}` → carga/recarga un modelo |
 | POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve las 63 columnas CODAME |
+| POST | `/scenarios` | `{"row":{...},"incremento":0.05,"max_pasos":40}` → E1/E2/E3 con resultados parciales si se agota el tiempo |
 | POST | `/check` | `{"rows":[...]}` (filas CODAME editadas) → comprobación AISC 360-10 |
 | POST | `/dataset/append` | Filas marcadas → traduce a `data_final` y añade al parquet de reentreno (upsert por `Unicode`) |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |

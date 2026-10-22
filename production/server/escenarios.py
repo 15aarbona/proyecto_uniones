@@ -1,18 +1,31 @@
 """Escenarios de carga: de una fila de entrada a 3 diseños de referencia.
 
 Flujo:
-  1. Paso 0 (E1): Se predice la fila de entrada tal cual llega (sin ajustar cargas).
-  2. Barrido incremental (k >= 1): Se parte de ratio_moment=0.20, ratio_shear=0.50 y ratio_axial=0.05.
-     Se aumenta UNICAMENTE ratio_moment (+5 % por paso) hasta toparlo en 1.00 (100 %).
-  3. Selección de escenarios:
-       E1  Diseño de entrada
-       E2  Máximo sin cantonera
-       E3  Máximo con cantonera
+  1. Se predice la fila tal cual llega (paso 0): modelo -> CODAME -> ajuste -> comprobacion.
+  2. Se suben las cargas (ratio_moment, ratio_shear, ratio_axial) un `incremento` (5 %) y se
+     vuelve a predecir, paso a paso (k = 1, 2, 3 ...), hasta que el diseno deja de cumplir.
+     Ninguna carga supera el 100 % (1.0): se topan y, cuando todas llegan al tope, se para.
+  3. Del historial se extraen 3 disenos (todos deben CUMPLIR la comprobacion AISC):
+       E1  mayor carga SIN cantonera   (Lh == 0 y n_cantonera == 0)
+       E2  primer diseno CON cantonera (el de menor carga)
+       E3  mayor carga CON cantonera
+
+Sobre el ajuste: en este flujo NO se maximiza la carga (`maximize_load=False`), porque
+`refinar._maximize_load` reescribe MzEd_Porcen/FyEd_Porcen/FxEd_Porcen y falsearia el
+escalon de carga que se esta evaluando. Si se ajustan geometria y espesores.
+
+`timeout_s` es un presupuesto cooperativo: se comprueba antes de cada lote y, si se agota
+(o si `predict_fn` lanza `TimeoutError` por el refinado), se devuelven los escenarios
+calculados hasta ese momento con `parcial=True`.
+
+Este modulo no depende del modelo ni del servidor: recibe `predict_fn` (inyeccion), por lo
+que se puede probar sin pesos. `run()` lo conecta con `predictor.predict_detailed`.
 """
 from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 log = logging.getLogger("ai-server")
@@ -53,6 +66,20 @@ def _find_key(row: Dict[str, Any], name: str) -> Optional[str]:
         if str(k).strip().lower() == name.lower():
             return k
     return None
+
+def _cargas_base(row: Dict[str, Any]) -> Dict[str, float]:
+    """{clave_real_en_la_fila: valor} de las 3 cargas. ratio_moment es obligatorio."""
+    out: Dict[str, float] = {}
+    for name in LOAD_KEYS:
+        key = _find_key(row, name)
+        if key is None or row[key] is None or str(row[key]).strip() == "":
+            if name == "ratio_moment":
+                raise ValueError("Falta ratio_moment: es necesario para generar los escenarios de carga")
+            continue
+        out[key] = _num(str(row[key]).replace(",", "."))
+    if not any(v > 0 for v in out.values()):
+        raise ValueError("Todas las cargas son 0: no hay nada que aumentar")
+    return out
 
 
 def _fila_paso(row: Dict[str, Any], k: int, incremento: float = INCREMENTO) -> tuple[Dict[str, Any], float]:
@@ -170,17 +197,36 @@ def generar_escenarios(
     max_pasos: int = MAX_PASOS,
     max_fallos_seguidos: int = MAX_FALLOS_SEGUIDOS,
     lote: int = LOTE,
+    compuesto: bool = True,
+    timeout_s: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """`predict_fn(filas_entrada) -> [{"row", "check", "n_cantonera"}]` (mismo orden)."""
+    """`predict_fn(filas_entrada) -> [{"row", "check", "n_cantonera"}]` (mismo orden).
+
+    `timeout_s` es un presupuesto cooperativo: se comprueba antes de cada lote y, si se
+    agota, se devuelven los escenarios encontrados hasta ese momento (`parcial=True`).
+    """
     if incremento <= 0:
         raise ValueError("incremento debe ser > 0")
-
+    t0 = time.monotonic()
+    deadline = t0 + timeout_s if timeout_s is not None and timeout_s > 0 else None
+    base = _cargas_base(row)
     avisos: List[str] = []
     historial: List[Dict[str, Any]] = []
     fallos, hay_cantonera_valida, parada = 0, False, None
     previas, techo, k = None, False, 0
+    parcial = False
+
+    def _agotado() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
 
     while parada is None and not techo and k <= max_pasos:
+        if _agotado():
+            parcial = True
+            parada = "tiempo maximo alcanzado"
+            avisos.append(
+                "Se alcanzo el tiempo maximo; se devuelven los escenarios calculados hasta el momento."
+            )
+            break
         pasos, entradas, factores = [], [], []
         for kk in range(k, min(k + max(1, lote), max_pasos + 1)):
             ent, f = _fila_paso(row, kk, incremento)
@@ -195,7 +241,15 @@ def generar_escenarios(
             factores.append(f)
 
         if entradas:
-            resultados = predict_fn(entradas)
+            try:
+                resultados = predict_fn(entradas)
+            except TimeoutError as exc:
+                parcial = True
+                parada = f"timeout de inferencia/refinado: {exc}"
+                avisos.append(
+                    "Se agoto el tiempo durante un lote; se devuelven los escenarios calculados hasta el momento."
+                )
+                break
             for kk, ent, f, res in zip(pasos, entradas, factores, resultados):
                 reg = _registro(kk, f, ent, res)
                 historial.append(reg)
@@ -210,7 +264,12 @@ def generar_escenarios(
                         parada = f"{fallos} pasos seguidos sin cumplir (paso {kk})"
                         break
         k += max(1, lote)
-
+        if parada is None and not techo and _agotado():
+            parcial = True
+            parada = "tiempo maximo alcanzado"
+            avisos.append(
+                "Se alcanzo el tiempo maximo; se devuelven los escenarios calculados hasta el momento."
+            )
     if parada is None:
         parada = "ratio_moment al 100 %" if techo else f"alcanzado max_pasos={max_pasos}"
 
@@ -255,9 +314,12 @@ def generar_escenarios(
         "tabla_markdown": tabla_markdown(tabla),
         "historial": [{k_: v for k_, v in r.items() if k_ != "_res"} for r in historial],
         "parada": parada,
+        "parcial": parcial,
+        "tiempo_s": round(time.monotonic() - t0, 2),
         "avisos": avisos,
-        "parametros": {"incremento": incremento, "max_pasos": max_pasos,
-                       "max_fallos_seguidos": max_fallos_seguidos, "carga_max": CARGA_MAX},
+        "parametros": {"incremento": incremento, "compuesto": compuesto, "max_pasos": max_pasos,
+                       "max_fallos_seguidos": max_fallos_seguidos, "carga_max": CARGA_MAX,
+                       "timeout_s": timeout_s},
     }
 
 

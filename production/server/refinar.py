@@ -627,7 +627,7 @@ def refine_and_check(row: Dict[str, Any], with_check: bool = True,
         return new, None
 
 
-class RefineTimeout(RuntimeError):
+class RefineTimeout(TimeoutError):
     """El refinado paralelo supero AI_REFINE_TIMEOUT_S."""
 
 
@@ -639,7 +639,8 @@ class RefineBackend:
     def start(self) -> None:
         pass
 
-    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool):
+    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool,
+                   maximize_load: Optional[bool] = None):
         raise NotImplementedError
 
     def reset(self) -> None:
@@ -654,8 +655,9 @@ class SerialBackend(RefineBackend):
 
     name = "serial"
 
-    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool):
-        return [refine_and_check(r, with_check) for r in rows]
+    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool,
+                   maximize_load: Optional[bool] = None):
+        return [refine_and_check(r, with_check, maximize_load) for r in rows]
 
 
 class ProcessPoolBackend(RefineBackend):
@@ -695,12 +697,16 @@ class ProcessPoolBackend(RefineBackend):
         with self._lock:
             self._drop()
 
-    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool):
+    def map_refine(self, rows: List[Dict[str, Any]], with_check: bool,
+                   maximize_load: Optional[bool] = None):
         if not rows:
             return []
         with self._lock:
             executor = self._get()
-            futures = [executor.submit(refine_and_check, row, with_check) for row in rows]
+            futures = [
+                executor.submit(refine_and_check, row, with_check, maximize_load)
+                for row in rows
+            ]
             deadline = time.monotonic() + max(1.0, config.REFINE_TIMEOUT_S)
             out = []
             try:
