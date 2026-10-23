@@ -107,10 +107,11 @@ body.modal-open{overflow:hidden}
 .viewer-head{display:flex;align-items:center;gap:12px;padding:10px 20px;background:#fff;border-bottom:1px solid var(--tr-line);box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .viewer-title{font-weight:700;color:var(--tr-navy);font-size:16px;flex:1}
 .viewer-actions{display:flex;gap:8px}
-.viewer-body{flex:1;display:flex;gap:16px;padding:16px 20px;overflow:auto;background:var(--tr-bg)}
-.viewer-panel{display:block;position:static;isolation:auto;height:auto;min-height:0;width:380px;flex:none;background:#fff;color:var(--tr-text);border:1px solid var(--tr-line);border-radius:6px;padding:14px;overflow-x:hidden;overflow-y:auto;max-height:100%}
+/* El body del visor no scrollea: cada columna gestiona su propio scroll. */
+.viewer-body{flex:1;display:flex;gap:16px;padding:16px 20px;overflow:hidden;min-height:0;background:var(--tr-bg)}
+.viewer-panel{display:block;position:static;isolation:auto;height:100%;min-height:0;width:380px;flex:none;background:#fff;color:var(--tr-text);border:1px solid var(--tr-line);border-radius:6px;padding:14px;overflow-x:hidden;overflow-y:auto;max-height:100%;overscroll-behavior:contain}
 .viewer-panel > *{flex:none}
-.viewer-views{display:flex;flex-wrap:wrap;gap:16px;align-content:flex-start;flex:1}
+.viewer-views{display:flex;flex-wrap:wrap;gap:16px;align-content:flex-start;flex:1;min-width:0;min-height:0;overflow:auto;padding-right:4px;overscroll-behavior:contain}
 .view-card{background:#fff;border:1px solid var(--tr-line);border-radius:8px;padding:12px;box-shadow:0 4px 6px rgba(0,0,0,.05)}
 .view-card h3{margin:0 0 10px;font-size:14px;color:var(--tr-blue)}
 .view-sec{margin:14px 0 8px;padding-top:8px;border-top:2px solid var(--tr-line);font-weight:700;font-size:12.5px;color:var(--tr-navy)}
@@ -128,16 +129,18 @@ body.modal-open{overflow:hidden}
 
 /* Tarjetas de Variaciones y Grupos en el Visualizador */
 .var-cards-wrap {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 8px;
-  align-items: center;
+  align-items: stretch;
 }
 
 .var-card-item {
   display: flex;
   align-items: center;
   gap: 6px;
+  justify-content: space-between;
+  min-width: 0;
   background: #F7FAFD;
   border: 1px solid var(--tr-line);
   border-radius: 4px;
@@ -153,11 +156,26 @@ body.modal-open{overflow:hidden}
 
 .var-card-item label {
   display: flex;
+  flex: 1;
   align-items: center;
   gap: 5px;
+  min-width: 0;
   cursor: pointer;
   font-weight: 600;
   color: var(--tr-navy);
+}
+
+.var-card-item label span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.25;
+}
+
+.var-card-item .badge {
+  flex: none;
+  min-width: 96px;
+  text-align: center;
 }
 
 .var-card-item input[type="checkbox"] {
@@ -169,6 +187,7 @@ body.modal-open{overflow:hidden}
 
 .var-card-item.unavailable {
   flex-wrap: wrap;
+  justify-content: flex-start;
   background: #F2F5F9;
   border-style: dashed;
   color: var(--tr-muted);
@@ -208,5 +227,6 @@ body.modal-open{overflow:hidden}
   h1{font-size:clamp(25px,7vw,36px);white-space:normal}
   .viewer{left:0}
   .viewer-body{flex-direction:column}
-  .viewer-panel{width:100%;max-height:none}
+  .viewer-panel{width:100%;height:auto;max-height:40vh}
+  .viewer-views{flex:1;width:100%;overflow:auto}
 }
