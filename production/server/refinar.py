@@ -173,10 +173,7 @@ def _evaluar_geometria(work: Dict[str, Any]):
     """(calculador ya ejecutado, {descripcion: texto REVISAR}). El calculador trae los limites
     (MINedge, MAXedge, MINspacing, MAXspacing, c_, De_...) que NO estan en ConexionInput."""
     calc = CalculadorAISC36010(inp=row_to_conexion_input(work))
-    res = calc.calcular_conexion()
-    fallos = {c.descripcion: str(c.resultado) for c in res.complementarios
-              if str(c.resultado).upper().startswith("REVISAR")}
-    return calc, fallos
+    return calc, calc.calcular_geometria()
 
 
 # --- placa: gramil p2_ep y ancho b_ep -------------------------------------
@@ -697,41 +694,49 @@ class ProcessPoolBackend(RefineBackend):
         with self._lock:
             self._drop()
 
+    def _drop_if_current(self, executor: ProcessPoolExecutor) -> None:
+        """Reinicia el pool solo si sigue siendo el que uso esta peticion."""
+        with self._lock:
+            if self._executor is executor:
+                self._drop()
+
     def map_refine(self, rows: List[Dict[str, Any]], with_check: bool,
                    maximize_load: Optional[bool] = None):
         if not rows:
             return []
+        # El lock solo protege la creacion del pool y el submit. La espera queda fuera
+        # para que varios escenarios/peticiones alimenten los workers a la vez.
         with self._lock:
             executor = self._get()
             futures = [
                 executor.submit(refine_and_check, row, with_check, maximize_load)
                 for row in rows
             ]
-            deadline = time.monotonic() + max(1.0, config.REFINE_TIMEOUT_S)
-            out = []
-            try:
-                for fut in futures:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    out.append(fut.result(timeout=remaining))
-                return out
-            except TimeoutError:
-                for fut in futures:
-                    fut.cancel()
-                self._drop()
-                log.error(
-                    "refinar: timeout de %.0fs para %d filas; pool reiniciado",
-                    config.REFINE_TIMEOUT_S, len(rows),
-                )
-                raise RefineTimeout(
-                    f"El refinado supero {config.REFINE_TIMEOUT_S:.0f}s para {len(rows)} filas"
-                )
-            except Exception:
-                for fut in futures:
-                    fut.cancel()
-                self._drop()
-                raise
+        deadline = time.monotonic() + max(1.0, config.REFINE_TIMEOUT_S)
+        out = []
+        try:
+            for fut in futures:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                out.append(fut.result(timeout=remaining))
+            return out
+        except TimeoutError:
+            for fut in futures:
+                fut.cancel()
+            self._drop_if_current(executor)
+            log.error(
+                "refinar: timeout de %.0fs para %d filas; pool reiniciado",
+                config.REFINE_TIMEOUT_S, len(rows),
+            )
+            raise RefineTimeout(
+                f"El refinado supero {config.REFINE_TIMEOUT_S:.0f}s para {len(rows)} filas"
+            )
+        except Exception:
+            for fut in futures:
+                fut.cancel()
+            self._drop_if_current(executor)
+            raise
 
     def close(self) -> None:
         with self._lock:

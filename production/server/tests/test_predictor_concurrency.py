@@ -11,9 +11,11 @@ WEIGHTS = SERVER_DIR / "models" / "V11" / "weights.pt"
 
 sys.path.insert(0, str(SERVER_DIR))
 
+import checker  # noqa: E402
 import model_registry  # noqa: E402
 import predictor  # noqa: E402
 import refinar  # noqa: E402
+from calculador import CalculadorAISC36010  # noqa: E402
 
 
 @unittest.skipUnless(CASO.exists() and WEIGHTS.exists(), "requiere caso.csv y modelo V11")
@@ -47,6 +49,38 @@ class PredictorConcurrencyTests(unittest.TestCase):
         stats = predictor._get_batcher().stats()
         self.assertGreaterEqual(stats["batches"], 1)
         self.assertGreaterEqual(stats["rows"], len(rows))
+
+    def test_fastpaths_match_scalar_calculator(self):
+        with open(CASO, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))[:3]
+        predictions, _ = predictor.predict_and_check("V11", rows)
+        for row in predictions:
+            fast = CalculadorAISC36010(
+                inp=checker.row_to_conexion_input(row)
+            ).calcular_geometria()
+            full = CalculadorAISC36010(
+                inp=checker.row_to_conexion_input(row)
+            ).calcular_conexion()
+            expected = {
+                c.descripcion: str(c.resultado)
+                for c in full.complementarios[:18]
+                if str(c.resultado).upper().startswith("REVISAR")
+            }
+            self.assertEqual(set(fast), set(expected))
+
+            result = checker.check_single_row(row)
+            self.assertEqual(result["cumple"], full.cumple)
+            self.assertEqual(result["ratio_pesimo"], round(full.ratio_pesimo, 4))
+            self.assertEqual(
+                result["descripcion_ratio_pesimo"], full.descripcion_ratio_pesimo
+            )
+            self.assertEqual(
+                result["ratios"], [f.model_dump() for f in full.ratios]
+            )
+            self.assertEqual(
+                result["complementarios"],
+                [c.model_dump() for c in full.complementarios],
+            )
 
 
 if __name__ == "__main__":

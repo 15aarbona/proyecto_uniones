@@ -158,7 +158,9 @@ def row_to_conexion_input(row: Dict[str, Any]) -> ConexionInput:
     bolts_per_row = _num(row.get("BoltsInTensionFactor"), 2.0) or 2.0
     electrode = str(row.get("Electrode") or "").strip() or None
 
-    return ConexionInput(
+    # `row_to_conexion_input` ya sanea y convierte todos los campos; evitar la
+    # validacion/coercion de Pydantic en cada una de las ~25 evaluaciones por fila.
+    return ConexionInput.model_construct(
         viga=viga,
         pilar=pilar,
         E=e_mod,
@@ -214,14 +216,14 @@ def calcular_ratios_row(row: Dict[str, Any]) -> Tuple[Dict[str, float], Calculad
 
 def check_single_row(row: Dict[str, Any]) -> Dict[str, Any]:
     conexion_input = row_to_conexion_input(row)
-    resultado = CalculadorAISC36010(inp=conexion_input).calcular_conexion()
+    resultado = CalculadorAISC36010(inp=conexion_input).calcular_dict()
 
     res_dict = dict(row)
-    res_dict["cumple"] = resultado.cumple
-    res_dict["ratio_pesimo"] = round(resultado.ratio_pesimo, 4)
-    res_dict["descripcion_ratio_pesimo"] = resultado.descripcion_ratio_pesimo
-    res_dict["ratios"] = [f.model_dump() for f in resultado.ratios]
-    res_dict["complementarios"] = [c.model_dump() for c in resultado.complementarios]
+    res_dict["cumple"] = resultado["cumple"]
+    res_dict["ratio_pesimo"] = round(resultado["ratio_pesimo"], 4)
+    res_dict["descripcion_ratio_pesimo"] = resultado["descripcion_ratio_pesimo"]
+    res_dict["ratios"] = resultado["ratios"]
+    res_dict["complementarios"] = resultado["complementarios"]
     return res_dict
 
 
