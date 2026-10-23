@@ -14,14 +14,19 @@ from perfiles import RepositorioPerfiles
 
 log = logging.getLogger("ai-server")
 
+# Externos solo contiene referencias a clases/estaticos: es seguro compartirlo.
+_DEFAULT_EXT = Externos()
+
 
 class CalculadorAISC36010:
     solo_ratios: bool = False
+    solo_dict: bool = False
     ratios_dict: Dict[str, float] = {}
+    resultado_dict: Dict[str, Any] = {}
 
     def __init__(self, inp: ConexionInput, ext: Optional[Externos] = None, repo_perfiles: Optional[RepositorioPerfiles] = None) -> None:
         self.inp = inp
-        self.ext = ext or Externos()
+        self.ext = ext or _DEFAULT_EXT
         self.repo_perfiles = repo_perfiles
 
         # Variables internas correspondientes a M_C_AISC36010.cs
@@ -268,6 +273,15 @@ class CalculadorAISC36010:
         finally:
             self.solo_ratios = False
         return self.ratios_dict
+
+    def calcular_dict(self) -> Dict[str, Any]:
+        """Mismo calculo que `calcular_conexion` pero sin crear objetos Pydantic."""
+        self.solo_dict = True
+        try:
+            self.calcular_conexion()
+        finally:
+            self.solo_dict = False
+        return self.resultado_dict
 
     def calcular_conexion(self) -> ResultadoConexion:
         self._cargar_perfiles()
@@ -699,6 +713,29 @@ class CalculadorAISC36010:
         desc_resul_comp[32] = "Connection Capacity Moment [kN*m]"
         resul_comp[32] = str(self.MzEd)
 
+        hay_fallo_geometrico = any(
+            str(resultado).startswith("REVISAR") for resultado in resul_comp
+        )
+        ratio_max_todos = max(ratios) if ratios else 0.0
+        cumple = (ratio_max_todos <= 1.0) and not hay_fallo_geometrico
+
+        if self.solo_dict:
+            self.resultado_dict = {
+                "ratio_pesimo": self.RatioPesimo_,
+                "descripcion_ratio_pesimo": ratios_desc[num49],
+                "ratios": [
+                    {"indice": i, "descripcion": ratios_desc[i],
+                     "ratio": ratios[i] if not math.isnan(ratios[i]) else None}
+                    for i in range(self.NumeRatios)
+                ],
+                "complementarios": [
+                    {"indice": i, "descripcion": desc_resul_comp[i], "resultado": resul_comp[i]}
+                    for i in range(self.NumeResulComplemen)
+                ],
+                "cumple": cumple,
+            }
+            return None  # type: ignore[return-value]
+
         # Construcción de la respuesta Pydantic
         filas_ratios = [
             FilaRatio(indice=i, descripcion=ratios_desc[i], ratio=ratios[i] if not math.isnan(ratios[i]) else None)
@@ -708,13 +745,6 @@ class CalculadorAISC36010:
             Complementario(indice=i, descripcion=desc_resul_comp[i], resultado=resul_comp[i])
             for i in range(self.NumeResulComplemen)
         ]
-
-        hay_fallo_geometrico = any(
-            comp.resultado.startswith("REVISAR") for indice, comp in enumerate(comp_objs)
-        )
-
-        ratio_max_todos = max(ratios) if ratios else 0.0
-        cumple = (ratio_max_todos <= 1.0) and not hay_fallo_geometrico
 
         intermedios = {
             "FntAME": self.FntAME_, "FnvAME": self.FnvAME_, "nbol": self.nbol_,
@@ -731,6 +761,160 @@ class CalculadorAISC36010:
             avisos=[],
             cumple=cumple
         )
+
+    def calcular_geometria(self) -> Dict[str, str]:
+        """Via rapida para el refinado: solo comprobaciones geometricas.
+
+        Evita los 17 pasos de resistencia y la construccion de objetos Pydantic.
+        Devuelve {clave: texto} solo para las comprobaciones con REVISAR.
+        """
+        self._cargar_perfiles()
+        self.CalculaEsfuerzos()
+        self.lambdaM0AME = 0.75
+
+        tbl_pernos = self.ext.tablapernos()
+        tbl_pernos.lambdaM0AME = str(self.lambdaM0AME)
+        if self.TipoCombiEnve == "ASD":
+            tbl_pernos.lambdaM0AME = "0.5"
+        tbl_pernos.nombretornillo = self.BoltName_ep
+        tbl_pernos.threadscondition = self.BoltThreads
+        tbl_pernos.gradotornillo = self.BoltGrade
+
+        if self.SisUniPerMetri:
+            db = tbl_pernos.dmetrico
+            dh = tbl_pernos.dhmetrico
+            self.MINedge = tbl_pernos.disborminmet
+            self.MINspacing = tbl_pernos.pitchminmet
+            self.MINenter = tbl_pernos.dislibmet
+        else:
+            db = tbl_pernos.dimperial
+            dh = tbl_pernos.dhimperial
+            self.MINedge = tbl_pernos.disborminimp
+            self.MINspacing = tbl_pernos.pitchminimp
+            self.MINenter = tbl_pernos.dislibmet
+
+        self.h_h_ = 0.0
+        if self.AnguloCantonera != 0.0:
+            self.h_h_ = self.FactorCantoCantonera * self.viga.h / math.sin(math.radians(self.AnguloCantonera))
+
+        self.De_ = self.viga.h + self.h_h_
+        self.Lp_ = math.ceil((self.De_ + 2.0 * self.pfo + 2.0 * self.dev) / 10.0) * 10.0
+        self.c_ = self.ext.moduloauxiliar.redond_mult(self.pfo + self.pfi + self.viga.tf, 5.0)
+        self.deh_ = (self.b_ep - self.p2_ep) / 2.0
+
+        arr_pos = [0.0] * 13
+        arr_pos[0] = self.dev
+        arr_pos[1] = self.c_ + arr_pos[0]
+        arr_pos[2] = self.pb + arr_pos[1]
+        arr_pos[3] = self.p3 + arr_pos[2]
+        arr_pos[4] = self.p4 + arr_pos[3]
+        arr_pos[5] = self.p5 + arr_pos[4]
+        arr_pos[6] = self.p6 + arr_pos[5]
+        arr_pos[7] = self.p7 + arr_pos[6]
+        arr_pos[8] = self.p8 + arr_pos[7]
+        arr_pos[9] = self.p9 + arr_pos[8]
+        arr_pos[10] = self.p10 + arr_pos[9]
+        arr_pos[11] = self.p11 + arr_pos[10]
+        arr_pos[12] = self.p12 + arr_pos[11]
+
+        if self.ExisteNumeTotalFilasTornillos:
+            num_filas = self.NumeTotalFilasTornillos
+        else:
+            num_filas = 1
+            for i in range(12):
+                if arr_pos[i] != arr_pos[i + 1]:
+                    num_filas += 1
+        self.nbol_ = 2.0 * num_filas
+
+        posObstaculo1 = self.dev + self.pfo
+        posObstaculo2 = self.dev + self.pfo + self.viga.tf
+        posObstaculo3 = self.dev + self.pfo + self.viga.h - self.viga.tf
+        posObstaculo4 = self.dev + self.pfo + self.viga.h
+        posObstaculo5 = self.dev + self.pfo + self.De_ - self.viga.tf
+        posObstaculo6 = self.dev + self.pfo + self.De_
+
+        tp_obj = self.ext.tablaplaca()
+        tp_obj.nombreplaca = self.ThicknessName_t_ep
+        if self.SisUniPlaMetri:
+            self.MAXedge = float(tp_obj.disbormaxmet)
+            self.MAXspacing = float(tp_obj.pitchmaxmet)
+        else:
+            self.MAXedge = float(tp_obj.disbormaximp)
+            self.MAXspacing = float(tp_obj.pitchmaximp)
+
+        filas_tornillos = [arr_pos[0]]
+        for i in range(1, 13):
+            if arr_pos[i] != arr_pos[i - 1]:
+                filas_tornillos.append(arr_pos[i])
+
+        seps = [arr_pos[i + 1] - arr_pos[i] for i in range(12) if arr_pos[i + 1] > arr_pos[i]]
+
+        fallos: Dict[str, str] = {}
+
+        def _rev(key: str, texto: str) -> None:
+            if texto.upper().startswith("REVISAR"):
+                fallos[key] = texto
+
+        if self.pilar.Prmin == 0.0:
+            _rev("PRMIN", "REVISAR: PERFIL NO APTO COMO COLUMNA")
+        else:
+            _rev("PRMIN", "OK" if not (self.p2_ep < self.pilar.Prmin)
+                 else f"REVISAR: {self.p2_ep - self.pilar.Prmin} / prmin: {self.pilar.Prmin}")
+
+        if self.pilar.Prmax == 0.0:
+            _rev("PRMAX", "REVISAR: PERFIL NO APTO COMO COLUMNA")
+        else:
+            _rev("PRMAX", "OK" if not (self.p2_ep > self.pilar.Prmax)
+                 else f"REVISAR: {self.pilar.Prmax - self.p2_ep} / prmax: {self.pilar.Prmax}")
+
+        _rev("DEH_MIN", "OK" if not (self.deh_ < self.MINedge)
+             else f"REVISAR: {self.deh_ - self.MINedge} / MinEdgeDist: {self.MINedge}")
+        _rev("DEH_MAX", "OK" if not (self.deh_ > self.MAXedge)
+             else f"REVISAR: {self.MAXedge - self.deh_} / MaxEdgeDist: {self.MAXedge}")
+        _rev("DEV_MIN", f"REVISAR: {self.dev - self.MINedge} / MinEdgeDist: {self.MINedge}"
+             if self.dev < self.MINedge else "OK")
+        _rev("DEV_MAX", f"REVISAR: {self.MAXedge - self.dev} / MaxEdgeDist: {self.MAXedge}"
+             if self.dev > self.MAXedge else "OK")
+
+        _rev("SPACING_MIN", "OK" if (not seps or min(seps) >= self.MINspacing)
+             else f"REVISAR: separacion minima {min(seps):g} < {self.MINspacing:g}")
+        _rev("SPACING_MAX", "OK" if (not seps or max(seps) <= self.MAXspacing)
+             else f"REVISAR: separacion maxima {max(seps):g} > {self.MAXspacing:g}")
+
+        _margen = tablapernos.DATOS_PERNOS.get(int(round(db)), {}).get("clearance", 0.0)
+
+        def _toca_al(pos_obs):
+            for j, y in enumerate(filas_tornillos, start=1):
+                if abs(y - pos_obs) < _margen:
+                    return f"REVISAR: fila {j} a {abs(y - pos_obs):.1f} mm (< {_margen:.1f})"
+            return "OK"
+
+        for key, pos_obs in (
+            ("ENTER_TOP_FLANGE_TOP", posObstaculo1),
+            ("ENTER_TOP_FLANGE_LOW", posObstaculo2),
+            ("ENTER_LOW_FLANGE_TOP", posObstaculo3),
+            ("ENTER_LOW_FLANGE_LOW", posObstaculo4),
+        ):
+            _rev(key, _toca_al(pos_obs))
+
+        if self.AnguloCantonera != 0.0:
+            _rev("ENTER_HAUNCH_FLANGE_TOP", _toca_al(posObstaculo5))
+            _rev("ENTER_HAUNCH_FLANGE_LOW", _toca_al(posObstaculo6))
+        else:
+            _rev("ENTER_HAUNCH_FLANGE_TOP", "OK")
+            _rev("ENTER_HAUNCH_FLANGE_LOW", "OK")
+
+        self.bep_min_ = math.ceil((self.viga.b + 20.0) / 5.0) * 5.0
+        _rev("bc&bb", "OK" if not (self.pilar.b < self.viga.b)
+             else f"REVISAR: {self.pilar.b - self.viga.b} / bc: {self.pilar.b}")
+        _rev("bep&bb", "OK" if not (self.b_ep < self.viga.b)
+             else f"REVISAR: {self.b_ep - self.viga.b} / bb: {self.viga.b}")
+        _rev("bep&bepmin", "OK" if not (self.b_ep < self.bep_min_)
+             else f"REVISAR: {self.b_ep - self.bep_min_} / bepmin: {self.bep_min_}")
+        _rev("bep&bc", "OK" if not (self.b_ep > self.pilar.b)
+             else f"REVISAR: {self.pilar.b - self.b_ep} / bep: {self.b_ep}")
+
+        return fallos
 
     # --- MÉTODOS DE CÁLCULO DE PASOS (STEPS) ---
 

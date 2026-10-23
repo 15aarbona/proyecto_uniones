@@ -63,10 +63,14 @@ timeout para que una petición no quede colgada:
 
 El backend de refinado es una interfaz (`RefineBackend`) con implementaciones
 `ProcessPoolBackend` y `SerialBackend`; añadir `RayBackend` no requiere tocar el servidor.
+El lock del pool solo cubre el submit: varios escenarios/peticiones pueden tener lotes en
+vuelo a la vez y los workers toman filas de cualquier lote.
 
 La inferencia pasa por un **batcher dinámico** (`batcher.py`): una sola copia del modelo y
 un worker que agrupa peticiones concurrentes en un único forward. El refinado sigue en el
-pool de procesos y el codame/check por petición, fuera del worker de GPU.
+pool de procesos y el codame/check por petición, fuera del worker de GPU. El ajuste
+geométrico usa una vía rápida (`calcular_geometria`) que evita los 17 pasos de resistencia
+y la construcción de objetos Pydantic.
 
 `/scenarios` usa una cola ilimitada con `AI_SCENARIO_WORKERS` orquestadores. El timeout se
 cuenta desde que el escenario empieza a ejecutarse; al agotarse devuelve `200` con los

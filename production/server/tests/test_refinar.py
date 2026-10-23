@@ -1,11 +1,27 @@
 import logging
 import sys
+import threading
+import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import refinar  # noqa: E402
+
+
+class _FakeExecutor:
+    def __init__(self):
+        self.futures = []
+
+    def submit(self, fn, *args, **kwargs):
+        fut = Future()
+        self.futures.append(fut)
+        return fut
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
 
 
 def _rows(n=8):
@@ -50,6 +66,33 @@ class RefineBackendTests(unittest.TestCase):
 
     def test_refine_timeout_is_timeout_error(self):
         self.assertTrue(issubclass(refinar.RefineTimeout, TimeoutError))
+
+    def test_map_refine_releases_lock_while_waiting(self):
+        backend = refinar.ProcessPoolBackend()
+        fake = _FakeExecutor()
+        backend._executor = fake
+        result = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(backend.map_refine([{}, {}], True, False))
+        )
+        thread.start()
+        deadline = time.monotonic() + 2.0
+        while len(fake.futures) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(fake.futures), 2)
+
+        acquired = backend._lock.acquire(timeout=0.2)
+        if acquired:
+            backend._lock.release()
+        for fut in fake.futures:
+            fut.set_result(({}, None))
+        thread.join(timeout=2.0)
+        backend._executor = None
+
+        self.assertTrue(acquired, "map_refine retiene el lock mientras espera")
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(result[0]), 2)
 
 
 if __name__ == "__main__":
