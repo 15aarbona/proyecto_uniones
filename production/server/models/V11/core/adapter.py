@@ -104,11 +104,11 @@ _PROFILE_LOOKUP = None
 
 
 def _profile_lookup() -> pd.DataFrame:
-    """Tabla perfil -> geometria, indexada por nombre en MAYUSCULAS (sin espacios)."""
     global _PROFILE_LOOKUP
     if _PROFILE_LOOKUP is None:
         frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
         union = pd.concat(frames, ignore_index=True)
+        union = union.dropna(subset=["tekla_nomenclature_1"])   # <- nuevo
         union["_key"] = union["tekla_nomenclature_1"].astype(str).str.strip().str.upper()
         _PROFILE_LOOKUP = union.drop_duplicates(subset="_key").set_index("_key")
     return _PROFILE_LOOKUP
@@ -298,9 +298,8 @@ def _pre(bundle: dict = None) -> Preprocessor:
 
 
 def _profile_names() -> list:
-    return sorted(
-        _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
-    )
+    names = _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip()
+    return sorted(n for n in names.unique() if n)
 
 
 def input_schema(bundle: dict = None) -> list:

@@ -3,6 +3,7 @@
 Fuente de datos: `production/server/data` (catalogos Tekla). Se usa tanto para el mapeo
 a CODAME como para la comprobacion estructural, con independencia del modelo activo.
 """
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -32,24 +33,32 @@ _LOOKUP: pd.DataFrame | None = None
 
 
 def profile_lookup() -> pd.DataFrame:
-    """Tabla perfil -> geometria, indexada por nombre en MAYUSCULAS (sin espacios)."""
     global _LOOKUP
     if _LOOKUP is None:
         frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
         union = pd.concat(frames, ignore_index=True)
+        union = union.dropna(subset=["tekla_nomenclature_1"])   # <- nuevo
         union["_key"] = union["tekla_nomenclature_1"].astype(str).str.strip().str.upper()
         _LOOKUP = union.drop_duplicates(subset="_key").set_index("_key")
     return _LOOKUP
 
 
 def profile_names() -> list:
-    return sorted(
-        profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
-    )
+    names = profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip()
+    return sorted(n for n in names.unique() if n)
+
+
+@lru_cache(maxsize=4096)
+def _profile_by_key(key: str):
+    lut = profile_lookup()
+    return lut.loc[key].to_dict() if key in lut.index else None
 
 
 def get_profile(name):
-    """Serie de geometria de un perfil (o None si no existe)."""
-    key = str(name).strip().upper()
-    lut = profile_lookup()
-    return lut.loc[key] if key in lut.index else None
+    """Dict de geometria de un perfil (o None si no existe).
+
+    Cacheado por nombre normalizado: antes devolvia una Series de pandas (`.loc` en cada
+    llamada, varias por fila y por iteracion del refinado). Los llamadores solo leen (`.get`,
+    `in`), asi que el dict se comparte: NO modificarlo.
+    """
+    return _profile_by_key(str(name).strip().upper())

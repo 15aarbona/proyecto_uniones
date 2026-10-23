@@ -610,6 +610,12 @@ def _init_worker() -> None:
         )
     except Exception:  # noqa: BLE001
         pass
+    # Warm-up: con `spawn` cada worker leeria los 4 CSV de Tekla en su primera tarea.
+    try:
+        import catalogo
+        catalogo.profile_lookup()
+    except Exception:  # noqa: BLE001
+        log.exception("refinar: no se pudo precargar el catalogo en el worker")
 
 
 def refine_and_check(row: Dict[str, Any], with_check: bool = True,
@@ -712,7 +718,10 @@ class ProcessPoolBackend(RefineBackend):
                 executor.submit(refine_and_check, row, with_check, maximize_load)
                 for row in rows
             ]
-        deadline = time.monotonic() + max(1.0, config.REFINE_TIMEOUT_S)
+        # Plazo proporcional al lote: base + por_fila * rondas necesarias con WORKERS procesos.
+        rondas = math.ceil(len(rows) / max(1, WORKERS))
+        timeout_s = max(1.0, config.REFINE_TIMEOUT_S) + max(0.0, config.REFINE_TIMEOUT_PER_ROW_S) * rondas
+        deadline = time.monotonic() + timeout_s
         out = []
         try:
             for fut in futures:
@@ -722,15 +731,16 @@ class ProcessPoolBackend(RefineBackend):
                 out.append(fut.result(timeout=remaining))
             return out
         except TimeoutError:
-            for fut in futures:
-                fut.cancel()
-            self._drop_if_current(executor)
+            # No se reinicia el pool: es compartido y hacerlo tiraria el trabajo de las demas
+            # peticiones en vuelo (y dejaria procesos huerfanos compitiendo por CPU).
+            # Solo se cancelan las tareas de ESTA peticion que aun no han empezado.
+            pendientes = sum(1 for fut in futures if fut.cancel())
             log.error(
-                "refinar: timeout de %.0fs para %d filas; pool reiniciado",
-                config.REFINE_TIMEOUT_S, len(rows),
+                "refinar: timeout de %.0fs para %d filas (%d sin empezar canceladas); pool conservado",
+                timeout_s, len(rows), pendientes,
             )
             raise RefineTimeout(
-                f"El refinado supero {config.REFINE_TIMEOUT_S:.0f}s para {len(rows)} filas"
+                f"El refinado supero {timeout_s:.0f}s para {len(rows)} filas"
             )
         except Exception:
             for fut in futures:

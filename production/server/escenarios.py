@@ -49,7 +49,8 @@ CARGA_MAX = 1.0            # Carga máxima (100 %)
 INCREMENTO = 0.05          # +5 % por paso en ratio_moment
 MAX_PASOS = 40             # Pasos máximos de exploración
 MAX_FALLOS_SEGUIDOS = 0    # 0 = no cortar el barrido por fallos (explorar hasta el 100 %)
-LOTE = 8                   # Pasos evaluados en paralelo
+LOTE = MAX_PASOS + 1       # Todos los pasos en un solo lote: el barrido real (~18 pasos) se reparte
+                           # entre los workers de una vez y el batcher recibe una sola peticion
 
 NOMBRES = {
     "E1": "Diseño de entrada",

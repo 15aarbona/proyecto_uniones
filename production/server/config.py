@@ -27,6 +27,9 @@ PORT = int(os.environ.get("AI_PORT", "8080"))
 PREDICT_TIMEOUT_S = float(os.environ.get("AI_PREDICT_TIMEOUT_S", "120"))
 CHECK_TIMEOUT_S = float(os.environ.get("AI_CHECK_TIMEOUT_S", "120"))
 REFINE_TIMEOUT_S = float(os.environ.get("AI_REFINE_TIMEOUT_S", "90"))
+# Plazo del refinado = REFINE_TIMEOUT_S + REFINE_TIMEOUT_PER_ROW_S * ceil(filas / workers):
+# crece con el tamano del lote en lugar de ser fijo para cualquier numero de uniones.
+REFINE_TIMEOUT_PER_ROW_S = float(os.environ.get("AI_REFINE_TIMEOUT_PER_ROW_S", "5"))
 REFINE_BACKEND = os.environ.get("AI_REFINE_BACKEND", "process").strip().lower()
 
 # Batching dinamico de inferencia (una sola copia del modelo, un worker de GPU).

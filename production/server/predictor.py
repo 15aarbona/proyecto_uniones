@@ -209,9 +209,12 @@ def _predict(model_name: str, rows: List[Dict[str, Any]], with_checks: bool,
 
     coded: List[Dict[str, Any]] = []
     raw: List[Dict[str, Any]] = []
+    # Una sola conversion a dicts (antes: iloc[i].to_dict() por fila, muy lento con pandas).
+    input_rows = features.to_dict("records")
+    design_rows = design.to_dict("records")
     for i in range(len(df)):
-        input_row = features.iloc[i].to_dict()
-        design_row = design.iloc[i].to_dict()
+        input_row = input_rows[i]
+        design_row = design_rows[i]
         if detail is not None:
             try:
                 detail.append({"n_cantonera": int(round(float(design_row.get("n_cantonera") or 0)))})

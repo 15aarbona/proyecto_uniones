@@ -187,7 +187,7 @@ def _consultar_perfiles(names: str) -> Dict[str, Any]:
             result[name] = None
         else:
             def g(k):
-                if k not in geom.index:
+                if k not in geom:
                     return None
                 v = geom.get(k)
                 return None if pd.isna(v) else v
@@ -391,28 +391,7 @@ def list_models() -> Dict[str, Any]:
 )
 def profiles(names: str = Query(..., description="Nombres de perfil separados por comas")):
     """Devuelve {nombre: {cota: valor}} o null por cada perfil desconocido."""
-    result: Dict[str, Any] = {}
-    for raw in names.split(","):
-        name = raw.strip()
-        if not name:
-            continue
-        geom = catalogo.get_profile(name)
-        if geom is None:
-            result[name] = None
-        else:
-            def g(k):
-                if k not in geom.index:
-                    return None
-                v = geom.get(k)
-                return None if pd.isna(v) else v
-            bf = g("bf_mm")
-            if bf in (None, 0, 0.0):
-                bf = g("b_mm")   # en el catalogo EU el ancho de ala va en b_mm
-            result[name] = {
-                "type": g("type"), "d_mm": g("d_mm"), "bf_mm": bf,
-                "tw_mm": g("tw_mm"), "tf_mm": g("tf_mm"), "r1_mm": g("r1_mm"),
-            }
-    return {"profiles": result}
+    return _consultar_perfiles(names)
 
 
 @app.get("/model", tags=["modelos"], summary="Contrato del modelo por defecto")
