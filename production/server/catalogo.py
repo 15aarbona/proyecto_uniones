@@ -10,7 +10,7 @@ import pandas as pd
 import config
 
 DATA_DIR = config.DATA_DIR
-_TEKLA_FILES = ("tekla_eu.csv", "tekla_cad.csv", "tekla_faltante.csv")
+_TEKLA_FILES = ("tekla_eu.csv", "tekla_cad.csv", "tekla_faltante.csv", "tekla_uk.csv")
 
 # grado_acero -> (fy, fu) MPa
 ACERO_TABLE = {
