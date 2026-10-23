@@ -71,7 +71,7 @@ WEIGHTS_PATH = MODEL_DIR / "weights.pt"
 PREPROCESSOR_PATH = MODEL_DIR / "preprocessor.joblib"
 DATA_DIR = MODEL_DIR / "data"
 
-_TEKLA_FILES = ("tekla_eu.csv", "tekla_cad.csv", "tekla_faltante.csv")
+_TEKLA_FILES = ("tekla_eu.csv", "tekla_cad.csv", "tekla_faltante.csv", "tekla_uk.csv")
 
 # Catalogos de materiales (referencia: V7/variables.py).
 ACERO_TABLE = {
