@@ -12,7 +12,6 @@ production/server/
 ├── predictor.py        Validación de contrato, routing e inferencia
 ├── batcher.py          Batching dinámico de inferencia (una copia del modelo)
 ├── escenarios.py       Escenarios E1/E2/E3 subiendo cargas
-├── artifacts.py        Parquet temporales para no cargar el contexto MCP
 ├── storage.py          Dataset acumulado (validaciones; sin reentreno por ahora)
 ├── config.py           Ajustes del servidor + MODEL_NAME por defecto
 ├── models/             Paquetes de modelo instalados (generado por `make`)
@@ -72,9 +71,6 @@ explícitamente:
 | `AI_SCENARIO_QUEUE_TIMEOUT_S` | 15 % del cliente | espera máxima en cola |
 | `AI_SCENARIO_TIMEOUT_S` | 80 % del cliente | presupuesto total de ejecución del escenario |
 | `AI_MCP_JSON_RESPONSE` | `1` | respuesta MCP en JSON; `0` para forzar SSE |
-| `AI_ARTIFACTS_DIR` | temp del dispositivo | directorio de los Parquet temporales |
-| `AI_ARTIFACT_TTL_S` | `86400` | caducidad de los artefactos (24 h) |
-| `AI_PUBLIC_BASE_URL` | vacío | base para devolver URL absoluta del artefacto |
 
 Con los valores por defecto: 15 s de cola + 80 s de ejecución = 95 s, por debajo de los
 100 s del cliente. Si se cambia `AI_CLIENT_TIMEOUT_S`, todo se reajusta proporcionalmente.
@@ -99,8 +95,8 @@ y la construcción de objetos Pydantic.
 
 El servidor MCP anuncia su capacidad en `instructions` (máximo de llamadas concurrentes) y
 responde en JSON por defecto (`AI_MCP_JSON_RESPONSE=1`) para evitar los cuelgues de streams
-SSE a través del túnel. El payload de `disenar_escenarios_carga` contiene solo un resumen y
-la referencia al Parquet; el detalle de diseño no viaja en el contexto del modelo.
+SSE a través del túnel. `disenar_escenarios_carga` devuelve JSON por lotes con el detalle
+completo en `lote`; se omite `historial` para no engordar innecesariamente la respuesta.
 
 En MCP, los estados ocupado/timeout se devuelven como **resultado estructurado** (no como
 error JSON-RPC) para que Copilot no los convierta en un 504: `status` =
@@ -115,15 +111,11 @@ lote se ejecutan **secuencialmente** dentro de una sola plaza del control de adm
 Si llegan más de `AI_SCENARIO_BATCH_ROWS`, se procesan las primeras y el resto se descarta;
 la respuesta lo indica en `n_descartadas` y `descartadas`.
 
-El detalle pesado **no se devuelve al contexto**: se escribe un Parquet temporal con una
-fila por E1/E2/E3 de cada conexión (`UNICODE`, `Escenario`, `Encontrado`, métricas y
-columnas CODAME). La respuesta MCP solo incluye `status`, contadores, `artefacto`
-(`id`, `url`, `filas`, `bytes`, caducidad), `resumen` compacto por conexión, `errores` y
+La respuesta incluye `lote` con el detalle completo por conexión (`resultado.rows`,
+`resultado.checks` compactos, `escenarios` y `tabla_markdown`), pero **sin `historial`**.
+También incluye `status`, contadores, `resumen` compacto por conexión, `errores` y
 `tabla_markdown` resumen. Una fila con error o timeout no aborta el resto del lote.
-
-El artefacto se descarga desde `GET /artifacts/<id>.parquet`. El directorio por defecto es
-el temp del dispositivo (`AI_ARTIFACTS_DIR` para cambiarlo); se limpian los caducados según
-`AI_ARTIFACT_TTL_S`.
+El cliente debe llamar en varios lotes si necesita más conexiones.
 
 ## Instalar / actualizar un modelo
 
@@ -171,7 +163,6 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | POST | `/check` | `{"rows":[...]}` (filas CODAME editadas) → comprobación AISC 360-10 |
 | POST | `/dataset/append` | Filas marcadas → traduce a `data_final` y añade al parquet de reentreno (upsert por `Unicode`) |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
-| GET | `/artifacts/<id>.parquet` | Descarga del Parquet temporal de escenarios |
 | GET | `/dataset/summary` | Resumen del dataset acumulado |
 
 Sin autenticación (API abierta en la red interna). Documentación interactiva en `/docs`

@@ -35,13 +35,12 @@ from typing import Any, Deque, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import pandas as pd
 
-import artifacts
 import catalogo
 import config
 import model_registry
@@ -294,7 +293,7 @@ def _uid(row: Dict[str, Any]) -> str:
 
 
 def _compact_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    """Quita `rows_raw` y deja los checks en formato compacto para el tunel MCP."""
+    """Quita `rows_raw`/`historial` y deja los checks compactos para el tunel MCP."""
     compact_checks = [
         {
             k: c.get(k)
@@ -303,7 +302,7 @@ def _compact_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         }
         for c in (result.get("checks") or [])
     ]
-    out = {k: v for k, v in result.items() if k != "rows_raw"}
+    out = {k: v for k, v in result.items() if k not in ("rows_raw", "historial")}
     out["checks"] = compact_checks
     return {"model_name": name, "status": "OK", **out}
 
@@ -561,9 +560,9 @@ async def disenar_escenarios_carga(
     `AI_SCENARIO_BATCH_ROWS` conexiones; el resto se descarta y se indica en
     `n_descartadas`/`descartadas`. No lances una llamada por conexion.
 
-    El detalle completo (una fila por E1/E2/E3 de cada conexion) se guarda en un Parquet
-    temporal y NO se devuelve en el contexto: la respuesta incluye solo `resumen`,
-    `errores`, `tabla_markdown` compacta y los metadatos/URL del `artefacto`.
+    Devuelve el detalle en `lote` (una entrada por conexion, con `resultado.rows`,
+    `resultado.checks` compactos, `escenarios` y `tabla_markdown`) y omite `historial`.
+    Tambien incluye `resumen`, `errores`, contadores y una `tabla_markdown` resumen.
 
       E1: diseno de entrada (paso 0, sin tocar cargas).
       E2: mayor carga que aguanta SIN cantonera.
@@ -619,17 +618,11 @@ async def disenar_escenarios_carga(
     else:
         status = "OK"
 
-    try:
-        artefacto = artifacts.save_scenarios(results, name)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("[MCP] no se pudo escribir el artefacto Parquet")
-        return _mcp_status(name, "ERROR_ARTEFACTO", 500, str(exc))
-
     resumen, errores = _batch_summary(results)
     tabla = _summary_markdown(resumen)
     log.info(
-        "[MCP] escenarios: %s (procesadas=%d, descartadas=%d, cola=%.1fs, artefacto=%s)",
-        status, len(selected), len(discarded), queue_wait, artefacto.get("id"),
+        "[MCP] escenarios: %s (procesadas=%d, descartadas=%d, cola=%.1fs)",
+        status, len(selected), len(discarded), queue_wait,
     )
     return {
         "model_name": name,
@@ -638,7 +631,7 @@ async def disenar_escenarios_carga(
         "n_procesadas": len(selected),
         "n_descartadas": len(discarded),
         "descartadas": discarded_uids,
-        "artefacto": artefacto,
+        "lote": results,
         "resumen": resumen,
         "errores": errores,
         "tabla_markdown": tabla,
@@ -650,11 +643,6 @@ async def disenar_escenarios_carga(
 # =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Limpieza de artefactos Parquet caducados.
-    try:
-        artifacts.cleanup()
-    except Exception:  # noqa: BLE001
-        log.exception("No se pudieron limpiar los artefactos Parquet")
     # Carga de modelos, batcher de inferencia, pool de refinado y watcher de reentreno
     try:
         model_registry.activate_configured()
@@ -755,17 +743,6 @@ def health() -> Dict[str, Any]:
         "client_timeout_s": config.CLIENT_TIMEOUT_S,
         "scenarios": _SCENARIO_GATE.status(),
     }
-
-
-@app.get("/artifacts/{artifact_id}.parquet", include_in_schema=False)
-def download_artifact(artifact_id: str):
-    """Descarga uno de los Parquet temporales generados por el tool MCP de escenarios."""
-    path = artifacts.get_path(artifact_id)
-    if path is None:
-        raise HTTPException(status_code=404, detail="Artefacto no encontrado o caducado")
-    return FileResponse(
-        path, media_type="application/vnd.apache.parquet", filename=path.name
-    )
 
 
 @app.get("/models", tags=["modelos"], summary="Lista los modelos instalados y cargados")

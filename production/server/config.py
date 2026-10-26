@@ -3,7 +3,6 @@ Configuración global del servidor HTTP y del modelo de IA (v4).
 Unifica la infraestructura web con la definición de características, catálogos y targets.
 """
 import os
-import tempfile
 from pathlib import Path
 
 # ============================================================================
@@ -73,14 +72,6 @@ SCENARIO_TIMEOUT_S = float(
 MCP_JSON_RESPONSE = os.environ.get("AI_MCP_JSON_RESPONSE", "1").strip().lower() not in (
     "0", "false", "no"
 )
-
-# Artefactos Parquet temporales: el resultado pesado no viaja en el contexto MCP.
-# El directorio por defecto es el temp del dispositivo.
-ARTIFACTS_DIR = Path(
-    os.environ.get("AI_ARTIFACTS_DIR", str(Path(tempfile.gettempdir()) / "proyecto_uniones_artifacts"))
-)
-ARTIFACT_TTL_S = float(os.environ.get("AI_ARTIFACT_TTL_S", "86400"))
-PUBLIC_BASE_URL = os.environ.get("AI_PUBLIC_BASE_URL", "").rstrip("/")
 
 # Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
 # se sirve fuera de la red interna.
