@@ -22,22 +22,26 @@ Endpoints:
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import threading
+import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import pandas as pd
 
+import artifacts
 import catalogo
 import config
 import model_registry
@@ -105,19 +109,126 @@ class _Runner:
 
 _PREDICT_RUNNER = _Runner("mcp-predict")
 _CHECK_RUNNER = _Runner("mcp-check")
-# Cola ilimitada de escenarios; el limite real lo ponen los workers y el batcher.
 _SCENARIO_RUNNER = _Runner("scenarios", max_workers=config.SCENARIO_WORKERS)
+
+
+class ServerBusyError(RuntimeError):
+    """La cola de escenarios esta llena o se agoto el tiempo de espera en cola."""
+
+
+class _ScenarioGate:
+    """Control de admision para escenarios: limita concurrencia y tamano de cola.
+
+    Si hay `max_workers` escenarios ejecutandose y `max_queue` esperando, rechaza de
+    inmediato con `ServerBusyError`. Si un escenario en cola supera `queue_timeout` sin
+    conseguir worker, tambien falla con `ServerBusyError` antes de agotar el timeout del
+    cliente MCP (`AI_CLIENT_TIMEOUT_S`).
+    """
+
+    def __init__(self, max_workers: int, max_queue: int, queue_timeout: float) -> None:
+        self.max_workers = max(1, int(max_workers))
+        self.max_queue = max(0, int(max_queue))
+        self.queue_timeout = max(0.0, float(queue_timeout))
+        self._lock = threading.Lock()
+        self._active = 0
+        self._waiting = 0
+        self._waiters: Deque[asyncio.Future] = deque()
+
+    def status(self) -> Dict[str, int]:
+        with self._lock:
+            return {
+                "active": self._active,
+                "waiting": self._waiting,
+                "max_workers": self.max_workers,
+                "max_queue": self.max_queue,
+            }
+
+    async def acquire(self) -> float:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if self._active < self.max_workers and not self._waiters:
+                self._active += 1
+                return 0.0
+            if self._waiting >= self.max_queue:
+                raise ServerBusyError(
+                    f"Servidor ocupado ({self._active}/{self.max_workers} en ejecucion, "
+                    f"{self._waiting}/{self.max_queue} en cola). "
+                    f"Maximo {self.max_workers} peticiones concurrentes; reintenta en unos segundos."
+                )
+            self._waiting += 1
+            fut: asyncio.Future = loop.create_future()
+            self._waiters.append(fut)
+
+        t0 = time.monotonic()
+        try:
+            if self.queue_timeout > 0:
+                # `asyncio.wait` no cancela el future al expirar: evita liberar por error
+                # una plaza que no se habia concedido.
+                done, _ = await asyncio.wait({fut}, timeout=self.queue_timeout)
+                if not done:
+                    with self._lock:
+                        if not fut.done():
+                            try:
+                                self._waiters.remove(fut)
+                            except ValueError:
+                                pass
+                            self._waiting = max(0, self._waiting - 1)
+                            raise ServerBusyError(
+                                f"Servidor ocupado tras esperar {self.queue_timeout:g}s en cola "
+                                f"({self._active}/{self.max_workers} en ejecucion). "
+                                f"Reintenta en unos segundos."
+                            ) from None
+                    # Nos concedieron una plaza justo al expirar: devolverla.
+                    self.release()
+                    raise ServerBusyError(
+                        f"Servidor ocupado tras esperar {self.queue_timeout:g}s en cola. "
+                        f"Reintenta en unos segundos."
+                    ) from None
+            else:
+                await fut
+            return time.monotonic() - t0
+        except BaseException as exc:
+            if isinstance(exc, ServerBusyError):
+                raise
+            with self._lock:
+                if fut.done() and not fut.cancelled():
+                    self._active = max(0, self._active - 1)
+                    self._wake_next_locked()
+                else:
+                    try:
+                        self._waiters.remove(fut)
+                    except ValueError:
+                        pass
+                    self._waiting = max(0, self._waiting - 1)
+            raise
+
+    def release(self) -> None:
+        with self._lock:
+            self._active = max(0, self._active - 1)
+            self._wake_next_locked()
+
+    def _wake_next_locked(self) -> None:
+        while self._waiters and self._active < self.max_workers:
+            fut = self._waiters.popleft()
+            self._waiting = max(0, self._waiting - 1)
+            if not fut.done():
+                self._active += 1
+                fut.get_loop().call_soon_threadsafe(fut.set_result, True)
+                return
+
+
+_SCENARIO_GATE = _ScenarioGate(
+    max_workers=config.SCENARIO_WORKERS,
+    max_queue=config.SCENARIO_MAX_QUEUE,
+    queue_timeout=config.SCENARIO_QUEUE_TIMEOUT_S,
+)
 
 
 async def _run_sync(runner: _Runner, fn, args: tuple, timeout: Optional[float],
                     label: str, kwargs: Optional[Dict[str, Any]] = None):
-    """Ejecuta `fn(*args, **kwargs)` fuera del event loop.
-
-    Con `timeout=None` espera sin limite (los escenarios usan su propio deadline
-    cooperativo, que empieza cuando el workitem arranca, no cuando entra en cola).
-    """
+    """Ejecuta `fn(*args, **kwargs)` fuera del event loop con timeout y reinicio del runner."""
     future = runner.submit(fn, *args, **(kwargs or {}))
-    if timeout is None:
+    if timeout is None or timeout <= 0:
         return await asyncio.wrap_future(future)
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
@@ -127,12 +238,170 @@ async def _run_sync(runner: _Runner, fn, args: tuple, timeout: Optional[float],
         raise TimeoutError(f"{label}: tiempo de espera agotado ({timeout:.0f}s)") from None
 
 
+async def _run_scenario(name: str, row: Dict[str, Any], label: str, **kwargs) -> tuple[Dict[str, Any], float]:
+    """Pasa por el control de admision y ejecuta `escenarios.run` dentro del presupuesto."""
+    queue_wait = await _SCENARIO_GATE.acquire()
+    try:
+        result = await _run_sync(
+            _SCENARIO_RUNNER,
+            escenarios.run,
+            (name, row),
+            config.SCENARIO_TIMEOUT_S,
+            label,
+            {"timeout_s": config.SCENARIO_TIMEOUT_S, **kwargs},
+        )
+        return result, queue_wait
+    finally:
+        _SCENARIO_GATE.release()
+
+
+def _parse_mcp_row(row: Any) -> Dict[str, Any]:
+    """Acepta objeto o string JSON (Copilot a veces manda las filas serializadas)."""
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, str):
+        for _ in range(2):  # tolera doble serializacion
+            try:
+                row = json.loads(row)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"fila no es un JSON valido: {exc}") from exc
+            if isinstance(row, dict):
+                return row
+    raise ValueError("cada fila debe ser un objeto o un string JSON con la conexion")
+
+
+def _parse_mcp_rows(rows: Any) -> List[Dict[str, Any]]:
+    """Normaliza `rows` a lista de conexiones (lista, objeto unico o string JSON)."""
+    if isinstance(rows, str):
+        for _ in range(2):  # tolera doble serializacion
+            try:
+                rows = json.loads(rows)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"rows no es un JSON valido: {exc}") from exc
+            if not isinstance(rows, str):
+                break
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError("rows debe ser una lista de conexiones")
+    if not rows:
+        raise ValueError("rows esta vacio")
+    return [_parse_mcp_row(r) for r in rows]
+
+
+def _uid(row: Dict[str, Any]) -> str:
+    return str((row or {}).get("UNICODE") or (row or {}).get("Unicode") or "?")
+
+
+def _compact_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Quita `rows_raw` y deja los checks en formato compacto para el tunel MCP."""
+    compact_checks = [
+        {
+            k: c.get(k)
+            for k in ("Unicode", "Escenario", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo")
+            if k in c
+        }
+        for c in (result.get("checks") or [])
+    ]
+    out = {k: v for k, v in result.items() if k != "rows_raw"}
+    out["checks"] = compact_checks
+    return {"model_name": name, "status": "OK", **out}
+
+
+def _run_batch_sync(name: str, rows: List[Dict[str, Any]], options: Dict[str, Any],
+                    timeout_s: float) -> List[Dict[str, Any]]:
+    """Ejecuta filas secuencialmente con un unico presupuesto total (sin gate)."""
+    deadline = time.monotonic() + max(1.0, timeout_s)
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        uid = _uid(row)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            out.append({
+                "unicode": uid, "status": "TIMEOUT_SERVIDOR", "http_status": 504,
+                "mensaje": "sin tiempo restante para ejecutar esta conexion",
+            })
+            continue
+        try:
+            result = escenarios.run(name, row, timeout_s=remaining, **options)
+            out.append({
+                "unicode": uid, "status": "OK", "resultado": _compact_result(name, result),
+            })
+        except TimeoutError as exc:
+            out.append({
+                "unicode": uid, "status": "TIMEOUT_SERVIDOR", "http_status": 504,
+                "mensaje": str(exc),
+            })
+        except predictor.InputContractError as exc:
+            out.append({
+                "unicode": uid, "status": "ERROR_ENTRADA", "http_status": 422,
+                "mensaje": str(exc),
+            })
+        except ValueError as exc:
+            out.append({
+                "unicode": uid, "status": "ERROR_ENTRADA", "http_status": 422,
+                "mensaje": str(exc),
+            })
+        except KeyError as exc:
+            out.append({
+                "unicode": uid, "status": "ERROR_MODELO", "http_status": 404,
+                "mensaje": str(exc),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[MCP] error generando escenarios (unicode=%s)", uid)
+            out.append({
+                "unicode": uid, "status": "ERROR_SERVIDOR", "http_status": 500,
+                "mensaje": str(exc),
+            })
+    return out
+
+
+async def _run_scenario_batch(name: str, rows: List[Dict[str, Any]], label: str,
+                              **kwargs) -> tuple[List[Dict[str, Any]], float]:
+    queue_wait = await _SCENARIO_GATE.acquire()
+    try:
+        results = await _run_sync(
+            _SCENARIO_RUNNER,
+            _run_batch_sync,
+            (name, rows, kwargs, config.SCENARIO_TIMEOUT_S),
+            config.SCENARIO_TIMEOUT_S + 2.0,
+            label,
+        )
+        return results, queue_wait
+    finally:
+        _SCENARIO_GATE.release()
+
+
+def _mcp_status(model: str, status: str, http_status: int, message: str,
+                retry_after_s: Optional[int] = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "model_name": model,
+        "status": status,
+        "http_status": http_status,
+        "mensaje": message,
+    }
+    if retry_after_s is not None:
+        out["retry_after_s"] = retry_after_s
+    return out
+
+
 # =============================================================================
 # Servidor MCP (Model Context Protocol) para Microsoft Copilot
 # =============================================================================
 mcp = FastMCP(
     "ServidorConexionesEstructurales",
+    instructions=(
+        f"Servidor de diseno y comprobacion AISC 360-10 de conexiones estructurales. "
+        f"disenar_escenarios_carga acepta una lista `rows` de hasta "
+        f"{config.SCENARIO_BATCH_ROWS} conexiones por llamada (se procesan las "
+        f"{config.SCENARIO_BATCH_ROWS} primeras y el resto se descarta). Usa SIEMPRE una sola "
+        f"llamada con varias filas para varias conexiones; no lances una llamada por conexion. "
+        f"Como maximo {config.SCENARIO_WORKERS} llamadas en paralelo (mas "
+        f"{config.SCENARIO_MAX_QUEUE} en cola). Si recibes SERVIDOR_OCUPADO, reintenta las "
+        f"pendientes en el siguiente turno."
+    ),
     stateless_http=True,
+    json_response=config.MCP_JSON_RESPONSE,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False  # o allowed_hosts=["0tpn3dld-8080.uks1.devtunnels.ms", "localhost:*"]
     ),
@@ -224,17 +493,78 @@ async def listar_modelos() -> Dict[str, Any]:
 # =============================================================================
 # Escenarios de carga (MCP)
 # =============================================================================
+def _batch_summary(results: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Resumen compacto por conexion y lista de errores (para el contexto MCP)."""
+    resumen: List[Dict[str, Any]] = []
+    errores: List[Dict[str, Any]] = []
+    for item in results:
+        uid = item.get("unicode", "?")
+        status = item.get("status", "ERROR")
+        if status != "OK":
+            err = {
+                "unicode": uid, "status": status,
+                "http_status": item.get("http_status"), "mensaje": item.get("mensaje"),
+            }
+            errores.append(err)
+            resumen.append({
+                "unicode": uid, "status": status, "E1": "-", "E2": "-", "E3": "-",
+                "ratio_pesimo": None,
+            })
+            continue
+        result = item.get("resultado") or {}
+        escenarios = {e.get("id"): e for e in (result.get("escenarios") or [])}
+        row: Dict[str, Any] = {"unicode": uid, "status": "OK", "parada": result.get("parada")}
+        peor = 0.0
+        for clave in ("E1", "E2", "E3"):
+            esc = escenarios.get(clave) or {}
+            if not esc.get("encontrado"):
+                row[clave] = "NO ENCONTRADO"
+            elif esc.get("cumple"):
+                row[clave] = "OK"
+            else:
+                row[clave] = "NO CUMPLE"
+            try:
+                peor = max(peor, float(esc.get("ratio_pesimo") or 0.0))
+            except (TypeError, ValueError):
+                pass
+        row["ratio_pesimo"] = round(peor, 4) if peor else None
+        resumen.append(row)
+    return resumen, errores
+
+
+def _summary_markdown(resumen: List[Dict[str, Any]]) -> str:
+    lineas = [
+        "| UNICODE | Estado | E1 | E2 | E3 | Ratio pésimo |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in resumen:
+        lineas.append(
+            "| {u} | {s} | {e1} | {e2} | {e3} | {rp} |".format(
+                u=r.get("unicode", ""), s=r.get("status", ""),
+                e1=r.get("E1", ""), e2=r.get("E2", ""), e3=r.get("E3", ""),
+                rp="" if r.get("ratio_pesimo") is None else r.get("ratio_pesimo"),
+            )
+        )
+    return "\n".join(lineas)
+
+
 @mcp.tool()
 async def disenar_escenarios_carga(
-    row: Dict[str, Any],
+    rows: Any,
     model: str = "",
     incremento: float = 0.05,
     max_pasos: int = 40,
 ) -> Dict[str, Any]:
-    """Predice UNA conexion y busca 3 disenos de referencia subiendo las cargas un 5 % por paso.
+    """Disena varias conexiones en una sola llamada (maximo configurable, 50 por defecto).
 
-    Devuelve `tabla_markdown` (la tabla a mostrar al usuario), `escenarios` (con la fila CODAME
-    completa de cada diseno) y `historial` (todos los pasos probados).
+    Pasa SIEMPRE una lista en `rows` (no una llamada por conexion). Se procesan como maximo
+    `AI_SCENARIO_BATCH_ROWS` conexiones; el resto se descarta y se indica en
+    `n_descartadas`/`descartadas`. No lances una llamada por conexion.
+
+    El detalle completo (una fila por E1/E2/E3 de cada conexion) se guarda en un Parquet
+    temporal y NO se devuelve en el contexto: la respuesta incluye solo `resumen`,
+    `errores`, `tabla_markdown` compacta y los metadatos/URL del `artefacto`.
+
       E1: diseno de entrada (paso 0, sin tocar cargas).
       E2: mayor carga que aguanta SIN cantonera.
       E3: mayor carga que aguanta CON cantonera.
@@ -243,31 +573,76 @@ async def disenar_escenarios_carga(
     (E3) cantonera, el escenario sale vacio con `encontrado=false` y su motivo.
 
     Args:
-        row: UNA fila con UNICODE, BEAM, COLUMN, ratio_moment, ratio_shear, ratio_axial
-            (0-1) y opcionalmente Normativas, grado_acero, clase_tornillo.
+        rows: Lista de conexiones (cada una con UNICODE, BEAM, COLUMN, ratio_moment,
+            ratio_shear, ratio_axial y opcionalmente Normativas, grado_acero, clase_tornillo).
+            Tambien acepta un unico objeto o un string JSON con la lista.
         model: Nombre opcional del modelo (por defecto, el configurado).
         incremento: Aumento de carga por paso (0.05 = 5 %).
         max_pasos: Maximo de pasos de aumento a explorar.
     """
     name = model or config.MODEL_NAME
-    log.info("[MCP] escenarios: modelo=%s", name)
-    result = await _run_sync(
-        _SCENARIO_RUNNER,
-        escenarios.run,
-        (name, row),
-        None,
-        "disenar_escenarios_carga",
-        {
-            "incremento": incremento,
-            "max_pasos": max_pasos,
-            "timeout_s": config.SCENARIO_TIMEOUT_S,
-        },
-    )
+    try:
+        all_rows = _parse_mcp_rows(rows)
+    except ValueError as exc:
+        log.warning("[MCP] escenarios entrada invalida: %s", exc)
+        return _mcp_status(name, "ERROR_ENTRADA", 422, str(exc))
+
+    max_rows = config.SCENARIO_BATCH_ROWS
+    selected = all_rows[:max_rows]
+    discarded = all_rows[max_rows:]
+    discarded_uids = [_uid(r) for r in discarded]
     log.info(
-        "[MCP] escenarios: %s (parcial=%s, %.1fs)",
-        result.get("parada"), result.get("parcial"), result.get("tiempo_s", 0.0),
+        "[MCP] escenarios: modelo=%s, filas=%d, procesadas=%d, descartadas=%d",
+        name, len(all_rows), len(selected), len(discarded),
     )
-    return {"model_name": name, **result}
+
+    try:
+        results, queue_wait = await _run_scenario_batch(
+            name, selected, "disenar_escenarios_carga",
+            incremento=incremento, max_pasos=max_pasos,
+        )
+    except ServerBusyError as exc:
+        log.warning("[MCP] escenarios ocupado: %s", exc)
+        return _mcp_status(name, "SERVIDOR_OCUPADO", 503, str(exc), 5)
+    except TimeoutError as exc:
+        log.error("[MCP] escenarios timeout: %s", exc)
+        return _mcp_status(name, "TIMEOUT_SERVIDOR", 504, str(exc), 5)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("[MCP] error generando escenarios")
+        return _mcp_status(name, "ERROR_SERVIDOR", 500, str(exc))
+
+    has_errors = any(r.get("status") != "OK" for r in results)
+    if has_errors:
+        status = "CON_ERRORES"
+    elif discarded:
+        status = "CON_DESCARTES"
+    else:
+        status = "OK"
+
+    try:
+        artefacto = artifacts.save_scenarios(results, name)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("[MCP] no se pudo escribir el artefacto Parquet")
+        return _mcp_status(name, "ERROR_ARTEFACTO", 500, str(exc))
+
+    resumen, errores = _batch_summary(results)
+    tabla = _summary_markdown(resumen)
+    log.info(
+        "[MCP] escenarios: %s (procesadas=%d, descartadas=%d, cola=%.1fs, artefacto=%s)",
+        status, len(selected), len(discarded), queue_wait, artefacto.get("id"),
+    )
+    return {
+        "model_name": name,
+        "status": status,
+        "n_solicitadas": len(all_rows),
+        "n_procesadas": len(selected),
+        "n_descartadas": len(discarded),
+        "descartadas": discarded_uids,
+        "artefacto": artefacto,
+        "resumen": resumen,
+        "errores": errores,
+        "tabla_markdown": tabla,
+    }
 
 
 # =============================================================================
@@ -275,6 +650,11 @@ async def disenar_escenarios_carga(
 # =============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Limpieza de artefactos Parquet caducados.
+    try:
+        artifacts.cleanup()
+    except Exception:  # noqa: BLE001
+        log.exception("No se pudieron limpiar los artefactos Parquet")
     # Carga de modelos, batcher de inferencia, pool de refinado y watcher de reentreno
     try:
         model_registry.activate_configured()
@@ -372,7 +752,20 @@ def health() -> Dict[str, Any]:
         "default_model": config.MODEL_NAME,
         **predictor.model_status(),
         "dataset_rows": storage.summary()["total_rows"],
+        "client_timeout_s": config.CLIENT_TIMEOUT_S,
+        "scenarios": _SCENARIO_GATE.status(),
     }
+
+
+@app.get("/artifacts/{artifact_id}.parquet", include_in_schema=False)
+def download_artifact(artifact_id: str):
+    """Descarga uno de los Parquet temporales generados por el tool MCP de escenarios."""
+    path = artifacts.get_path(artifact_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Artefacto no encontrado o caducado")
+    return FileResponse(
+        path, media_type="application/vnd.apache.parquet", filename=path.name
+    )
 
 
 @app.get("/models", tags=["modelos"], summary="Lista los modelos instalados y cargados")
@@ -525,21 +918,24 @@ async def scenarios(payload: ScenarioIn):
     name = payload.model or config.MODEL_NAME
     log.info("/scenarios: modelo=%s", name)
     try:
-        result = await _run_sync(
-            _SCENARIO_RUNNER,
-            escenarios.run,
-            (name, payload.row),
-            None,
+        result, queue_wait = await _run_scenario(
+            name,
+            payload.row,
             "scenarios",
-            {
-                "incremento": payload.incremento,
-                "max_pasos": payload.max_pasos,
-                "max_fallos_seguidos": payload.max_fallos_seguidos,
-                "timeout_s": config.SCENARIO_TIMEOUT_S,
-            },
+            incremento=payload.incremento,
+            max_pasos=payload.max_pasos,
+            max_fallos_seguidos=payload.max_fallos_seguidos,
         )
     except predictor.InputContractError:
         raise
+    except ServerBusyError as exc:
+        log.warning("/scenarios ocupado: %s", exc)
+        raise HTTPException(
+            status_code=503, detail=str(exc), headers={"Retry-After": "5"}
+        )
+    except TimeoutError as exc:
+        log.error("/scenarios timeout: %s", exc)
+        raise HTTPException(status_code=504, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except KeyError as exc:
@@ -548,8 +944,8 @@ async def scenarios(payload: ScenarioIn):
         log.exception("Error generando escenarios")
         raise HTTPException(status_code=500, detail=f"Error en escenarios: {exc}")
     log.info(
-        "/scenarios: %s (parcial=%s, %.1fs)",
-        result.get("parada"), result.get("parcial"), result.get("tiempo_s", 0.0),
+        "/scenarios: %s (cola=%.1fs, ejec=%.1fs)",
+        result.get("parada"), queue_wait, result.get("tiempo_s", 0.0),
     )
     return {"model_name": name, **result}
 

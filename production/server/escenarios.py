@@ -19,10 +19,6 @@ Sobre el ajuste: en este flujo NO se maximiza la carga (`maximize_load=False`), 
 `refinar._maximize_load` reescribe MzEd_Porcen/FyEd_Porcen/FxEd_Porcen y falsearia el
 escalon de carga que se esta evaluando. Si se ajustan geometria y espesores.
 
-`timeout_s` es un presupuesto cooperativo: se comprueba antes de cada lote y, si se agota
-(o si `predict_fn` lanza `TimeoutError` por el refinado), se devuelven los escenarios
-calculados hasta ese momento con `parcial=True`.
-
 Este modulo no depende del modelo ni del servidor: recibe `predict_fn` (inyeccion), por lo
 que se puede probar sin pesos. `run()` lo conecta con `predictor.predict_detailed`.
 """
@@ -242,8 +238,7 @@ def generar_escenarios(
 ) -> Dict[str, Any]:
     """`predict_fn(filas_entrada) -> [{"row", "check", "n_cantonera"}]` (mismo orden).
 
-    `timeout_s` es un presupuesto cooperativo: se comprueba antes de cada lote y, si se
-    agota, se devuelven los escenarios encontrados hasta ese momento (`parcial=True`).
+    Si se supera `timeout_s`, lanza `TimeoutError` (no se devuelven resultados parciales).
     """
     if incremento <= 0:
         raise ValueError("incremento debe ser > 0")
@@ -254,19 +249,13 @@ def generar_escenarios(
     historial: List[Dict[str, Any]] = []
     fallos, hay_cantonera_valida, parada = 0, False, None
     previas, techo, k = None, False, 0
-    parcial = False
 
-    def _agotado() -> bool:
-        return deadline is not None and time.monotonic() >= deadline
+    def _check_timeout() -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"escenarios: tiempo de espera agotado ({timeout_s:g}s)")
 
     while parada is None and not techo and k <= max_pasos:
-        if _agotado():
-            parcial = True
-            parada = "tiempo maximo alcanzado"
-            avisos.append(
-                "Se alcanzo el tiempo maximo; se devuelven los escenarios calculados hasta el momento."
-            )
-            break
+        _check_timeout()
         pasos, entradas, factores = [], [], []
         for kk in range(k, min(k + max(1, lote), max_pasos + 1)):
             ent, f = _fila_paso(row, kk, incremento)
@@ -281,15 +270,7 @@ def generar_escenarios(
             factores.append(f)
 
         if entradas:
-            try:
-                resultados = predict_fn(entradas)
-            except TimeoutError as exc:
-                parcial = True
-                parada = f"timeout de inferencia/refinado: {exc}"
-                avisos.append(
-                    "Se agoto el tiempo durante un lote; se devuelven los escenarios calculados hasta el momento."
-                )
-                break
+            resultados = predict_fn(entradas)
             for kk, ent, f, res in zip(pasos, entradas, factores, resultados):
                 reg = _registro(kk, f, ent, res)
                 historial.append(reg)
@@ -304,12 +285,8 @@ def generar_escenarios(
                         parada = f"{fallos} pasos seguidos sin cumplir (paso {kk})"
                         break
         k += max(1, lote)
-        if parada is None and not techo and _agotado():
-            parcial = True
-            parada = "tiempo maximo alcanzado"
-            avisos.append(
-                "Se alcanzo el tiempo maximo; se devuelven los escenarios calculados hasta el momento."
-            )
+        if parada is None and not techo:
+            _check_timeout()
     if parada is None:
         parada = "ratio_moment al 100 %" if techo else f"alcanzado max_pasos={max_pasos}"
 
@@ -357,7 +334,6 @@ def generar_escenarios(
         "tabla_markdown": tabla_markdown(tabla),
         "historial": [{k_: v for k_, v in r.items() if k_ != "_res"} for r in historial],
         "parada": parada,
-        "parcial": parcial,
         "tiempo_s": round(time.monotonic() - t0, 2),
         "avisos": avisos,
         "parametros": {"incremento": incremento, "compuesto": compuesto, "max_pasos": max_pasos,

@@ -40,10 +40,13 @@ def _rows(n=8):
 class RefineBackendTests(unittest.TestCase):
     def setUp(self):
         refinar.log.setLevel(logging.CRITICAL)
+        self._workers = refinar.WORKERS
+        refinar.WORKERS = min(2, refinar.WORKERS)
 
     def tearDown(self):
         backend = refinar.get_backend()
         backend.reset()
+        refinar.WORKERS = self._workers
 
     def test_backends_accept_maximize_load(self):
         rows = _rows(4)
