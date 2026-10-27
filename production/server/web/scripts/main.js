@@ -1573,15 +1573,83 @@ $("viewerGhost").onclick = () => {
   drawAll();
 };
 
-const callScenarios = (model, row) =>
-  fetch("/scenarios", {
+const WEB_JOB_ROWS = 25;
+const WEB_POLL_MS = 250;
+const WEB_POLL_MAX = 4;
+const WEB_TIMEOUT_MS = 10000;
+const WEB_MAX_WAIT_MS = 5000;
+
+function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function rowUid(row){
+  return String((row && (row.UNICODE || row.Unicode)) || "?");
+}
+
+function isTransientStatus(status){
+  return status === "TIMEOUT_SERVIDOR"
+    || status === "SERVIDOR_OCUPADO"
+    || status === "ERROR_SERVIDOR";
+}
+
+function backoffMs(attempt){
+  return Math.min(WEB_MAX_WAIT_MS, 500 * Math.pow(2, Math.min(attempt, 4)));
+}
+
+function makeErrorConnection(inputRow, mensaje){
+  return {
+    inputRow: inputRow || {},
+    activeVarIndex: 0,
+    marked: false,
+    variations: [{
+      label: "Error", tipo: "ERROR", data: {}, adjusted: {}, raw: {},
+      check: null, adjustedCheck: null, unavailable: true,
+      motivo: mensaje || "Error al procesar la conexión",
+      status: "ERROR", accepted: false
+    }]
+  };
+}
+
+function newClientId(){
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return "job-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+}
+
+async function fetchJson(url, opts, timeoutMs){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...opts, signal: controller.signal });
+    if (!r.ok) {
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function createScenarioJob(desc){
+  const body = {
+    client_id: desc.clientId,
+    model: desc.model,
+    rows: desc.items.map(item => item.row),
+    incremento: 0.05,
+    max_pasos: 40
+  };
+  return await fetchJson("/scenarios/batch/jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: model, row: row, incremento: 0.05, max_pasos: 40 })
-  }).then(async r => {
-    const json = await r.json().catch(() => ({}));
-    return { ok: r.ok, status: r.status, data: json, inputRow: row };
-  }).catch(err => ({ ok: false, error: err.message, inputRow: row }));
+    body: JSON.stringify(body)
+  }, WEB_TIMEOUT_MS);
+}
+
+async function pollScenarioJob(desc){
+  const url = "/scenarios/batch/jobs/" + encodeURIComponent(desc.jobId)
+    + "?since=" + desc.since + "&limit=1";
+  return await fetchJson(url, { method: "GET" }, WEB_TIMEOUT_MS);
+}
 
 /* Adjunta a cada variación del modelo A la predicción/ajuste del modelo B (misma conexión y mismo escenario) */
 function attachComparison(connsA, connsB, modelA, modelB) {
@@ -1602,55 +1670,211 @@ const getConnVariations2 = conn => Array.isArray(conn.variations) ? conn.variati
 
 $("send").onclick = async () => {
   const btn = $("send");
+  if (!state.rows.length) return;
   btn.disabled = true;
   const model = $("model").value;
   const model2 = $("model2").value && $("model2").value !== model ? $("model2").value : "";
-  setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones" + (model2 ? ` con ${model} y ${model2}` : "") + " (calculando 3 variaciones por conexión)…");
+  const rows = state.rows.slice();
+  const results = new Array(rows.length).fill(null);
+  const rowState = rows.map(() => ({ a: null, b: null, rendered: false, bCounted: false }));
+  const doneSet = new Set();
+  let errorsA = 0, errorsB = 0;
+  const modelList = model2 ? [model, model2] : [model];
 
-  try {
-    const [respA, respB] = await Promise.all([
-      Promise.all(state.rows.map(row => callScenarios(model, row))),
-      model2 ? Promise.all(state.rows.map(row => callScenarios(model2, row))) : Promise.resolve([])
-    ]);
+  state.results = []; _checkTokens = {}; renderResults();
+  setStatus("", `Pre-diseñando ${rows.length} conexiones${model2 ? ` con ${model} y ${model2}` : ""}…`);
 
-    const parsedConns = [];
-    let errorsCount = 0, errorsB = 0;
+  const makeDesc = (m, items) => ({
+    clientId: newClientId(),
+    model: m,
+    items: items.map(item => ({ row: item.row, idx: item.idx })),
+    byIdx: new Map(items.map(item => [String(item.row.__web_id), item])),
+    since: 0,
+    jobId: null,
+    estado: "pendiente",
+    done: false,
+    polling: false,
+    attempt: 0,
+    nextTry: 0,
+    transient: []
+  });
 
-    respA.forEach((res, i) => {
-      if (res.ok && res.data) {
-        const connsA = parseScenariosResponse(res.data, res.inputRow);
-        let connsB = [];
-        if (model2) {
-          const rb = respB[i];
-          if (rb && rb.ok && rb.data) connsB = parseScenariosResponse(rb.data, rb.inputRow);
-          else errorsB++;
-        }
-        attachComparison(connsA, connsB, model, model2);
-        parsedConns.push(...connsA);
-      } else {
-        errorsCount++;
-      }
+  const active = [];
+  for (let i = 0; i < rows.length; i += WEB_JOB_ROWS) {
+    const items = rows.slice(i, i + WEB_JOB_ROWS).map((row, j) => ({
+      row: { ...row, __web_id: i + j }, idx: i + j
+    }));
+    for (const m of modelList) active.push(makeDesc(m, items));
+  }
+
+  let renderScheduled = false;
+  const scheduleRender = () => {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => {
+      renderScheduled = false;
+      state.results = results.flatMap(conns => conns || []);
+      renderResults();
     });
+  };
 
-    state.results = parsedConns;
-    _checkTokens = {};
-    renderResults();
+  const renderRow = (idx) => {
+    const st = rowState[idx];
+    if (!st.a) return;
+    if (!st.a.ok) {
+      if (!st.rendered) {
+        results[idx] = [makeErrorConnection(rows[idx], st.a.mensaje)];
+        errorsA++; st.rendered = true; doneSet.add(idx);
+        scheduleRender();
+      }
+      return;
+    }
+    try {
+      const connsA = parseScenariosResponse(st.a.data, rows[idx]);
+      if (!connsA.length) throw new Error("Respuesta vacía");
+      let connsB = [];
+      if (model2 && st.b) {
+        if (st.b.ok) connsB = parseScenariosResponse(st.b.data, rows[idx]);
+        else if (!st.bCounted) { errorsB++; st.bCounted = true; }
+      }
+      attachComparison(connsA, connsB, model, model2);
+      results[idx] = connsA;
+      st.rendered = true; doneSet.add(idx);
+      scheduleRender();
+    } catch (e) {
+      results[idx] = [makeErrorConnection(rows[idx], e.message)];
+      errorsA++; st.rendered = true; doneSet.add(idx);
+      scheduleRender();
+    }
+  };
 
-    const totalVars = state.results.reduce((acc, c) => acc + getConnVariations(state.results.indexOf(c)).filter(v => !v.unavailable).length, 0);
-    const extra = errorsB ? ` (${errorsB} combinaciones sin resultado de ${model2})` : "";
-
-    if (errorsCount > 0) {
-      setStatus("bad", `Finalizado con ${errorsCount} errores.`, `${parsedConns.length} conexiones procesadas correctamente (${totalVars} variaciones).${extra}`);
-    } else if (errorsB > 0) {
-      setStatus("bad", `Predicción completada, pero ${model2} falló en ${errorsB} combinaciones.`, `${parsedConns.length} conexiones (${totalVars} variaciones).`);
+  const handleResult = (desc, r) => {
+    const key = String(r.web_id);
+    const item = desc.byIdx.get(key);
+    if (!item) return;
+    const idx = item.idx;
+    const slot = desc.model === model ? "a" : "b";
+    if (r.status === "OK" && r.resultado) {
+      rowState[idx][slot] = { ok: true, data: r.resultado };
+      renderRow(idx);
+    } else if (isTransientStatus(r.status)) {
+      desc.transient.push(item);
     } else {
-      setStatus("ok", `Predicción completada: ${parsedConns.length} conexiones (${totalVars} variaciones obtenidas)` + (model2 ? ` · comparando ${model} vs ${model2}` : "") + `. Pulsa 👁 para ver en 2D.`);
+      rowState[idx][slot] = { ok: false, mensaje: r.mensaje || r.status };
+      if (slot === "b" && !rowState[idx].bCounted) {
+        errorsB++; rowState[idx].bCounted = true;
+      }
+      renderRow(idx);
+    }
+  };
+
+  const processData = (desc, data) => {
+    if (typeof data.siguiente === "number") desc.since = data.siguiente;
+    for (const r of data.resultados || []) handleResult(desc, r);
+    desc.estado = data.estado || desc.estado;
+    if (desc.estado === "hecho" && desc.since >= data.total) desc.done = true;
+    if (desc.estado === "hecho" && data.error) {
+      for (const item of desc.items) {
+        const st = rowState[item.idx];
+        const slot = desc.model === model ? "a" : "b";
+        if (!st[slot]) st[slot] = { ok: false, mensaje: data.error };
+      }
+      for (const item of desc.items) renderRow(item.idx);
+      desc.done = true;
+    }
+  };
+
+  const createOne = async (desc) => {
+    while (!desc.jobId) {
+      try {
+        const data = await createScenarioJob(desc);
+        desc.jobId = data.job_id;
+        processData(desc, data);
+        desc.attempt = 0;
+      } catch (e) {
+        desc.attempt++;
+        const wait = backoffMs(desc.attempt);
+        setStatus("", `Reintentando crear lote en ${Math.round(wait / 1000)} s…`);
+        await sleep(wait);
+      }
+    }
+  };
+
+  const startCreate = (desc) => {
+    createOne(desc).catch(e => setStatus("bad", "Error creando lote", e.message));
+  };
+
+  let createCursor = 0;
+  const createWorker = async () => {
+    while (createCursor < active.length) {
+      const desc = active[createCursor++];
+      try {
+        await createOne(desc);
+      } catch (e) {
+        setStatus("bad", "Error creando lote", e.message);
+      }
+    }
+  };
+  for (let w = 0; w < Math.min(4, active.length); w++) createWorker();
+
+  let pollInFlight = 0;
+  const pollOne = (desc) => {
+    if (desc.done || desc.polling || !desc.jobId || Date.now() < desc.nextTry) return;
+    if (pollInFlight >= WEB_POLL_MAX) return;
+    desc.polling = true; pollInFlight++;
+    const before = desc.since;
+    pollScenarioJob(desc).then(data => {
+      desc.attempt = 0;
+      processData(desc, data);
+      desc.nextTry = desc.since > before ? 0 : Date.now() + WEB_POLL_MS;
+    }).catch(e => {
+      desc.attempt++;
+      desc.nextTry = Date.now() + backoffMs(desc.attempt);
+      if (e.status === 404) {
+        desc.jobId = null; desc.since = 0; desc.done = false; desc.nextTry = 0;
+        startCreate(desc);
+      }
+    }).finally(() => {
+      desc.polling = false; pollInFlight--;
+    });
+  };
+
+  while (true) {
+    for (const desc of active) pollOne(desc);
+
+    for (const desc of active) {
+      if (desc.done && desc.transient.length) {
+        const pendientes = desc.transient.splice(0);
+        for (const item of pendientes) {
+          const nd = makeDesc(desc.model, [{ row: item.row, idx: item.idx }]);
+          active.push(nd);
+          startCreate(nd);
+        }
+      }
     }
 
-  } catch (e){
-    setStatus("bad", "Error de conexión", e.message);
+    if (!active.some(desc => !desc.done)) break;
+    setStatus("", `Procesando ${doneSet.size}/${rows.length}${errorsA || errorsB ? ` (${errorsA + errorsB} errores)` : ""}…`);
+    await sleep(WEB_POLL_MS);
   }
-  btn.disabled = !state.rows.length;
+
+  state.results = results.flatMap(conns => conns || []);
+  renderResults();
+  const totalVars = state.results.reduce(
+    (acc, c) => acc + getConnVariations(state.results.indexOf(c)).filter(v => !v.unavailable).length, 0
+  );
+  const extra = errorsB ? ` (${errorsB} combinaciones sin resultado de ${model2})` : "";
+  if (errorsA > 0) {
+    setStatus("bad", `Finalizado con ${errorsA} errores.`,
+              `${doneSet.size - errorsA} conexiones correctas (${totalVars} variaciones).${extra}`);
+  } else if (errorsB > 0) {
+    setStatus("bad", `Predicción completada, pero ${model2} falló en ${errorsB} combinaciones.`,
+              `${doneSet.size} conexiones (${totalVars} variaciones).`);
+  } else {
+    setStatus("ok", `Predicción completada: ${doneSet.size} conexiones (${totalVars} variaciones obtenidas)` +
+              (model2 ? ` · comparando ${model} vs ${model2}` : "") + `. Pulsa 👁 para ver en 2D.`);
+  }
+  btn.disabled = false;
 };
 
 /* =====================================================================

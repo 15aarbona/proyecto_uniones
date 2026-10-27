@@ -13,7 +13,9 @@ Endpoints:
   GET  /profiles?names=...      Geometria de secciones (para el visualizador 2D)
   POST /model/activate          Carga/recarga un modelo por nombre
   POST /predict                 {"model": "...", "rows": [...]} -> columnas CODAME + comprobacion ("checks")
-  POST /scenarios               {"row": {...}} -> E1 (entrada), E2/E3 = max. carga que cumple sin/con cantonera
+  POST /scenarios                 {"row": {...}} -> E1 (entrada), E2/E3 = max. carga que cumple sin/con cantonera
+  POST /scenarios/batch/jobs      {"client_id","rows": [...]} -> job asincrono (web)
+  GET  /scenarios/batch/jobs/{id}?since=&limit= -> resultados incrementales del job
   POST /check                   Comprobacion AISC 360-10 sobre filas CODAME
   POST /validate                Guarda filas validadas (sin reentreno)
   GET  /dataset/summary         Resumen del dataset acumulado
@@ -225,6 +227,19 @@ _SCENARIO_GATE = _ScenarioGate(
     queue_timeout=config.SCENARIO_QUEUE_TIMEOUT_S,
 )
 
+_SCENARIO_EXEC: Optional[asyncio.Semaphore] = None
+_SCENARIO_EXEC_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _exec_semaphore() -> asyncio.Semaphore:
+    """Semaforo de ejecucion compartido por escenarios (se recrea por event loop)."""
+    global _SCENARIO_EXEC, _SCENARIO_EXEC_LOOP
+    loop = asyncio.get_running_loop()
+    if _SCENARIO_EXEC is None or _SCENARIO_EXEC_LOOP is not loop:
+        _SCENARIO_EXEC = asyncio.Semaphore(config.SCENARIO_WORKERS)
+        _SCENARIO_EXEC_LOOP = loop
+    return _SCENARIO_EXEC
+
 
 async def _run_sync(runner: _Runner, fn, args: tuple, timeout: Optional[float],
                     label: str, kwargs: Optional[Dict[str, Any]] = None):
@@ -244,14 +259,15 @@ async def _run_scenario(name: str, row: Dict[str, Any], label: str, **kwargs) ->
     """Pasa por el control de admision y ejecuta `escenarios.run` dentro del presupuesto."""
     queue_wait = await _SCENARIO_GATE.acquire()
     try:
-        result = await _run_sync(
-            _SCENARIO_RUNNER,
-            escenarios.run,
-            (name, row),
-            config.SCENARIO_TIMEOUT_S,
-            label,
-            {"timeout_s": config.SCENARIO_TIMEOUT_S, **kwargs},
-        )
+        async with _exec_semaphore():
+            result = await _run_sync(
+                _SCENARIO_RUNNER,
+                escenarios.run,
+                (name, row),
+                config.SCENARIO_TIMEOUT_S,
+                label,
+                {"timeout_s": config.SCENARIO_TIMEOUT_S, **kwargs},
+            )
         return result, queue_wait
     finally:
         _SCENARIO_GATE.release()
@@ -475,16 +491,115 @@ async def _run_scenario_batch(name: str, rows: List[Dict[str, Any]], label: str,
                               **kwargs) -> tuple[List[Dict[str, Any]], float]:
     queue_wait = await _SCENARIO_GATE.acquire()
     try:
-        results = await _run_sync(
-            _SCENARIO_RUNNER,
-            _run_batch_sync,
-            (name, rows, kwargs, config.SCENARIO_TIMEOUT_S),
-            config.SCENARIO_TIMEOUT_S + 2.0,
-            label,
-        )
+        async with _exec_semaphore():
+            results = await _run_sync(
+                _SCENARIO_RUNNER,
+                _run_batch_sync,
+                (name, rows, kwargs, config.SCENARIO_TIMEOUT_S),
+                config.SCENARIO_TIMEOUT_S + 2.0,
+                label,
+            )
         return results, queue_wait
     finally:
         _SCENARIO_GATE.release()
+
+
+def _compact_web_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Resultado de /scenarios sin los bloques que la web no usa."""
+    omitidos = {"historial", "tabla", "tabla_markdown", "parametros"}
+    return {
+        clave: valor
+        for clave, valor in result.items()
+        if clave not in omitidos
+    }
+
+
+async def _run_one_scenario(name: str, row: Dict[str, Any],
+                            options: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
+    uid = _uid(row)
+    web_id = row.get("__web_id")
+
+    def _error(status: str, http_status: int, mensaje: str) -> Dict[str, Any]:
+        return {"unicode": uid, "web_id": web_id, "status": status,
+                "http_status": http_status, "mensaje": mensaje}
+
+    try:
+        async with _exec_semaphore():
+            result = await _run_sync(
+                _SCENARIO_RUNNER,
+                escenarios.run,
+                (name, row),
+                timeout_s + 2.0,
+                "scenarios_batch",
+                {"timeout_s": timeout_s, **options},
+            )
+        return {
+            "unicode": uid,
+            "web_id": web_id,
+            "status": "OK",
+            "resultado": _compact_web_result(result),
+        }
+    except TimeoutError as exc:
+        return _error("TIMEOUT_SERVIDOR", 504, str(exc))
+    except predictor.InputContractError as exc:
+        return _error("ERROR_ENTRADA", 422, str(exc))
+    except ValueError as exc:
+        return _error("ERROR_ENTRADA", 422, str(exc))
+    except KeyError as exc:
+        return _error("ERROR_MODELO", 404, str(exc))
+    except asyncio.CancelledError:
+        return _error("ERROR_SERVIDOR", 500,
+                      "fila cancelada por un timeout del lote")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("[batch] error generando escenarios (unicode=%s)", uid)
+        return _error("ERROR_SERVIDOR", 500, str(exc))
+
+
+_BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
+_BATCH_JOB_TTL_S = 600
+
+
+def _cleanup_jobs() -> None:
+    ahora = time.time()
+    for job_id, job in list(_BATCH_JOBS.items()):
+        if ahora - job["created"] > _BATCH_JOB_TTL_S:
+            _BATCH_JOBS.pop(job_id, None)
+
+
+def _job_payload(job: Dict[str, Any], since: int, limit: int) -> Dict[str, Any]:
+    resultados = job["resultados"]
+    since = max(0, min(int(since), len(resultados)))
+    limit = max(1, min(int(limit), 10))
+    nuevos = resultados[since:since + limit]
+    return {
+        "job_id": job["id"],
+        "estado": job["estado"],
+        "total": job["total"],
+        "done": len(resultados),
+        "siguiente": since + len(nuevos),
+        "resultados": nuevos,
+        "error": job.get("error"),
+    }
+
+
+async def _run_job(job: Dict[str, Any], name: str, rows: List[Dict[str, Any]],
+                   options: Dict[str, Any]) -> None:
+    try:
+        tareas = [
+            asyncio.create_task(
+                _run_one_scenario(
+                    name, row, options, config.SCENARIO_BATCH_ROW_TIMEOUT_S
+                )
+            )
+            for row in rows
+        ]
+        for futura in asyncio.as_completed(tareas):
+            job["resultados"].append(await futura)
+    except Exception as exc:  # noqa: BLE001
+        job["error"] = str(exc)
+        log.exception("[batch] job %s fallo", job["id"])
+    finally:
+        job["estado"] = "hecho"
 
 
 def _mcp_status(model: str, status: str, http_status: int, message: str,
@@ -1107,6 +1222,75 @@ async def scenarios(payload: ScenarioIn):
         result.get("parada"), queue_wait, result.get("tiempo_s", 0.0),
     )
     return {"model_name": name, **result}
+
+
+class ScenarioJobIn(BaseModel):
+    client_id: str = Field(..., min_length=1, max_length=120)
+    model: str | None = None
+    rows: List[Dict[str, Any]]
+    incremento: float = Field(default=0.05, gt=0)
+    max_pasos: int = Field(default=40, ge=1, le=200)
+    max_fallos_seguidos: int = Field(default=0, ge=0)
+
+
+@app.post(
+    "/scenarios/batch/jobs",
+    tags=["inferencia"],
+    summary="Crea un lote asincrono y devuelve su id",
+)
+async def create_scenarios_job(payload: ScenarioJobIn):
+    _cleanup_jobs()
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="rows vacio")
+    if len(payload.rows) > config.SCENARIO_BATCH_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Maximo {config.SCENARIO_BATCH_ROWS} filas por lote",
+        )
+    existing = _BATCH_JOBS.get(payload.client_id)
+    if existing is not None:
+        return _job_payload(existing, 0, 1)
+    name = payload.model or config.MODEL_NAME
+    job = {
+        "id": payload.client_id,
+        "created": time.time(),
+        "estado": "procesando",
+        "total": len(payload.rows),
+        "resultados": [],
+    }
+    _BATCH_JOBS[payload.client_id] = job
+    job["task"] = asyncio.create_task(
+        _run_job(
+            job,
+            name,
+            payload.rows,
+            {
+                "incremento": payload.incremento,
+                "max_pasos": payload.max_pasos,
+                "max_fallos_seguidos": payload.max_fallos_seguidos,
+            },
+        )
+    )
+    log.info(
+        "/scenarios/batch/jobs: job=%s modelo=%s %d filas",
+        payload.client_id, name, len(payload.rows),
+    )
+    return _job_payload(job, 0, 1)
+
+
+@app.get(
+    "/scenarios/batch/jobs/{job_id}",
+    tags=["inferencia"],
+    summary="Consulta un lote asincrono",
+)
+async def get_scenarios_job(job_id: str,
+                            since: int = Query(0, ge=0),
+                            limit: int = Query(2, ge=1, le=10)):
+    _cleanup_jobs()
+    job = _BATCH_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado o expirado")
+    return _job_payload(job, since, limit)
 
 
 @app.get("/dataset/summary", tags=["datos"], summary="Resumen del dataset acumulado")

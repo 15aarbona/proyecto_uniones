@@ -210,6 +210,13 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
 | GET | `/dataset/summary` | Resumen del dataset acumulado |
 
+La web usa el flujo asíncrono `/scenarios/batch/jobs`:
+- `POST /scenarios/batch/jobs` con `client_id` y `rows` responde al instante y arranca el
+  cálculo; repetir el POST con el mismo `client_id` devuelve el mismo job (idempotente).
+- `GET /scenarios/batch/jobs/{id}?since=N&limit=1` devuelve los resultados nuevos (incluida
+  la predicción raw `rows_raw`). Si un GET/POST se pierde por el túnel, se reintenta sin
+  perder el trabajo ya calculado.
+
 Sin autenticación (API abierta en la red interna). Documentación interactiva en `/docs`
 (Swagger) y `/redoc`.
 
