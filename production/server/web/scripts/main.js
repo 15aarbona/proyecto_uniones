@@ -95,38 +95,87 @@ function diffRows(raw, adj){
 function diffSectionHtml(){
   const v = getConnVariations(VIEW.connIdx)[VIEW.activeVarIndex];
   if (!v || !v.raw || !Object.keys(v.raw).length) return `<h3>Ajustes sobre la predicción del modelo</h3><div class="empty">Sin predicción del modelo para comparar.</div>`;
-  const d = diffRows(v.raw, v.adjusted);
-  const body = d.length ? d.map(x => `<tr><td><b>${escHtml(x.key)}</b></td><td>${escHtml(fmtD(x.from))}</td>` +
-      `<td>${escHtml(fmtD(x.to))}</td><td style="color:${x.delta > 0 ? "#2E8B57" : "#D52B1E"};font-weight:600">` +
-      `${x.delta == null ? "" : (x.delta > 0 ? "+" : "") + fmtD(x.delta)}</td></tr>`).join("")
-    : `<tr><td colspan="4">El modelo acertó: sin ajustes.</td></tr>`;
-  return `<h3>Ajustes sobre la predicción del modelo (${d.length})</h3>
-    <table class="diff-tbl"><thead><tr><th>Parámetro</th><th>Modelo</th><th>Ajustado</th><th>Δ</th></tr></thead><tbody>${body}</tbody></table>`;
+  const dA = diffRows(v.raw, v.adjusted);
+  const c = v.cmp;
+  const hasB = !!(c && c.raw && Object.keys(c.raw).length);
+  const sign = x => x.delta == null ? "" : (x.delta > 0 ? "+" : "") + fmtD(x.delta);
+  const col = x => x.delta > 0 ? "#2E8B57" : "#D52B1E";
+
+  if (!hasB) {
+    const body = dA.length ? dA.map(x => `<tr><td><b>${escHtml(x.key)}</b></td><td>${escHtml(fmtD(x.from))}</td>` +
+        `<td>${escHtml(fmtD(x.to))}</td><td style="color:${col(x)};font-weight:600">${sign(x)}</td></tr>`).join("")
+      : `<tr><td colspan="4">El modelo acertó: sin ajustes.</td></tr>`;
+    return `<h3>Ajustes sobre la predicción del modelo${v.model ? " · " + escHtml(v.model) : ""} (${dA.length})</h3>
+      <table class="diff-tbl"><thead><tr><th>Parámetro</th><th>Modelo</th><th>Ajustado</th><th>Δ</th></tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  /* Tabla comparativa: unión de parámetros ajustados por cualquiera de los dos modelos */
+  const dB = diffRows(c.raw, c.adjusted);
+  const mA = new Map(dA.map(x => [x.key, x])), mB = new Map(dB.map(x => [x.key, x]));
+  const keys = [...new Set([...mA.keys(), ...mB.keys()])];
+  const cells = (x, sep) => x
+    ? `<td class="${sep ? "sepl" : ""}">${escHtml(fmtD(x.from))}</td><td>${escHtml(fmtD(x.to))}</td>` +
+      `<td style="color:${col(x)};font-weight:600">${sign(x)}</td>`
+    : `<td class="na ${sep ? "sepl" : ""}" colspan="3">sin ajuste</td>`;
+  const body = keys.length ? keys.map(k =>
+      `<tr><td><b>${escHtml(k)}</b></td>${cells(mA.get(k), true)}${cells(mB.get(k), true)}</tr>`).join("")
+    : `<tr><td colspan="7">Ningún modelo necesitó ajustes.</td></tr>`;
+  const nA = escHtml(v.model || "Modelo A"), nB = escHtml(c.model || "Modelo B");
+  return `<h3>Comparación de ajustes · ${nA} vs ${nB}</h3>
+    <table class="diff-tbl diff-cmp"><thead>
+      <tr><th rowspan="2">Parámetro</th><th class="ga sepl" colspan="3">${nA}</th><th class="gb sepl" colspan="3">${nB}</th></tr>
+      <tr><th class="ga sepl">Modelo</th><th class="ga">Ajustado</th><th class="ga">Δ</th>
+          <th class="gb sepl">Modelo</th><th class="gb">Ajustado</th><th class="gb">Δ</th></tr>
+    </thead><tbody>${body}
+      <tr class="sum"><td>Nº de ajustes</td><td class="sepl" colspan="3">${dA.length}</td><td class="sepl" colspan="3">${dB.length}</td></tr>
+    </tbody></table>`;
 }
 function renderDiffCard(){ const el = $("viewerDiff"); if (el && VIEW) el.innerHTML = diffSectionHtml(); }
 
 function renderAdjStats(){
   const el = $("adjStats"); if (!el) return;
-  const c = {}; let n = 0, changed = 0;
-  state.results.forEach((_, i) => getConnVariations(i).forEach(v => {
-    if (v.unavailable || !v.raw || !Object.keys(v.raw).length) return;
-    n++;
-    const d = diffRows(v.raw, v.adjusted);
-    if (d.length) changed++;
+  const A = {}, B = {}; let nA = 0, chA = 0, nB = 0, chB = 0, nameA = "", nameB = "";
+  const acc = (store, raw, adj) => {
+    const d = diffRows(raw, adj);
     d.forEach(x => {
-      const s = c[x.key] || (c[x.key] = { n: 0, sum: 0, abs: 0, nn: 0 });
+      const s = store[x.key] || (store[x.key] = { n: 0, sum: 0, abs: 0, nn: 0 });
       s.n++;
       if (x.delta != null) { s.sum += x.delta; s.abs += Math.abs(x.delta); s.nn++; }
     });
+    return d.length;
+  };
+  state.results.forEach((_, i) => getConnVariations(i).forEach(v => {
+    if (v.unavailable || !v.raw || !Object.keys(v.raw).length) return;
+    nA++; nameA = v.model || nameA;
+    if (acc(A, v.raw, v.adjusted)) chA++;
+    if (v.cmp && v.cmp.raw && Object.keys(v.cmp.raw).length) {
+      nB++; nameB = v.cmp.model || nameB;
+      if (acc(B, v.cmp.raw, v.cmp.adjusted)) chB++;
+    }
   }));
-  const rows = Object.entries(c).sort((a, b) => b[1].n - a[1].n).map(([k, s]) =>
-    `<tr><td><b>${escHtml(k)}</b></td><td>${s.n} (${Math.round(100 * s.n / n)}%)</td>` +
-    `<td>${s.nn ? fmtD(s.sum / s.nn) : ""}</td><td>${s.nn ? fmtD(s.abs / s.nn) : ""}</td>` +
-    `<td><div style="background:#0066B3;height:8px;width:${Math.round(100 * s.n / n)}px"></div></td></tr>`).join("");
-  el.innerHTML = n ? `<details style="margin-top:14px"><summary style="font-weight:700;color:var(--tr-navy);cursor:pointer">` +
-    `Correcciones al modelo: ${changed}/${n} variantes ajustadas</summary>
-    <table style="margin-top:8px"><thead><tr><th>Parámetro</th><th>Variantes corregidas</th><th>Δ medio</th><th>|Δ| medio</th><th></th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="5">Sin ajustes.</td></tr>`}</tbody></table></details>` : "";
+  if (!nA) { el.innerHTML = ""; return; }
+  const hasB = nB > 0;
+  const pct = (s, n) => s ? `${s.n} (${Math.round(100 * s.n / n)}%)` : "–";
+  const dm = s => s && s.nn ? fmtD(s.sum / s.nn) : "";
+  const am = s => s && s.nn ? fmtD(s.abs / s.nn) : "";
+  const keys = [...new Set([...Object.keys(A), ...Object.keys(B)])]
+    .sort((a, b) => ((B[b]?.n || 0) + (A[b]?.n || 0)) - ((B[a]?.n || 0) + (A[a]?.n || 0)));
+  const rows = keys.map(k => hasB
+    ? `<tr><td><b>${escHtml(k)}</b></td><td>${pct(A[k], nA)}</td><td>${dm(A[k])}</td><td>${am(A[k])}</td>` +
+      `<td style="border-left:2px solid var(--tr-line)">${pct(B[k], nB)}</td><td>${dm(B[k])}</td><td>${am(B[k])}</td></tr>`
+    : `<tr><td><b>${escHtml(k)}</b></td><td>${pct(A[k], nA)}</td><td>${dm(A[k])}</td><td>${am(A[k])}</td>` +
+      `<td><div style="background:#0066B3;height:8px;width:${Math.round(100 * (A[k]?.n || 0) / nA)}px"></div></td></tr>`).join("");
+  const head = hasB
+    ? `<tr><th rowspan="2">Parámetro</th><th colspan="3" style="background:#002B5C">${escHtml(nameA)}</th>` +
+      `<th colspan="3" style="background:#7B1FA2;border-left:2px solid #fff">${escHtml(nameB)}</th></tr>` +
+      `<tr><th>Variantes corregidas</th><th>Δ medio</th><th>|Δ| medio</th><th style="background:#7B1FA2;border-left:2px solid #fff">Variantes corregidas</th><th style="background:#7B1FA2">Δ medio</th><th style="background:#7B1FA2">|Δ| medio</th></tr>`
+    : `<tr><th>Parámetro</th><th>Variantes corregidas</th><th>Δ medio</th><th>|Δ| medio</th><th></th></tr>`;
+  const title = hasB
+    ? `Correcciones al modelo: ${escHtml(nameA)} ${chA}/${nA} · ${escHtml(nameB)} ${chB}/${nB} variantes ajustadas`
+    : `Correcciones al modelo: ${chA}/${nA} variantes ajustadas`;
+  el.innerHTML = `<details style="margin-top:14px" ${hasB ? "open" : ""}><summary style="font-weight:700;color:var(--tr-navy);cursor:pointer">${title}</summary>
+    <table style="margin-top:8px"><thead>${head}</thead>
+    <tbody>${rows || `<tr><td colspan="7">Sin ajustes.</td></tr>`}</tbody></table></details>`;
 }
 
 /* Geometría de la predicción cruda (para dibujarla en fantasma) */
@@ -311,7 +360,9 @@ function renderResults(){
         const st = v.status || (isCumple ? "CUMPLE" : "NO CUMPLE");
         const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
         const isChecked = !!v.accepted;
-        const nAdj = diffRows(v.raw, v.adjusted).length;   // [NUEVO]
+        const nAdj = diffRows(v.raw, v.adjusted).length;
+        const nAdjB = (v.cmp && v.cmp.raw && Object.keys(v.cmp.raw).length) ? diffRows(v.cmp.raw, v.cmp.adjusted).length : null;
+        const adjTxt = nAdjB == null ? `${nAdj} ajustes` : `${escHtml(v.model || "A")}: ${nAdj} · ${escHtml(v.cmp.model || "B")}: ${nAdjB}`;
 
         return `
           <div class="var-card-item ${isChecked ? "accepted" : ""}">
@@ -319,7 +370,7 @@ function renderResults(){
               <input type="checkbox" class="var-accept-chk" data-conn="${connIdx}" data-var="${vI}" ${isChecked ? "checked" : ""}>
               <span>${escHtml(v.label)}</span>
             </label>
-            <small title="Parámetros que difieren de la predicción del modelo" style="color:var(--tr-muted)">${nAdj} ajustes</small>
+            <small title="Parámetros que difieren de la predicción del modelo" style="color:var(--tr-muted)">${adjTxt}</small>
             <span class="badge ${badgeCls}">${escHtml(st)}</span>
           </div>
         `;
@@ -1522,40 +1573,60 @@ $("viewerGhost").onclick = () => {
   drawAll();
 };
 
+const callScenarios = (model, row) =>
+  fetch("/scenarios", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: model, row: row, incremento: 0.05, max_pasos: 40 })
+  }).then(async r => {
+    const json = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data: json, inputRow: row };
+  }).catch(err => ({ ok: false, error: err.message, inputRow: row }));
+
+/* Adjunta a cada variación del modelo A la predicción/ajuste del modelo B (misma conexión y mismo escenario) */
+function attachComparison(connsA, connsB, modelA, modelB) {
+  connsA.forEach((cA, i) => {
+    const cB = connsB[i];
+    getConnVariations2(cA).forEach(v => { v.model = modelA; });
+    if (!cB) return;
+    const varsB = getConnVariations2(cB);
+    getConnVariations2(cA).forEach((vA, idx) => {
+      if (vA.unavailable) return;
+      const vB = varsB.find(x => !x.unavailable && x.tipo === vA.tipo) || (varsB[idx] && !varsB[idx].unavailable ? varsB[idx] : null);
+      if (!vB) return;
+      vA.cmp = { model: modelB, raw: vB.raw, adjusted: vB.adjusted, check: vB.check, status: vB.status };
+    });
+  });
+}
+const getConnVariations2 = conn => Array.isArray(conn.variations) ? conn.variations : [];
+
 $("send").onclick = async () => {
   const btn = $("send");
-  btn.disabled = true; 
-  setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones (calculando 3 variaciones por conexión)…");
+  btn.disabled = true;
+  const model = $("model").value;
+  const model2 = $("model2").value && $("model2").value !== model ? $("model2").value : "";
+  setStatus("", "Pre-diseñando " + state.rows.length + " combinaciones" + (model2 ? ` con ${model} y ${model2}` : "") + " (calculando 3 variaciones por conexión)…");
 
   try {
-    const model = $("model").value;
+    const [respA, respB] = await Promise.all([
+      Promise.all(state.rows.map(row => callScenarios(model, row))),
+      model2 ? Promise.all(state.rows.map(row => callScenarios(model2, row))) : Promise.resolve([])
+    ]);
 
-    const promises = state.rows.map(row => 
-      fetch("/scenarios", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: model,
-          row: row,
-          incremento: 0.05,
-          max_pasos: 40
-        })
-      }).then(async r => {
-        const json = await r.json().catch(() => ({}));
-        return { ok: r.ok, status: r.status, data: json, inputRow: row };
-      }).catch(err => ({ ok: false, error: err.message, inputRow: row }))
-    );
-
-    const responses = await Promise.all(promises);
     const parsedConns = [];
-    let errorsCount = 0;
+    let errorsCount = 0, errorsB = 0;
 
-    responses.forEach(res => {
+    respA.forEach((res, i) => {
       if (res.ok && res.data) {
-        const conns = parseScenariosResponse(res.data, res.inputRow);
-        if (conns.length > 0) {
-          parsedConns.push(...conns);
+        const connsA = parseScenariosResponse(res.data, res.inputRow);
+        let connsB = [];
+        if (model2) {
+          const rb = respB[i];
+          if (rb && rb.ok && rb.data) connsB = parseScenariosResponse(rb.data, rb.inputRow);
+          else errorsB++;
         }
+        attachComparison(connsA, connsB, model, model2);
+        parsedConns.push(...connsA);
       } else {
         errorsCount++;
       }
@@ -1566,11 +1637,14 @@ $("send").onclick = async () => {
     renderResults();
 
     const totalVars = state.results.reduce((acc, c) => acc + getConnVariations(state.results.indexOf(c)).filter(v => !v.unavailable).length, 0);
-    
+    const extra = errorsB ? ` (${errorsB} combinaciones sin resultado de ${model2})` : "";
+
     if (errorsCount > 0) {
-      setStatus("bad", `Finalizado con ${errorsCount} errores.`, `${parsedConns.length} conexiones procesadas correctamente (${totalVars} variaciones).`);
+      setStatus("bad", `Finalizado con ${errorsCount} errores.`, `${parsedConns.length} conexiones procesadas correctamente (${totalVars} variaciones).${extra}`);
+    } else if (errorsB > 0) {
+      setStatus("bad", `Predicción completada, pero ${model2} falló en ${errorsB} combinaciones.`, `${parsedConns.length} conexiones (${totalVars} variaciones).`);
     } else {
-      setStatus("ok", `Predicción completada: ${parsedConns.length} conexiones (${totalVars} variaciones obtenidas). Pulsa 👁 para ver en 2D.`);
+      setStatus("ok", `Predicción completada: ${parsedConns.length} conexiones (${totalVars} variaciones obtenidas)` + (model2 ? ` · comparando ${model} vs ${model2}` : "") + `. Pulsa 👁 para ver en 2D.`);
     }
 
   } catch (e){
@@ -1622,6 +1696,8 @@ async function loadModels(){
     const models = o.available_models || [];
     const loaded = o.loaded_models || [];
     sel.innerHTML = models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
+    const sel2 = $("model2");
+    sel2.innerHTML = `<option value="">— Sin comparación —</option>` + models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
     const num = m => { const x = String(m).match(/\d+/g); return x ? Math.max(...x.map(Number)) : -1; };
     const best = models.reduce((a, b) => (num(b) > num(a) ? b : a), models[0]);
     if (!best) return;
@@ -1654,6 +1730,20 @@ async function loadSchema(){
     renderForm(); renderTable();
   } catch (e){ setStatus("bad", "Error cargando esquema", e.message); }
 }
+
+/* Al elegir el modelo de comparación se activa en el servidor si aún no está cargado */
+$("model2").onchange = async () => {
+  const m = $("model2").value; if (!m) return;
+  try {
+    const o = await (await fetch("/models")).json();
+    if (!(o.loaded_models || []).includes(m)) {
+      setStatus("", "Cargando modelo " + m + "…");
+      const a = await fetch("/model/activate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: m }) });
+      if (!a.ok) { setStatus("bad", "No se pudo cargar " + m); $("model2").value = ""; return; }
+      setStatus("", "");
+    }
+  } catch (e) {}
+};
 
 $("model").onchange = () => {
   state.rows = []; state.results = []; _checkTokens = {};
