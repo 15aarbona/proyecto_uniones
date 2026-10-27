@@ -20,15 +20,26 @@ HOST = os.environ.get("AI_HOST", "0.0.0.0")
 PORT = int(os.environ.get("AI_PORT", "8080"))
 
 # Concurrencia y timeouts del servidor.
-#   - Los endpoints MCP no deben bloquear el event loop: el trabajo pesado se ejecuta en
-#     un runner dedicado y se corta con estos timeouts.
+#   - AI_CLIENT_TIMEOUT_S define el limite duro del cliente/gateway (100s = 100000ms en
+#     Copilot Studio). Si se cambia este valor, todos los demas tiempos se adaptan en
+#     proporcion (salvo que se fijen explicitamente por variable de entorno):
+#       cola escenarios (15%) + ejecucion escenarios (80%) = 95% < 100% del cliente.
 #   - Refinado: backend `process` (pool de procesos, por defecto), `serial` (debug) o,
 #     en el futuro, `ray` (ver doc/ray_escalado.md).
-PREDICT_TIMEOUT_S = float(os.environ.get("AI_PREDICT_TIMEOUT_S", "120"))
-CHECK_TIMEOUT_S = float(os.environ.get("AI_CHECK_TIMEOUT_S", "120"))
-REFINE_TIMEOUT_S = float(os.environ.get("AI_REFINE_TIMEOUT_S", "90"))
-# Plazo del refinado = REFINE_TIMEOUT_S + REFINE_TIMEOUT_PER_ROW_S * ceil(filas / workers):
-# crece con el tamano del lote en lugar de ser fijo para cualquier numero de uniones.
+CLIENT_TIMEOUT_S = float(
+    os.environ.get("AI_CLIENT_TIMEOUT_S", "").strip()
+    or str(float(os.environ.get("AI_CLIENT_TIMEOUT_MS", "100000")) / 1000.0)
+)
+
+PREDICT_TIMEOUT_S = float(
+    os.environ.get("AI_PREDICT_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.85, 1)))
+)
+CHECK_TIMEOUT_S = float(
+    os.environ.get("AI_CHECK_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.85, 1)))
+)
+REFINE_TIMEOUT_S = float(
+    os.environ.get("AI_REFINE_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.65, 1)))
+)
 REFINE_TIMEOUT_PER_ROW_S = float(os.environ.get("AI_REFINE_TIMEOUT_PER_ROW_S", "5"))
 REFINE_BACKEND = os.environ.get("AI_REFINE_BACKEND", "process").strip().lower()
 
@@ -37,12 +48,30 @@ REFINE_BACKEND = os.environ.get("AI_REFINE_BACKEND", "process").strip().lower()
 # AI_BATCH_MAX_WAIT_MS, lo que ocurra primero.
 BATCH_MAX_ROWS = max(1, int(os.environ.get("AI_BATCH_MAX_ROWS", "64")))
 BATCH_MAX_WAIT_MS = max(0, int(os.environ.get("AI_BATCH_MAX_WAIT_MS", "10")))
-INFERENCE_TIMEOUT_S = float(os.environ.get("AI_INFERENCE_TIMEOUT_S", "60"))
+INFERENCE_TIMEOUT_S = float(
+    os.environ.get("AI_INFERENCE_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.50, 1)))
+)
 
-# Escenarios: cola ilimitada con N orquestadores. El timeout es por escenario ya
-# iniciado; el reparto de inferencia lo hace el batcher y el refinado el pool.
+# Escenarios: N orquestadores + cola acotada. Si se llena la cola o se supera
+# SCENARIO_QUEUE_TIMEOUT_S esperando turno, el servidor responde "ocupado" de inmediato
+# para no agotar el timeout de 100s del cliente MCP.
 SCENARIO_WORKERS = max(1, int(os.environ.get("AI_SCENARIO_WORKERS", "4")))
-SCENARIO_TIMEOUT_S = float(os.environ.get("AI_SCENARIO_TIMEOUT_S", "600"))
+SCENARIO_MAX_QUEUE = max(
+    0, int(os.environ.get("AI_SCENARIO_MAX_QUEUE", str(SCENARIO_WORKERS)))
+)
+SCENARIO_BATCH_ROWS = max(1, int(os.environ.get("AI_SCENARIO_BATCH_ROWS", "25")))
+SCENARIO_QUEUE_TIMEOUT_S = float(
+    os.environ.get("AI_SCENARIO_QUEUE_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.15, 1)))
+)
+SCENARIO_TIMEOUT_S = float(
+    os.environ.get("AI_SCENARIO_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.80, 1)))
+)
+
+# Transporte MCP: JSON suele evitar cuelgues de streams SSE en tuneles. Si tu
+# conector solo soporta SSE, pon AI_MCP_JSON_RESPONSE=0.
+MCP_JSON_RESPONSE = os.environ.get("AI_MCP_JSON_RESPONSE", "1").strip().lower() not in (
+    "0", "false", "no"
+)
 
 # Orígenes web autorizados por CORS, separados por comas. Evitar "*" si la web
 # se sirve fuera de la red interna.

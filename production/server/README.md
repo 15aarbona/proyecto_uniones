@@ -48,18 +48,32 @@ Los tools MCP no bloquean el event loop: la predicción y la comprobación se ej
 sendas hebras dedicadas, y el refinado en un pool de procesos aislado. Todo se corta con
 timeout para que una petición no quede colgada:
 
+El presupuesto maestro es `AI_CLIENT_TIMEOUT_S` (por defecto `100`, el límite del
+conector MCP de Copilot Studio). El resto de tiempos se derivan de él salvo que se fijen
+explícitamente:
+
 | Variable | Defecto | Uso |
 |---|---|---|
-| `AI_PREDICT_TIMEOUT_S` | `120` | `predecir_conexion` |
-| `AI_CHECK_TIMEOUT_S` | `120` | `comprobar_aisc` |
-| `AI_REFINE_TIMEOUT_S` | `90` | refinado (pool) |
+| `AI_CLIENT_TIMEOUT_S` | `100` | límite duro del cliente/gateway MCP |
+| `AI_CLIENT_TIMEOUT_MS` | `100000` | alternativa en milisegundos si no se define `AI_CLIENT_TIMEOUT_S` |
+| `AI_PREDICT_TIMEOUT_S` | 85 % del cliente | `predecir_conexion` |
+| `AI_CHECK_TIMEOUT_S` | 85 % del cliente | `comprobar_aisc` |
+| `AI_REFINE_TIMEOUT_S` | 65 % del cliente | refinado (pool) |
+| `AI_REFINE_TIMEOUT_PER_ROW_S` | `5` | margen extra por ronda de filas en el pool |
 | `AI_REFINE_BACKEND` | `process` | `process` (pool), `serial` (debug) o `ray` (futuro) |
 | `AI_REFINE_WORKERS` | `min(8, cpus)` | nº de procesos del pool |
 | `AI_BATCH_MAX_ROWS` | `64` | máximo de filas por forward del batcher |
 | `AI_BATCH_MAX_WAIT_MS` | `10` | espera máxima para agrupar peticiones concurrentes |
-| `AI_INFERENCE_TIMEOUT_S` | `60` | timeout de una petición esperando al batcher |
-| `AI_SCENARIO_WORKERS` | `4` | orquestadores de escenarios en paralelo (cola ilimitada) |
-| `AI_SCENARIO_TIMEOUT_S` | `600` | presupuesto cooperativo por escenario ya iniciado |
+| `AI_INFERENCE_TIMEOUT_S` | 50 % del cliente | timeout de una petición esperando al batcher |
+| `AI_SCENARIO_WORKERS` | `4` | orquestadores de escenarios en paralelo |
+| `AI_SCENARIO_BATCH_ROWS` | `50` | máximo de conexiones por llamada MCP `rows` |
+| `AI_SCENARIO_MAX_QUEUE` | `= workers` | peticiones adicionales en cola antes de responder ocupado |
+| `AI_SCENARIO_QUEUE_TIMEOUT_S` | 15 % del cliente | espera máxima en cola |
+| `AI_SCENARIO_TIMEOUT_S` | 80 % del cliente | presupuesto total de ejecución del escenario |
+| `AI_MCP_JSON_RESPONSE` | `1` | respuesta MCP en JSON; `0` para forzar SSE |
+
+Con los valores por defecto: 15 s de cola + 80 s de ejecución = 95 s, por debajo de los
+100 s del cliente. Si se cambia `AI_CLIENT_TIMEOUT_S`, todo se reajusta proporcionalmente.
 
 El backend de refinado es una interfaz (`RefineBackend`) con implementaciones
 `ProcessPoolBackend` y `SerialBackend`; añadir `RayBackend` no requiere tocar el servidor.
@@ -72,9 +86,44 @@ pool de procesos y el codame/check por petición, fuera del worker de GPU. El aj
 geométrico usa una vía rápida (`calcular_geometria`) que evita los 17 pasos de resistencia
 y la construcción de objetos Pydantic.
 
-`/scenarios` usa una cola ilimitada con `AI_SCENARIO_WORKERS` orquestadores. El timeout se
-cuenta desde que el escenario empieza a ejecutarse; al agotarse devuelve `200` con los
-resultados parciales (`parcial: true`, `parada` y `avisos`).
+`/scenarios` y el tool MCP `disenar_escenarios_carga` usan un **control de admisión**:
+- Hasta `AI_SCENARIO_WORKERS` escenarios ejecutándose y `AI_SCENARIO_MAX_QUEUE` en espera.
+- Si la cola está llena, respuesta inmediata **503 / SERVIDOR_OCUPADO** (sin esperar 100 s).
+- Si un escenario espera más de `AI_SCENARIO_QUEUE_TIMEOUT_S` o ejecuta más de
+  `AI_SCENARIO_TIMEOUT_S`, se corta con **504 / TIMEOUT_SERVIDOR**. No hay resultados
+  parciales: o se devuelve el cálculo completo o un error claro.
+
+El servidor MCP anuncia su capacidad en `instructions` (máximo de llamadas concurrentes) y
+responde en JSON por defecto (`AI_MCP_JSON_RESPONSE=1`) para evitar los cuelgues de streams
+SSE a través del túnel. `disenar_escenarios_carga` devuelve JSON por lotes con el detalle
+completo en `lote`; se omite `historial` para no engordar innecesariamente la respuesta.
+
+En MCP, los estados ocupado/timeout se devuelven como **resultado estructurado** (no como
+error JSON-RPC) para que Copilot no los convierta en un 504: `status` =
+`SERVIDOR_OCUPADO`/`TIMEOUT_SERVIDOR`, `http_status` = `503`/`504`, `retry_after_s` y
+`mensaje`. En REST siguen siendo HTTP 503/504.
+
+### MCP `disenar_escenarios_carga`: llamadas por lote
+
+El contrato MCP ya no es una conexión por llamada: recibe `rows` (lista, objeto único o
+string JSON) con hasta `AI_SCENARIO_BATCH_ROWS` conexiones (50 por defecto). Las filas del
+lote se ejecutan **secuencialmente** dentro de una sola plaza del control de admisión.
+Si llegan más de `AI_SCENARIO_BATCH_ROWS`, se procesan las primeras y el resto se descarta;
+la respuesta lo indica en `n_descartadas` y `descartadas`.
+
+La respuesta incluye `lote` con el detalle completo por conexión (`resultado.rows`,
+`resultado.checks` compactos, `escenarios` y `tabla_markdown`), pero **sin `historial`**.
+También incluye `status`, contadores, `resumen` compacto por conexión, `errores` y
+`tabla_markdown` resumen. Una fila con error o timeout no aborta el resto del lote.
+El cliente debe llamar en varios lotes si necesita más conexiones.
+
+Cada escenario encontrado incluye `resumen_comprobacion`, calculado solo para MCP:
+`estado`, `ratio_pesimo`, `descripcion_ratio_pesimo`, `ratio_max_todos`,
+`descripcion_ratio_max_todos`, `ratios_superan_1`, `fallos_geometricos` y un `dictamen`
+redactado por el servidor. `ratio_pesimo` sigue el criterio clásico (índices 0-14), mientras
+que `ratio_max_todos` y `cumple` cubren los 18 ratios y las comprobaciones geométricas. El
+`resumen` por conexión añade esos campos agregados y un `dictamen` de la conexión. El agente
+debe usar los `dictamen` y no reinterpretar los ratios.
 
 ## Instalar / actualizar un modelo
 
@@ -118,7 +167,7 @@ curl -X POST localhost:8080/model/activate -H "Content-Type: application/json" -
 | GET | `/` y `/web/...` | Interfaz web (`web/conexiones_tr.html`) |
 | POST | `/model/activate` | `{"name":"V11"}` → carga/recarga un modelo |
 | POST | `/predict` | `{"model":"V11","rows":[...]}` → valida, predice y devuelve las 63 columnas CODAME |
-| POST | `/scenarios` | `{"row":{...},"incremento":0.05,"max_pasos":40}` → E1/E2/E3 con resultados parciales si se agota el tiempo |
+| POST | `/scenarios` | `{"row":{...},"incremento":0.05,"max_pasos":40}` → E1/E2/E3; 503 si está ocupado, 504 si agota el tiempo |
 | POST | `/check` | `{"rows":[...]}` (filas CODAME editadas) → comprobación AISC 360-10 |
 | POST | `/dataset/append` | Filas marcadas → traduce a `data_final` y añade al parquet de reentreno (upsert por `Unicode`) |
 | POST | `/validate` | Guarda filas validadas (sin reentreno) |
