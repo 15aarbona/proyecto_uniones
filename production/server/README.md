@@ -117,6 +117,14 @@ También incluye `status`, contadores, `resumen` compacto por conexión, `errore
 `tabla_markdown` resumen. Una fila con error o timeout no aborta el resto del lote.
 El cliente debe llamar en varios lotes si necesita más conexiones.
 
+Cada escenario encontrado incluye `resumen_comprobacion`, calculado solo para MCP:
+`estado`, `ratio_pesimo`, `descripcion_ratio_pesimo`, `ratio_max_todos`,
+`descripcion_ratio_max_todos`, `ratios_superan_1`, `fallos_geometricos` y un `dictamen`
+redactado por el servidor. `ratio_pesimo` sigue el criterio clásico (índices 0-14), mientras
+que `ratio_max_todos` y `cumple` cubren los 18 ratios y las comprobaciones geométricas. El
+`resumen` por conexión añade esos campos agregados y un `dictamen` de la conexión. El agente
+debe usar los `dictamen` y no reinterpretar los ratios.
+
 ## Instalar / actualizar un modelo
 
 El `Makefile` (raíz) copia el paquete del modelo (código `core/` + artefactos + datos):

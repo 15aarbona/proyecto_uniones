@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field
 import pandas as pd
 
 import catalogo
+import checker
 import config
 import model_registry
 import escenarios
@@ -292,18 +293,49 @@ def _uid(row: Dict[str, Any]) -> str:
     return str((row or {}).get("UNICODE") or (row or {}).get("Unicode") or "?")
 
 
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
 def _compact_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    """Quita `rows_raw`/`historial` y deja los checks compactos para el tunel MCP."""
+    """Quita `rows_raw`/`historial` y resume las comprobaciones para el tunel MCP."""
+    checks = [c for c in (result.get("checks") or []) if isinstance(c, dict)]
     compact_checks = [
         {
             k: c.get(k)
             for k in ("Unicode", "Escenario", "cumple", "ratio_pesimo", "descripcion_ratio_pesimo")
             if k in c
         }
-        for c in (result.get("checks") or [])
+        for c in checks
     ]
-    out = {k: v for k, v in result.items() if k not in ("rows_raw", "historial")}
+    resumenes = {}
+    for check in checks:
+        clave = str(check.get("Escenario") or "")[:2].upper()
+        if clave in ("E1", "E2", "E3"):
+            resumenes[clave] = checker.resumen_comprobacion(check)
+
+    escenarios = []
+    for escenario in result.get("escenarios") or []:
+        item = dict(escenario) if isinstance(escenario, dict) else escenario
+        if isinstance(item, dict) and item.get("encontrado"):
+            resumen = resumenes.get(str(item.get("id") or "").upper())
+            if resumen is not None:
+                item["resumen_comprobacion"] = resumen
+        escenarios.append(item)
+
+    out = {
+        k: v
+        for k, v in result.items()
+        if k not in ("rows_raw", "historial", "escenarios")
+    }
     out["checks"] = compact_checks
+    out["escenarios"] = escenarios
     return {"model_name": name, "status": "OK", **out}
 
 
@@ -507,26 +539,86 @@ def _batch_summary(results: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]],
             errores.append(err)
             resumen.append({
                 "unicode": uid, "status": status, "E1": "-", "E2": "-", "E3": "-",
-                "ratio_pesimo": None,
+                "ratio_pesimo": None, "descripcion_ratio_pesimo": None,
+                "ratio_max_todos": None, "descripcion_ratio_max_todos": None,
+                "escenario_ratio_pesimo": None, "escenario_ratio_max_todos": None,
+                "estado_comprobacion": status,
+                "dictamen": item.get("mensaje") or status,
             })
             continue
         result = item.get("resultado") or {}
         escenarios = {e.get("id"): e for e in (result.get("escenarios") or [])}
         row: Dict[str, Any] = {"unicode": uid, "status": "OK", "parada": result.get("parada")}
-        peor = 0.0
+        peor = None
+        peor_escenario = None
+        peor_descripcion = None
+        maximo = None
+        maximo_escenario = None
+        maximo_descripcion = None
+        dictamenes: List[str] = []
+        encontrados = 0
+        no_cumple = False
+
         for clave in ("E1", "E2", "E3"):
             esc = escenarios.get(clave) or {}
             if not esc.get("encontrado"):
                 row[clave] = "NO ENCONTRADO"
-            elif esc.get("cumple"):
-                row[clave] = "OK"
-            else:
+                motivo = str(esc.get("motivo") or "").strip()
+                sufijo = f" ({motivo})" if motivo else ""
+                dictamenes.append(f"{clave}: no encontrado{sufijo}")
+                continue
+
+            encontrados += 1
+            if not esc.get("cumple"):
+                no_cumple = True
                 row[clave] = "NO CUMPLE"
-            try:
-                peor = max(peor, float(esc.get("ratio_pesimo") or 0.0))
-            except (TypeError, ValueError):
-                pass
-        row["ratio_pesimo"] = round(peor, 4) if peor else None
+            else:
+                row[clave] = "OK"
+
+            comprobacion = esc.get("resumen_comprobacion") or {}
+            dictamen = comprobacion.get("dictamen")
+            if not dictamen:
+                dictamen = (
+                    "Cumple AISC 360-10."
+                    if esc.get("cumple")
+                    else "No cumple AISC 360-10."
+                )
+            dictamenes.append(f"{clave}: {dictamen}")
+
+            ratio_pesimo = _as_float(esc.get("ratio_pesimo"))
+            if ratio_pesimo is not None and (peor is None or ratio_pesimo > peor):
+                peor = ratio_pesimo
+                peor_escenario = clave
+                peor_descripcion = esc.get("descripcion_ratio_pesimo")
+
+            ratio_max = _as_float(comprobacion.get("ratio_max_todos"))
+            if ratio_max is None:
+                ratio_max = _as_float(esc.get("ratio_max_todos"))
+            if ratio_max is not None and (maximo is None or ratio_max > maximo):
+                maximo = ratio_max
+                maximo_escenario = clave
+                maximo_descripcion = (
+                    comprobacion.get("descripcion_ratio_max_todos")
+                    or esc.get("descripcion_ratio_max_todos")
+                )
+
+        row["ratio_pesimo"] = round(peor, 4) if peor is not None else None
+        row["descripcion_ratio_pesimo"] = peor_descripcion
+        row["ratio_max_todos"] = round(maximo, 4) if maximo is not None else None
+        row["descripcion_ratio_max_todos"] = maximo_descripcion
+        row["escenario_ratio_pesimo"] = peor_escenario
+        row["escenario_ratio_max_todos"] = maximo_escenario
+        if no_cumple:
+            row["estado_comprobacion"] = "NO_CUMPLE"
+        elif encontrados == 0:
+            row["estado_comprobacion"] = "SIN_DATOS"
+        elif encontrados < 3:
+            row["estado_comprobacion"] = "PARCIAL"
+        else:
+            row["estado_comprobacion"] = "CUMPLE"
+        row["dictamen"] = (
+            " ".join(dictamenes) if dictamenes else "Sin datos de comprobación."
+        )
         resumen.append(row)
     return resumen, errores
 
@@ -554,7 +646,7 @@ async def disenar_escenarios_carga(
     incremento: float = 0.05,
     max_pasos: int = 40,
 ) -> Dict[str, Any]:
-    """Disena varias conexiones en una sola llamada (maximo configurable, 50 por defecto).
+    """Disena varias conexiones en una sola llamada (maximo configurable, 25 por defecto).
 
     Pasa SIEMPRE una lista en `rows` (no una llamada por conexion). Se procesan como maximo
     `AI_SCENARIO_BATCH_ROWS` conexiones; el resto se descarta y se indica en
@@ -562,7 +654,9 @@ async def disenar_escenarios_carga(
 
     Devuelve el detalle en `lote` (una entrada por conexion, con `resultado.rows`,
     `resultado.checks` compactos, `escenarios` y `tabla_markdown`) y omite `historial`.
-    Tambien incluye `resumen`, `errores`, contadores y una `tabla_markdown` resumen.
+    Cada escenario incluye `resumen_comprobacion` con ratios excedidos, fallos geometricos y un
+    `dictamen` redactado por el servidor. Tambien incluye `resumen` por conexion (con su
+    `dictamen`), `errores`, contadores y una `tabla_markdown` resumen.
 
       E1: diseno de entrada (paso 0, sin tocar cargas).
       E2: mayor carga que aguanta SIN cantonera.

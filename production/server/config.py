@@ -59,7 +59,7 @@ SCENARIO_WORKERS = max(1, int(os.environ.get("AI_SCENARIO_WORKERS", "4")))
 SCENARIO_MAX_QUEUE = max(
     0, int(os.environ.get("AI_SCENARIO_MAX_QUEUE", str(SCENARIO_WORKERS)))
 )
-SCENARIO_BATCH_ROWS = max(1, int(os.environ.get("AI_SCENARIO_BATCH_ROWS", "50")))
+SCENARIO_BATCH_ROWS = max(1, int(os.environ.get("AI_SCENARIO_BATCH_ROWS", "25")))
 SCENARIO_QUEUE_TIMEOUT_S = float(
     os.environ.get("AI_SCENARIO_QUEUE_TIMEOUT_S", str(round(CLIENT_TIMEOUT_S * 0.15, 1)))
 )
