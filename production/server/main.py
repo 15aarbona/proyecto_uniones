@@ -378,12 +378,9 @@ def _run_batch_sync(name: str, rows: List[Dict[str, Any]], options: Dict[str, An
                 "unicode": uid, "status": "ERROR_MODELO", "http_status": 404,
                 "mensaje": str(exc),
             })
-        except Exception as exc:  # noqa: BLE001
-            log.exception("[MCP] error generando escenarios (unicode=%s)", uid)
-            out.append({
-                "unicode": uid, "status": "ERROR_SERVIDOR", "http_status": 500,
-                "mensaje": str(exc),
-            })
+        except KeyError as exc:
+            log.exception("KeyError en /scenarios (modelo=%s)", name)
+            raise HTTPException(status_code=404, detail=f"KeyError: {exc}")
     return out
 
 

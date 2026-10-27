@@ -137,7 +137,8 @@ def _add_profiles(df: pd.DataFrame) -> pd.DataFrame:
             )
         geom = lookup.loc[keys].reset_index(drop=True)
         df[f"{col}_type"] = geom["type"].to_numpy()
-        df[f"{col}_d_mm"] = pd.to_numeric(geom["d_mm"].to_numpy(), errors="coerce")
+        for m in measures:
+            df[f"{col}_{m}"] = pd.to_numeric(geom[m].to_numpy(), errors="coerce")
     return df
 
 

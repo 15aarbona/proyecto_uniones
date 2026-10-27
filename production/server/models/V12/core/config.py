@@ -1,6 +1,6 @@
 RAW_INPUT_COLUMNS = [
     "UNICODE",
-    "Normativas"
+    "Normativas",
     "BEAM",
     "COLUMN",
     "ratio_moment",

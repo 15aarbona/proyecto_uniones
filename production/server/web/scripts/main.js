@@ -42,6 +42,7 @@ function evaluateCumple(chk) {
   return ok;
 }
 
+
 /* Helper seguro para obtener variaciones de una conexión */
 function getConnVariations(connIdx) {
   const conn = state.results[connIdx];
@@ -64,6 +65,79 @@ function getConnVariations(connIdx) {
     status: conn.status || (isOk ? "CUMPLE" : "NO CUMPLE"),
     accepted: false
   }];
+}
+
+/* =====================================================================
+   [NUEVO] Diferencias modelo (raw) vs ajustado: tabla, estadística y gráfico
+   ===================================================================== */
+const DIFF_IGNORE = new Set(["unicode","unicode origen","unicode_origen","escenario","raw","adjusted",
+  "check","adjustedcheck","status","accepted","n_cantonera"]);
+const NUMRE = /^-?\d+([.,]\d+)?\s*(mm)?$/i;
+const fmtD = n => typeof n === "number" ? String(Math.round(n * 100) / 100) : String(n);
+
+function diffRows(raw, adj){
+  if (!raw || !adj) return [];
+  const out = [];
+  Object.keys(adj).forEach(k => {
+    if (DIFF_IGNORE.has(k.toLowerCase()) || !(k in raw)) return;
+    const a = raw[k], b = adj[k];
+    if (typeof a === "object" || typeof b === "object") return;
+    if (NUMRE.test(String(a).trim()) && NUMRE.test(String(b).trim())) {
+      const na = vNum(a), nb = vNum(b);
+      if (Math.abs(na - nb) > 1e-9) out.push({ key: k, from: na, to: nb, delta: nb - na });
+    } else if (String(a) !== String(b)) {
+      out.push({ key: k, from: a, to: b, delta: null });
+    }
+  });
+  return out;
+}
+
+function diffSectionHtml(){
+  const v = getConnVariations(VIEW.connIdx)[VIEW.activeVarIndex];
+  if (!v || !v.raw || !Object.keys(v.raw).length) return `<h3>Ajustes sobre la predicción del modelo</h3><div class="empty">Sin predicción del modelo para comparar.</div>`;
+  const d = diffRows(v.raw, v.adjusted);
+  const body = d.length ? d.map(x => `<tr><td><b>${escHtml(x.key)}</b></td><td>${escHtml(fmtD(x.from))}</td>` +
+      `<td>${escHtml(fmtD(x.to))}</td><td style="color:${x.delta > 0 ? "#2E8B57" : "#D52B1E"};font-weight:600">` +
+      `${x.delta == null ? "" : (x.delta > 0 ? "+" : "") + fmtD(x.delta)}</td></tr>`).join("")
+    : `<tr><td colspan="4">El modelo acertó: sin ajustes.</td></tr>`;
+  return `<h3>Ajustes sobre la predicción del modelo (${d.length})</h3>
+    <table class="diff-tbl"><thead><tr><th>Parámetro</th><th>Modelo</th><th>Ajustado</th><th>Δ</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+function renderDiffCard(){ const el = $("viewerDiff"); if (el && VIEW) el.innerHTML = diffSectionHtml(); }
+
+function renderAdjStats(){
+  const el = $("adjStats"); if (!el) return;
+  const c = {}; let n = 0, changed = 0;
+  state.results.forEach((_, i) => getConnVariations(i).forEach(v => {
+    if (v.unavailable || !v.raw || !Object.keys(v.raw).length) return;
+    n++;
+    const d = diffRows(v.raw, v.adjusted);
+    if (d.length) changed++;
+    d.forEach(x => {
+      const s = c[x.key] || (c[x.key] = { n: 0, sum: 0, abs: 0, nn: 0 });
+      s.n++;
+      if (x.delta != null) { s.sum += x.delta; s.abs += Math.abs(x.delta); s.nn++; }
+    });
+  }));
+  const rows = Object.entries(c).sort((a, b) => b[1].n - a[1].n).map(([k, s]) =>
+    `<tr><td><b>${escHtml(k)}</b></td><td>${s.n} (${Math.round(100 * s.n / n)}%)</td>` +
+    `<td>${s.nn ? fmtD(s.sum / s.nn) : ""}</td><td>${s.nn ? fmtD(s.abs / s.nn) : ""}</td>` +
+    `<td><div style="background:#0066B3;height:8px;width:${Math.round(100 * s.n / n)}px"></div></td></tr>`).join("");
+  el.innerHTML = n ? `<details style="margin-top:14px"><summary style="font-weight:700;color:var(--tr-navy);cursor:pointer">` +
+    `Correcciones al modelo: ${changed}/${n} variantes ajustadas</summary>
+    <table style="margin-top:8px"><thead><tr><th>Parámetro</th><th>Variantes corregidas</th><th>Δ medio</th><th>|Δ| medio</th><th></th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="5">Sin ajustes.</td></tr>`}</tbody></table></details>` : "";
+}
+
+/* Geometría de la predicción cruda (para dibujarla en fantasma) */
+function rawGeom(){
+  const v = getConnVariations(VIEW.connIdx)[VIEW.activeVarIndex];
+  const r = v && v.raw; if (!r || !Object.keys(r).length) return null;
+  const g = k => vNum(getFieldInfo(r, [k]).value);
+  const tf = vNum(VIEW.sec.beam_tf), e = g("dev");
+  const steps = [g("pfo") + tf + g("pfi"), g("pb"), ...P_KEYS.map(k => g(k))].filter(x => x > 0);
+  const rows = [e]; let y = e; steps.forEach(s => { y += s; rows.push(y); });
+  return { rows, Bp: g("b_ep"), g: g("p2_ep"), Lp: 2 * e + steps.reduce((a, b) => a + b, 0) };
 }
 
 /* =====================================================================
@@ -210,7 +284,7 @@ function renderTable(){
 function renderResults(){
   const res = state.results;
   $("resSec").style.display = res.length ? "" : "none";
-  if (!res.length){ renderAcceptedTable(); return; }
+  if (!res.length){ renderAdjStats(); renderAcceptedTable(); return; }
 
   const head = `
     <th>Conexión (Unicode)</th>
@@ -237,6 +311,7 @@ function renderResults(){
         const st = v.status || (isCumple ? "CUMPLE" : "NO CUMPLE");
         const badgeCls = st === "CUMPLE" ? "ok" : st === "NO CUMPLE" ? "bad" : "mod";
         const isChecked = !!v.accepted;
+        const nAdj = diffRows(v.raw, v.adjusted).length;   // [NUEVO]
 
         return `
           <div class="var-card-item ${isChecked ? "accepted" : ""}">
@@ -244,6 +319,7 @@ function renderResults(){
               <input type="checkbox" class="var-accept-chk" data-conn="${connIdx}" data-var="${vI}" ${isChecked ? "checked" : ""}>
               <span>${escHtml(v.label)}</span>
             </label>
+            <small title="Parámetros que difieren de la predicción del modelo" style="color:var(--tr-muted)">${nAdj} ajustes</small>
             <span class="badge ${badgeCls}">${escHtml(st)}</span>
           </div>
         `;
@@ -276,6 +352,7 @@ function renderResults(){
     b.onclick = () => openViewer(+b.dataset.viewConn, +b.dataset.viewVar);
   });
 
+  renderAdjStats();   // [NUEVO]
   renderAcceptedTable();
 }
 
@@ -460,6 +537,7 @@ function setStatus(kind, text, detail){
    ===================================================================== */
 const PROFILE_CACHE = {};
 let VIEW = null;
+let SHOW_GHOST = true;
 
 const P_KEYS = ["p3","p4","p5","p6","p7","p8","p9","p10","p11","p12"];
 
@@ -620,6 +698,7 @@ async function loadViewerVariation(varIdx){
     : "";
 
   buildViewerPanel();
+  renderDiffCard();
   drawAll();
   checkViewerConnection();
 }
@@ -1181,8 +1260,10 @@ function drawAll(){
 
 function drawFront(m){
   const W = 520, H = 620, cx = 230, top = 40;
-  const maxH = Math.max(m.Lp, m.beamBot, 1);
-  const scale = Math.min(0.9, (H - 90)/maxH, (W - 200)/Math.max(m.Bp, 1));
+  const G = SHOW_GHOST ? rawGeom() : null;                               // predicción cruda (puede ser mayor que la ajustada)
+  const maxH = Math.max(m.Lp, m.beamBot, G ? G.Lp : 0, 1);
+  const maxB = Math.max(m.Bp, G ? G.Bp : 0, 1);
+  const scale = Math.min(0.9, (H - 90)/maxH, (W - 200)/maxB);
   const Y = v => top + v*scale, X = v => cx + v*scale;
   let s = "";
   s += svgRect(cx - (m.Bp/2)*scale, top, m.Bp*scale, m.Lp*scale, "#cfd8e3");
@@ -1199,8 +1280,16 @@ function drawFront(m){
     s += svgCircle(X(-m.g/2), Y(yy), r, "#ff4500");
     s += svgCircle(X(m.g/2), Y(yy), r, "#ff4500");
   });
-  const xL = cx - (m.Bp/2)*scale - 18;
-  const xR = cx + (m.Bp/2)*scale + 22;
+  /* [NUEVO] Predicción del modelo sin ajustar, en fantasma */
+  if (G && G.Bp > 0) {
+    s += `<rect x="${cx - (G.Bp/2)*scale}" y="${top}" width="${G.Bp*scale}" height="${G.Lp*scale}" fill="none" stroke="#7B1FA2" stroke-width="1.5" stroke-dasharray="6,4"/>`;
+    G.rows.forEach(yy => [-1, 1].forEach(sg => {
+      s += `<circle cx="${X(sg*G.g/2)}" cy="${Y(yy)}" r="${r}" fill="none" stroke="#7B1FA2" stroke-width="1.5" stroke-dasharray="3,2"/>`;
+    }));
+    s += svgText(8, 14, "- - predicción del modelo (sin ajustar)", "start", "#7B1FA2");
+  }
+  const xL = cx - (maxB/2)*scale - 18;
+  const xR = cx + (maxB/2)*scale + 22;
   s += dimV(xL, Y(0), Y(m.rows[0]), "e=" + fmt(m.e));
   s += dimV(xL, Y(m.rows[0]), Y(m.beamTop), "pfo=" + fmt(m.pfo));
   if (m.rows[1] != null && m.rows[1] > m.beamTop + m.tf)
@@ -1427,6 +1516,12 @@ $("clear").onclick = () => {
   renderTable(); renderResults(); setStatus("", "");
 };
 
+$("viewerGhost").onclick = () => {
+  SHOW_GHOST = !SHOW_GHOST;
+  $("viewerGhost").textContent = SHOW_GHOST ? "Ocultar predicción del modelo" : "Mostrar predicción del modelo";
+  drawAll();
+};
+
 $("send").onclick = async () => {
   const btn = $("send");
   btn.disabled = true; 
@@ -1525,8 +1620,27 @@ async function loadModels(){
     const o = await r.json();
     const sel = $("model");
     const models = o.available_models || [];
+    const loaded = o.loaded_models || [];
     sel.innerHTML = models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
-    if (o.default_model && models.includes(o.default_model)) sel.value = o.default_model;
+    const num = m => { const x = String(m).match(/\d+/g); return x ? Math.max(...x.map(Number)) : -1; };
+    const best = models.reduce((a, b) => (num(b) > num(a) ? b : a), models[0]);
+    if (!best) return;
+    if (!loaded.includes(best)) {
+      setStatus("", "Cargando modelo " + best + "…");
+      const a = await fetch("/model/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: best }),
+      });
+      if (!a.ok) {
+        // no se pudo cargar: se usa el modelo por defecto del servidor
+        if (o.default_model && models.includes(o.default_model)) sel.value = o.default_model;
+        setStatus("bad", "No se pudo cargar " + best + "; se usa " + o.default_model);
+        return;
+      }
+      setStatus("", "");
+    }
+    sel.value = best;
   } catch(e){}
 }
 
