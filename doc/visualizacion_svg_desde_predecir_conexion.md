@@ -11,6 +11,11 @@ herramienta MCP `predecir_conexion` (o de `POST /predict`) y generar las tres vi
 - No requiere modificar ni reiniciar el servidor. Solo usa dos endpoints ya existentes:
   la predicción y `GET /profiles`.
 
+> Nota: la herramienta MCP `disenar_escenarios_carga` **no** devuelve SVG. Los planos se
+> generan aquí (o en el visor web) y se convierten a PDF en el cliente (sección 5), sin
+> `svglib`/`cairosvg`. Si vienes de esa herramienta, cada escenario trae `codame` (las
+> columnas CODAME): pásalo como `row` a `renderConnection`.
+
 ---
 
 ## 1. Qué devuelve `predecir_conexion`
@@ -474,25 +479,93 @@ fs.writeFileSync('x_front.svg', svgs.front);
 
 ---
 
-## 5. De SVG a PNG (opcional)
+## 5. De SVG a PDF (sin svglib ni cairosvg)
 
-El cliente usa SVG; si se necesita PNG para un informe o para MCP:
+> El servidor **no** devuelve SVG: los planos se generan en el cliente con `render.js`
+> (sección 3) o se toman del visor web. La conversión a PDF tampoco necesita librerías de
+> Python: cualquier navegador moderno renderiza el SVG y lo imprime a PDF.
 
-```bash
-# Opcion A: sharp (npm)
-npm i sharp
-node -e "const s=require('sharp');s('out/TEST001_front.svg').png().toFile('out/TEST001_front.png')"
+### 5.1 Empaquetar las 3 vistas en un HTML autocontenido
 
-# Opcion B: ImageMagick (requiere librsvg)
-magick out/TEST001_front.svg out/TEST001_front.png
+`render.js` deja `out/<Unicode>_front.svg`, `_side.svg` y `_top.svg`. Para imprimir en PDF
+basta envolverlos en un HTML. Guarda este `to_html.js` junto a `render.js`:
 
-# Opcion C: Chrome/Edge headless
-chrome --headless --screenshot=out/TEST001_front.png --window-size=520,620 out/TEST001_front.svg
+```javascript
+#!/usr/bin/env node
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const dir = process.argv[2] || 'out';
+const bases = [...new Set(fs.readdirSync(dir)
+  .filter(f => f.endsWith('_front.svg'))
+  .map(f => f.replace(/_front\.svg$/, '')))];
+
+for (const base of bases) {
+  const read = s => fs.readFileSync(path.join(dir, `${base}_${s}.svg`), 'utf8');
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>${base}</title>
+<style>
+  @page { size: A4 landscape; margin: 8mm; }
+  body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; }
+  .row { display: flex; gap: 6mm; align-items: flex-start; }
+  .vista { flex: 1; text-align: center; }
+  .vista h3 { margin: 0 0 2mm; font-size: 12px; color: #1B2733; }
+  .vista svg { width: 100%; height: auto; max-height: 180mm; }
+</style></head>
+<body>
+  <div class="row">
+    <div class="vista"><h3>Frontal</h3>${read('front')}</div>
+    <div class="vista"><h3>Lateral</h3>${read('side')}</div>
+    <div class="vista"><h3>Superior</h3>${read('top')}</div>
+  </div>
+</body></html>`;
+  fs.writeFileSync(path.join(dir, `${base}.html`), html, 'utf8');
+  console.log(`[ok] ${base}.html`);
+}
 ```
 
-El SVG usa `font-family="Segoe UI,Arial"`. En Windows se ve igual que en la web; en Linux
-hará fallback a otra sans (métricas ligeramente distintas). Para clavar el resultado,
-instalar `ttf-mscorefonts` o cambiar la familia en `svgText`.
+```bash
+node to_html.js out
+```
+
+### 5.2 Convertir a PDF con Edge o Chrome (headless)
+
+No hace falta `svglib` ni `cairosvg`: el navegador ya renderiza el SVG. En Windows, Edge
+suele estar instalado:
+
+```powershell
+$edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+Get-ChildItem out\*.html | ForEach-Object {
+  $pdf = [IO.Path]::ChangeExtension($_.FullName, ".pdf")
+  $url = "file:///" + $_.FullName.Replace('\', '/')
+  & $edge --headless=new --disable-gpu --no-pdf-header-footer --print-to-pdf="$pdf" $url
+}
+```
+
+Con Chrome es la misma orden cambiando el ejecutable:
+
+```powershell
+$chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+# & $chrome --headless=new --disable-gpu --no-pdf-header-footer --print-to-pdf="$pdf" $url
+```
+
+Notas:
+- `--no-pdf-header-footer` quita encabezados/pies del navegador (en algunas versiones se
+  llama `--print-to-pdf-no-header`).
+- Si tu navegador no acepta `--headless=new`, usa `--headless`.
+- La URL debe ser absoluta (`file:///...`).
+- Si el navegador está abierto, añade `--user-data-dir="$env:TEMP\edge-pdf"` para usar un
+  perfil aislado y evitar bloqueos.
+- Alternativa sin comandos: abre el `.html` y usa **Imprimir → Guardar como PDF**.
+
+### 5.3 Alternativas
+
+- `wkhtmltopdf out\<Unicode>.html out\<Unicode>.pdf` si está instalado.
+- `sharp` o ImageMagick solo si necesitas PNG (no para PDF).
+- Para un PDF directo desde el servidor harían falta librerías nativas (`cairosvg`), por eso
+  este flujo se resuelve en el cliente.
+
 
 ---
 
@@ -571,7 +644,8 @@ Estas son las mismas que aplica el cliente; si se cambian, hay que cambiarlas en
    ```
 6. Verificar que existen `out/<Unicode>_front.svg`, `_side.svg`, `_top.svg` y que no están
    vacíos.
-7. (Opcional) Convertir a PNG con `sharp`, ImageMagick o Chrome headless.
+7. (Opcional) Convertir a PDF **sin** `svglib`/`cairosvg`: `node to_html.js out` y Edge/Chrome
+   headless (sección 5).
 8. Si se necesita otra vista o otro tamaño, cambiar solo las constantes `W`, `H`, `top`,
    `cx`/`cy` de la vista correspondiente; el resto es proporcional.
 
@@ -585,3 +659,5 @@ Estas son las mismas que aplica el cliente; si se cambian, hay que cambiarlas en
 - El port mantiene **las mismas coordenadas, escalas, colores y cotas** que
   `scripts/main.js`, por lo que las imágenes coinciden con el visor web.
 - Solo hay que cuidar la resolución de perfiles y, si se rasteriza, la fuente.
+- Para PDF no se necesitan `svglib` ni `cairosvg`: HTML autocontenido + navegador headless
+  (sección 5). La herramienta MCP `disenar_escenarios_carga` no devuelve SVG.

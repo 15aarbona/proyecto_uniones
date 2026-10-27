@@ -35,7 +35,7 @@ from .dataset import Preprocessor
 from .model import ConnectionDesignNetV4
 from .postprocess import decode_predictions, derive_dependent_columns
 
-MODEL_NAME = "V11"
+MODEL_NAME = "V12"
 
 log = logging.getLogger("model-adapter")
 
@@ -110,7 +110,9 @@ def _profile_lookup() -> pd.DataFrame:
     if _PROFILE_LOOKUP is None:
         frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
         union = pd.concat(frames, ignore_index=True)
+        union = union[union["tekla_nomenclature_1"].notna()].copy()
         union["_key"] = union["tekla_nomenclature_1"].astype(str).str.strip().str.upper()
+        union = union[union["_key"] != ""]
         _PROFILE_LOOKUP = union.drop_duplicates(subset="_key").set_index("_key")
     return _PROFILE_LOOKUP
 
@@ -135,9 +137,12 @@ def _add_profiles(df: pd.DataFrame) -> pd.DataFrame:
                 f"Perfiles no reconocidos en {col} (no estan en los catalogos "
                 f"Tekla): {unknown}"
             )
-        geom = lookup.loc[keys].reset_index(drop=True)
+        geom = lookup.reindex(keys)
         df[f"{col}_type"] = geom["type"].to_numpy()
-        df[f"{col}_d_mm"] = pd.to_numeric(geom["d_mm"].to_numpy(), errors="coerce")
+        for measure in measures:
+            df[f"{col}_{measure}"] = pd.to_numeric(
+                geom[measure].to_numpy(), errors="coerce"
+            )
     return df
 
 
@@ -311,9 +316,8 @@ def _pre(bundle: dict = None) -> Preprocessor:
 
 
 def _profile_names() -> list:
-    return sorted(
-        _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
-    )
+    nombres = _profile_lookup()["tekla_nomenclature_1"]
+    return sorted({str(n).strip() for n in nombres if str(n).strip()})
 
 
 def input_schema(bundle: dict = None) -> list:

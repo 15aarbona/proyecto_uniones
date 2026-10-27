@@ -391,5 +391,61 @@ def resumen_comprobacion(check: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _estado_complementario(resultado: str) -> str:
+    """Clasifica una comprobacion complementaria: REVISAR, OK o INFO (dato)."""
+    texto = str(resultado or "").strip().upper()
+    if texto.startswith("REVISAR"):
+        return "REVISAR"
+    if texto == "OK" or texto.startswith("OK "):
+        return "OK"
+    return "INFO"
+
+
+def detalle_comprobacion(check: Dict[str, Any]) -> Dict[str, Any]:
+    """Comprobacion completa para la ficha MCP: todos los ratios y complementarios.
+
+    Cada ratio lleva `valor`, `limite` (1.0) y `estado` (OK/EXCEDE/SIN_DATO). Cada
+    comprobacion complementaria lleva `valor`, `limite` (None: el umbral va en el texto)
+    y `estado` (OK/REVISAR/INFO).
+    """
+    detalle = resumen_comprobacion(check)
+
+    ratios: List[Dict[str, Any]] = []
+    for item in check.get("ratios") or []:
+        if not isinstance(item, dict):
+            continue
+        ratio = _ratio_number(item.get("ratio"))
+        if ratio is None:
+            estado = "SIN_DATO"
+            valor = None
+        else:
+            estado = "EXCEDE" if ratio > 1.0 + 1e-9 else "OK"
+            valor = round(ratio, 4)
+        ratios.append({
+            "indice": item.get("indice"),
+            "descripcion": str(item.get("descripcion") or "").strip(),
+            "valor": valor,
+            "limite": 1.0,
+            "estado": estado,
+        })
+
+    complementarios: List[Dict[str, Any]] = []
+    for item in check.get("complementarios") or []:
+        if not isinstance(item, dict):
+            continue
+        resultado = str(item.get("resultado") or "").strip()
+        complementarios.append({
+            "indice": item.get("indice"),
+            "descripcion": str(item.get("descripcion") or "").strip(),
+            "valor": resultado,
+            "limite": None,
+            "estado": _estado_complementario(resultado),
+        })
+
+    detalle["ratios"] = ratios
+    detalle["complementarios"] = complementarios
+    return detalle
+
+
 def check_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [check_single_row(r) for r in rows]

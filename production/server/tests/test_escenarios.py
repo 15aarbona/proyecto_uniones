@@ -150,6 +150,26 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(calls, ["A", "B", "C"])
         self.assertEqual([r["status"] for r in out], ["OK", "TIMEOUT_SERVIDOR", "OK"])
 
+    def test_batch_rejects_profile_without_geometry_before_predicting(self):
+        rows = [dict(self.row, UNICODE="BAD", BEAM="UB406*152*60")]
+        called = []
+        original = main.escenarios.run
+
+        def fake_run(*args, **kwargs):
+            called.append(args)
+            return {}
+
+        main.escenarios.run = fake_run
+        try:
+            out = main._run_batch_sync("V11", rows, {}, timeout_s=10)
+        finally:
+            main.escenarios.run = original
+
+        self.assertEqual(called, [])
+        self.assertEqual(out[0]["status"], "PERFIL_SIN_GEOMETRIA")
+        self.assertEqual(out[0]["http_status"], 422)
+        self.assertIn("UB406*152*60", out[0]["mensaje"])
+
 
 if __name__ == "__main__":
     unittest.main()
