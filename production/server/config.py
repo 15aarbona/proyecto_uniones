@@ -69,6 +69,16 @@ SCENARIO_TIMEOUT_S = float(
 SCENARIO_BATCH_ROW_TIMEOUT_S = float(
     os.environ.get("AI_SCENARIO_BATCH_ROW_TIMEOUT_S", "30")
 )
+SCENARIO_JOB_MAX_ROWS = max(
+    1, int(os.environ.get("AI_SCENARIO_JOB_MAX_ROWS", "500"))
+)
+JOB_CHUNK_ROWS = max(1, int(os.environ.get("AI_JOB_CHUNK_ROWS", "25")))
+JOB_ROW_BATCH = max(1, int(os.environ.get("AI_JOB_ROW_BATCH", "6")))
+JOB_TTL_S = float(os.environ.get("AI_JOB_TTL_S", "3600"))
+JOB_MAX_VIVOS = max(1, int(os.environ.get("AI_JOB_MAX_VIVOS", "20")))
+MCP_WAIT_MAX_S = float(
+    os.environ.get("AI_MCP_WAIT_MAX_S", str(round(CLIENT_TIMEOUT_S * 0.80, 1)))
+)
 
 # Transporte MCP: JSON suele evitar cuelgues de streams SSE en tuneles. Si tu
 # conector solo soporta SSE, pon AI_MCP_JSON_RESPONSE=0.

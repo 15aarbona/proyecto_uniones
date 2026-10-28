@@ -65,11 +65,18 @@ explícitamente:
 | `AI_BATCH_MAX_ROWS` | `64` | máximo de filas por forward del batcher |
 | `AI_BATCH_MAX_WAIT_MS` | `10` | espera máxima para agrupar peticiones concurrentes |
 | `AI_INFERENCE_TIMEOUT_S` | 50 % del cliente | timeout de una petición esperando al batcher |
-| `AI_SCENARIO_WORKERS` | `4` | orquestadores de escenarios en paralelo |
-| `AI_SCENARIO_BATCH_ROWS` | `50` | máximo de conexiones por llamada MCP `rows` |
-| `AI_SCENARIO_MAX_QUEUE` | `= workers` | peticiones adicionales en cola antes de responder ocupado |
+| `AI_SCENARIO_WORKERS` | `6` | filas de escenario en paralelo (slots compartidos) |
+| `AI_SCENARIO_BATCH_ROWS` | `25` | máximo de filas por job de la web (`/scenarios/batch/jobs`) |
+| `AI_SCENARIO_MAX_QUEUE` | `4` | peticiones adicionales en cola del gate de `/scenarios` |
 | `AI_SCENARIO_QUEUE_TIMEOUT_S` | 15 % del cliente | espera máxima en cola |
 | `AI_SCENARIO_TIMEOUT_S` | 80 % del cliente | presupuesto total de ejecución del escenario |
+| `AI_SCENARIO_JOB_MAX_ROWS` | `500` | máximo de filas por petición MCP (`lanzar_escenarios`) |
+| `AI_SCENARIO_BATCH_ROW_TIMEOUT_S` | `30` | timeout por fila dentro de un job |
+| `AI_JOB_CHUNK_ROWS` | `25` | filas por subjob (unidad de trabajo) |
+| `AI_JOB_ROW_BATCH` | `6` | máximo de filas en vuelo por subjob (se reparte entre jobs activos) |
+| `AI_JOB_TTL_S` | `3600` | vida de un job en memoria |
+| `AI_JOB_MAX_VIVOS` | `20` | trabajos raíz simultáneos antes de responder ocupado |
+| `AI_MCP_WAIT_MAX_S` | 80 % del cliente | tope de `esperar_trabajo(timeout_s)` |
 | `AI_MCP_JSON_RESPONSE` | `1` | respuesta MCP en JSON; `0` para forzar SSE |
 
 Con los valores por defecto: 15 s de cola + 80 s de ejecución = 95 s, por debajo de los
@@ -86,12 +93,15 @@ pool de procesos y el codame/check por petición, fuera del worker de GPU. El aj
 geométrico usa una vía rápida (`calcular_geometria`) que evita los 17 pasos de resistencia
 y la construcción de objetos Pydantic.
 
-`/scenarios` y el tool MCP `disenar_escenarios_carga` usan un **control de admisión**:
+`/scenarios` (single) usa el **control de admisión** (gate):
 - Hasta `AI_SCENARIO_WORKERS` escenarios ejecutándose y `AI_SCENARIO_MAX_QUEUE` en espera.
 - Si la cola está llena, respuesta inmediata **503 / SERVIDOR_OCUPADO** (sin esperar 100 s).
 - Si un escenario espera más de `AI_SCENARIO_QUEUE_TIMEOUT_S` o ejecuta más de
-  `AI_SCENARIO_TIMEOUT_S`, se corta con **504 / TIMEOUT_SERVIDOR**. No hay resultados
-  parciales: o se devuelve el cálculo completo o un error claro.
+  `AI_SCENARIO_TIMEOUT_S`, se corta con **504 / TIMEOUT_SERVIDOR**.
+
+Los **jobs** (web y MCP) no usan ese gate: comparten los mismos `AI_SCENARIO_WORKERS` slots y
+esperan turno sin devolver 503. Solo se responde ocupado si hay `AI_JOB_MAX_VIVOS` trabajos
+raíz activos. Las herramientas de espera (`esperar_trabajo`) no ocupan slot: solo leen estado.
 
 El servidor MCP anuncia su capacidad en `instructions` (máximo de llamadas concurrentes) y
 responde en JSON por defecto (`AI_MCP_JSON_RESPONSE=1`) para evitar los cuelgues de streams
@@ -102,65 +112,39 @@ error JSON-RPC) para que Copilot no los convierta en un 504: `status` =
 `SERVIDOR_OCUPADO`/`TIMEOUT_SERVIDOR`, `http_status` = `503`/`504`, `retry_after_s` y
 `mensaje`. En REST siguen siendo HTTP 503/504.
 
-### MCP `disenar_escenarios_carga`: llamadas por lote
+### MCP: trabajos asíncronos
 
-El contrato MCP ya no es una conexión por llamada: recibe `rows` (lista, objeto único o
-string JSON) con hasta `AI_SCENARIO_BATCH_ROWS` conexiones (25 por defecto). Las filas del
-lote se ejecutan **secuencialmente** dentro de una sola plaza del control de admisión.
-Si llegan más de `AI_SCENARIO_BATCH_ROWS`, se procesan las primeras y el resto se descarta;
-la respuesta lo indica en `n_descartadas` y `descartadas`.
+El flujo para lotes es **lanzar → esperar → descargar**:
 
-La respuesta es un `CallToolResult` compacto y **sin duplicar**: `content` lleva un resumen
-markdown corto y `structuredContent` el detalle. La estructura es:
+| Herramienta | Uso |
+|---|---|
+| `lanzar_escenarios(rows, model="", incremento=0.05, max_pasos=40, client_id="")` | Acepta el lote completo (hasta `AI_SCENARIO_JOB_MAX_ROWS=500`), lo parte en subjobs de `AI_JOB_CHUNK_ROWS=25` y devuelve `job_id`, `n_filas`, `n_subjobs`, `estado` y `rechazadas`. No descarta filas en silencio. `client_id` es idempotente. |
+| `esperar_trabajo(job_id, timeout_s=60)` | Espera en servidor (sin ocupar slot) hasta `LISTO`/`ERROR` o `timeout_s` (tope `AI_MCP_WAIT_MAX_S=80`). Devuelve `estado` (`EN_COLA`/`PROCESANDO`/`LISTO`/`ERROR`/`NO_ENCONTRADO`), `total`, `done`, `pct`, `eta_s`, `n_errores` y `errores` (≤10). |
+| `descargar_resultado(job_id, pagina=1, por_pagina=25, detalle="completo")` | JSON paginado. `por_pagina` = conexiones por llamada; `0` = todas. `detalle="resumen"` omite ratios/complementarios detallados. Devuelve `n_paginas`, `pagina`, `total` y `conexiones`. |
+| `listar_trabajos()` | Lista los trabajos raíz vivos para recuperar `job_id` tras un corte. |
+| `disenar_escenarios_carga(rows, ..., timeout_s=60)` | Atajo: lanza, espera hasta `timeout_s` y devuelve el detalle compacto si terminó o `status="EN_CURSO"` + `job_id` para continuar. |
+
+- `rechazadas` incluye las filas sin geometría (`PERFIL_SIN_GEOMETRIA`) detectadas antes de
+  ejecutar; no consumen cómputo.
+- Los `job_id` viven en memoria con `AI_JOB_TTL_S` (1 h) y se pierden si el servidor se
+  reinicia; en ese caso las herramientas devuelven `NO_ENCONTRADO` y hay que relanzar con el
+  mismo `client_id`.
+- El intercalado entre clientes se hace por tandas adaptativas (`AI_JOB_ROW_BATCH` máximo 6,
+  repartido entre los subjobs activos), no por tamaño de job.
+- Cada conexión descargada incluye `fila` (orden de entrada), `unicode`, `status` y, si es OK,
+  `escenarios` con `escenario_id`, `codame` (columnas CODAME) y `comprobacion` completa
+  (todos los ratios y comprobaciones geométricas con `valor`, `limite` y `estado`).
 
 ```json
-{
-  "model_name": "V12",
-  "status": "OK|CON_ERRORES|CON_DESCARTES",
-  "n_solicitadas": 25, "n_procesadas": 25, "n_descartadas": 0, "descartadas": [],
-  "resumen": {
-    "por_escenario": {"E1": {"encontrado":0,"cumple":0,"no_cumple":0,"no_encontrado":0}, "E2": {}, "E3": {}},
-    "por_estado_conexion": {"OK": 0, "PERFIL_SIN_GEOMETRIA": 0, "ERROR_SERVIDOR": 0},
-    "por_estado_escenario": {"CUMPLE": 0, "NO_CUMPLE_RESISTENCIA": 0, "NO_CUMPLE_GEOMETRIA": 0}
-  },
-  "conexiones": [{
-    "unicode": "MOE6346", "status": "OK", "parada": "...", "tiempo_s": 12.3,
-    "avisos": [{"codigo": "E1_NO_CUMPLE", "mensaje": "..."}],
-    "escenarios": [{
-      "escenario_id": "E1", "escenario": "Diseño de entrada", "encontrado": true,
-      "paso": 0, "factor_carga": 1.0,
-      "cargas": {"ratio_moment": 1.21, "ratio_shear": 0.1, "ratio_axial": 0.0},
-      "cumple": false, "Lh": 0.0, "n_cantonera": 0,
-      "codame": {"...": "columnas CODAME"},
-      "comprobacion": {
-        "estado": "NO_CUMPLE_GEOMETRIA",
-        "ratios": [{"indice": 0, "descripcion": "...", "valor": 0.62, "limite": 1.0, "estado": "OK"}],
-        "complementarios": [{"indice": 6, "descripcion": "...", "valor": "REVISAR: ...", "limite": null, "estado": "REVISAR"}],
-        "ratio_pesimo": 0.87, "ratio_max_todos": 1.12, "dictamen": "..."
-      }
-    }]
-  }],
-  "errores": [{"unicode": "...", "status": "PERFIL_SIN_GEOMETRIA", "http_status": 422, "mensaje": "..."}]
-}
+{"job_id":"mcp-...","estado":"LISTO","total":30,"pagina":1,"n_paginas":2,
+ "conexiones":[{"fila":0,"unicode":"U1","status":"OK","escenarios":[{"escenario_id":"E1",
+   "codame":{ "...": "columnas CODAME" },
+   "comprobacion":{"estado":"CUMPLE","ratios":[],"complementarios":[],"dictamen":"..."}}]}]}
 ```
 
-- Cada escenario encontrado incluye **las columnas CODAME** en `codame` y la
-  **comprobación completa** en `comprobacion`: todos los ratios (con `valor`, `limite=1.0` y
-  `estado` `OK`/`EXCEDE`/`SIN_DATO`) y todas las comprobaciones geométricas (con `valor`,
-  `limite=null` y `estado` `OK`/`REVISAR`/`INFO`). No hace falta volver a llamar a
-  `comprobar_aisc`.
-- Los escenarios no encontrados llevan `motivo: {codigo, mensaje}`. Los avisos usan códigos:
-  `E1_NO_CUMPLE`, `E2_NO_CUMPLE`, `E3_NO_CUMPLE`, `E2_SIN_CANTONERA`, `E3_SIN_CANTONERA`,
-  `SIN_PASOS_CUMPLEN`, `E1_SIN_DISENO`, `E2_SIN_DISENO`, `E3_SIN_DISENO`,
-  `FUERA_RANGO_ENTRENAMIENTO`.
-- **Validación previa**: si `BEAM` o `COLUMN` no existen en el catálogo Tekla o no tienen
-  geometría (`d`, `tw`, `tf` o ancho de ala vacíos/0), la fila se rechaza con
-  `PERFIL_SIN_GEOMETRIA` (HTTP 422) **antes de llamar al modelo**. Solo aplica a esta
-  herramienta MCP.
 - El servidor **no devuelve SVG**. Para generar los planos y convertirlos a PDF sin
   `svglib`/`cairosvg`, ver `doc/visualizacion_svg_desde_predecir_conexion.md`.
-- Una fila con error o timeout no aborta el resto del lote. El cliente debe llamar en varios
-  lotes si necesita más conexiones.
+- Una fila con error o timeout no aborta el resto del trabajo.
 
 ## Instalar / actualizar un modelo
 
@@ -327,9 +311,12 @@ editar una celda marca la fila como `MODIFICADO` y la desmarca. El estado es sol
 
 ## Flujo de la web
 
-1. Formulario dinámico (`/schema`) → **Pre-diseñar con IA** (`/predict`) → tabla CODAME
-   **editable** (el revisor corrige lo que haga falta).
-2. **Comprobar todas las entradas** (`/check`) sobre la tabla editada → informe por fila.
+1. Formulario dinámico (`/schema`) → **Pre-diseñar con IA** → `POST /scenarios/batch/jobs`
+   en sub-lotes de 25 filas → la web consulta `GET /scenarios/batch/jobs/{id}?since=&limit=1`
+   y pinta las tarjetas E1/E2/E3 conforme llegan (con reintentos si el túnel pierde una
+   respuesta; el trabajo sigue en el servidor).
+2. Las variantes aceptadas se envían a `/dataset/append` (reentreno). El visor 2D usa
+   `/check` para la comprobación de la fila visualizada.
 
 ## Añadir un modelo nuevo (carpeta V)
 

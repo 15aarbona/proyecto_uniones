@@ -435,75 +435,6 @@ def _compact_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _run_batch_sync(name: str, rows: List[Dict[str, Any]], options: Dict[str, Any],
-                    timeout_s: float) -> List[Dict[str, Any]]:
-    """Ejecuta filas secuencialmente con un unico presupuesto total (sin gate)."""
-    deadline = time.monotonic() + max(1.0, timeout_s)
-    out: List[Dict[str, Any]] = []
-    for row in rows:
-        uid = _uid(row)
-        problema_perfil = _validar_perfiles(row)
-        if problema_perfil:
-            out.append({
-                "unicode": uid, "status": "PERFIL_SIN_GEOMETRIA", "http_status": 422,
-                "mensaje": problema_perfil,
-            })
-            continue
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            out.append({
-                "unicode": uid, "status": "TIMEOUT_SERVIDOR", "http_status": 504,
-                "mensaje": "sin tiempo restante para ejecutar esta conexion",
-            })
-            continue
-        try:
-            result = escenarios.run(name, row, timeout_s=remaining, **options)
-            out.append({
-                "unicode": uid, "status": "OK", "resultado": _compact_result(name, result),
-            })
-        except TimeoutError as exc:
-            out.append({
-                "unicode": uid, "status": "TIMEOUT_SERVIDOR", "http_status": 504,
-                "mensaje": str(exc),
-            })
-        except predictor.InputContractError as exc:
-            out.append({
-                "unicode": uid, "status": "ERROR_ENTRADA", "http_status": 422,
-                "mensaje": str(exc),
-            })
-        except ValueError as exc:
-            out.append({
-                "unicode": uid, "status": "ERROR_ENTRADA", "http_status": 422,
-                "mensaje": str(exc),
-            })
-        except KeyError as exc:
-            out.append({
-                "unicode": uid, "status": "ERROR_MODELO", "http_status": 404,
-                "mensaje": str(exc),
-            })
-        except KeyError as exc:
-            log.exception("KeyError en /scenarios (modelo=%s)", name)
-            raise HTTPException(status_code=404, detail=f"KeyError: {exc}")
-    return out
-
-
-async def _run_scenario_batch(name: str, rows: List[Dict[str, Any]], label: str,
-                              **kwargs) -> tuple[List[Dict[str, Any]], float]:
-    queue_wait = await _SCENARIO_GATE.acquire()
-    try:
-        async with _exec_semaphore():
-            results = await _run_sync(
-                _SCENARIO_RUNNER,
-                _run_batch_sync,
-                (name, rows, kwargs, config.SCENARIO_TIMEOUT_S),
-                config.SCENARIO_TIMEOUT_S + 2.0,
-                label,
-            )
-        return results, queue_wait
-    finally:
-        _SCENARIO_GATE.release()
-
-
 def _compact_web_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """Resultado de /scenarios sin los bloques que la web no usa."""
     omitidos = {"historial", "tabla", "tabla_markdown", "parametros"}
@@ -520,8 +451,12 @@ async def _run_one_scenario(name: str, row: Dict[str, Any],
     web_id = row.get("__web_id")
 
     def _error(status: str, http_status: int, mensaje: str) -> Dict[str, Any]:
-        return {"unicode": uid, "web_id": web_id, "status": status,
+        return {"unicode": uid, "web_id": web_id, "fila": web_id, "status": status,
                 "http_status": http_status, "mensaje": mensaje}
+
+    problema = _validar_perfiles(row)
+    if problema:
+        return _error("PERFIL_SIN_GEOMETRIA", 422, problema)
 
     try:
         async with _exec_semaphore():
@@ -536,6 +471,7 @@ async def _run_one_scenario(name: str, row: Dict[str, Any],
         return {
             "unicode": uid,
             "web_id": web_id,
+            "fila": web_id,
             "status": "OK",
             "resultado": _compact_web_result(result),
         }
@@ -556,14 +492,123 @@ async def _run_one_scenario(name: str, row: Dict[str, Any],
 
 
 _BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
-_BATCH_JOB_TTL_S = 600
+
+
+def _root_jobs() -> List[Dict[str, Any]]:
+    return [job for job in _BATCH_JOBS.values() if not job.get("parent_id")]
+
+
+def _remove_job(job_id: str) -> None:
+    job = _BATCH_JOBS.pop(job_id, None)
+    if not job:
+        return
+    for child_id in job.get("children", []):
+        _BATCH_JOBS.pop(child_id, None)
 
 
 def _cleanup_jobs() -> None:
     ahora = time.time()
-    for job_id, job in list(_BATCH_JOBS.items()):
-        if ahora - job["created"] > _BATCH_JOB_TTL_S:
-            _BATCH_JOBS.pop(job_id, None)
+    for job in list(_BATCH_JOBS.values()):
+        if ahora - job["created"] > config.JOB_TTL_S:
+            _remove_job(job["id"])
+    for job in list(_BATCH_JOBS.values()):
+        parent_id = job.get("parent_id")
+        if parent_id and parent_id not in _BATCH_JOBS:
+            _BATCH_JOBS.pop(job["id"], None)
+
+
+def _ensure_job_capacity() -> None:
+    _cleanup_jobs()
+    roots = _root_jobs()
+    if len(roots) < config.JOB_MAX_VIVOS:
+        return
+    terminados = sorted(
+        (job for job in roots if _job_state(job) in ("LISTO", "ERROR")),
+        key=lambda job: job["created"],
+    )
+    if terminados:
+        _remove_job(terminados[0]["id"])
+        return
+    raise ServerBusyError(
+        f"Demasiados trabajos activos ({len(roots)}/{config.JOB_MAX_VIVOS}). "
+        f"Reintenta cuando termine alguno."
+    )
+
+
+def _job_state(job: Dict[str, Any]) -> str:
+    if job.get("tipo") == "parent":
+        children = [
+            _BATCH_JOBS.get(child_id) for child_id in job.get("children", [])
+        ]
+        children = [child for child in children if child]
+        if not children:
+            return "ERROR"
+        if any(child.get("estado") != "hecho" for child in children):
+            done = sum(len(child.get("resultados") or []) for child in children)
+            return "EN_COLA" if done == 0 else "PROCESANDO"
+        if any(child.get("error") for child in children):
+            return "ERROR"
+        return "LISTO"
+    if job.get("estado") == "hecho":
+        return "ERROR" if job.get("error") else "LISTO"
+    done = len(job.get("resultados") or [])
+    return "EN_COLA" if done == 0 else "PROCESANDO"
+
+
+def _job_snapshot(job: Dict[str, Any]) -> Dict[str, Any]:
+    if job.get("tipo") == "parent":
+        children = [
+            _BATCH_JOBS.get(child_id) for child_id in job.get("children", [])
+        ]
+        children = [child for child in children if child]
+        total = sum(child["total"] for child in children)
+        resultados = [
+            item for child in children for item in (child.get("resultados") or [])
+        ]
+    else:
+        total = job["total"]
+        resultados = list(job.get("resultados") or [])
+    done = len(resultados)
+    errores = [
+        {
+            "unicode": item.get("unicode"),
+            "status": item.get("status"),
+            "mensaje": item.get("mensaje"),
+        }
+        for item in resultados
+        if item.get("status") != "OK"
+    ]
+    transcurrido = max(0.001, time.time() - job["created"])
+    velocidad = done / transcurrido if done else 0.0
+    eta = int((total - done) / velocidad) if velocidad > 0 else None
+    return {
+        "job_id": job["id"],
+        "estado": _job_state(job),
+        "total": total,
+        "done": done,
+        "pct": round(100.0 * done / total, 1) if total else 0.0,
+        "eta_s": eta,
+        "n_errores": len(errores),
+        "errores": errores[:10],
+        "tiempo_s": round(transcurrido, 1),
+    }
+
+
+def _job_results_ordered(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if job.get("tipo") == "parent":
+        resultados: List[Dict[str, Any]] = []
+        for child_id in job.get("children", []):
+            child = _BATCH_JOBS.get(child_id)
+            if child:
+                resultados.extend(child.get("resultados") or [])
+    else:
+        resultados = list(job.get("resultados") or [])
+
+    def _orden(item: Dict[str, Any]) -> int:
+        fila = item.get("fila")
+        return fila if isinstance(fila, int) else 10**9
+
+    return sorted(resultados, key=_orden)
 
 
 def _job_payload(job: Dict[str, Any], since: int, limit: int) -> Dict[str, Any]:
@@ -582,19 +627,61 @@ def _job_payload(job: Dict[str, Any], since: int, limit: int) -> Dict[str, Any]:
     }
 
 
+def _create_child_job(name: str, rows: List[Dict[str, Any]],
+                      options: Dict[str, Any], origen: str,
+                      parent_id: Optional[str] = None,
+                      client_id: Optional[str] = None,
+                      check_capacity: bool = True) -> Dict[str, Any]:
+    if check_capacity:
+        _ensure_job_capacity()
+    job_id = client_id or f"job-{time.time_ns()}"
+    job = {
+        "id": job_id,
+        "tipo": "child",
+        "parent_id": parent_id,
+        "origen": origen,
+        "client_id": client_id,
+        "model": name,
+        "created": time.time(),
+        "estado": "procesando",
+        "total": len(rows),
+        "resultados": [],
+        "error": None,
+    }
+    _BATCH_JOBS[job_id] = job
+    job["task"] = asyncio.create_task(_run_job(job, name, rows, options))
+    return job
+
+
 async def _run_job(job: Dict[str, Any], name: str, rows: List[Dict[str, Any]],
                    options: Dict[str, Any]) -> None:
+    job["estado"] = "procesando"
     try:
-        tareas = [
-            asyncio.create_task(
-                _run_one_scenario(
-                    name, row, options, config.SCENARIO_BATCH_ROW_TIMEOUT_S
-                )
+        inicio = 0
+        while inicio < len(rows):
+            activos = sum(
+                1 for otro in _BATCH_JOBS.values()
+                if otro.get("tipo") == "child" and otro.get("estado") != "hecho"
             )
-            for row in rows
-        ]
-        for futura in asyncio.as_completed(tareas):
-            job["resultados"].append(await futura)
+            activos = max(1, activos)
+            tanda = max(
+                1, min(config.JOB_ROW_BATCH, config.SCENARIO_WORKERS // activos)
+            )
+            lote = rows[inicio:inicio + tanda]
+            inicio += len(lote)
+            tareas = [
+                asyncio.create_task(
+                    _run_one_scenario(
+                        name, row, options, config.SCENARIO_BATCH_ROW_TIMEOUT_S
+                    )
+                )
+                for row in lote
+            ]
+            for futura in asyncio.as_completed(tareas):
+                job["resultados"].append(await futura)
+    except asyncio.CancelledError:
+        job["error"] = "job cancelado"
+        raise
     except Exception as exc:  # noqa: BLE001
         job["error"] = str(exc)
         log.exception("[batch] job %s fallo", job["id"])
@@ -622,16 +709,17 @@ mcp = FastMCP(
     "ServidorConexionesEstructurales",
     instructions=(
         f"Servidor de diseno y comprobacion AISC 360-10 de conexiones estructurales. "
-        f"disenar_escenarios_carga acepta una lista `rows` de hasta "
-        f"{config.SCENARIO_BATCH_ROWS} conexiones por llamada (se procesan las "
-        f"{config.SCENARIO_BATCH_ROWS} primeras y el resto se descarta). Usa SIEMPRE una sola "
-        f"llamada con varias filas para varias conexiones; no lances una llamada por conexion. "
-        f"Como maximo {config.SCENARIO_WORKERS} llamadas en paralelo (mas "
-        f"{config.SCENARIO_MAX_QUEUE} en cola). Si recibes SERVIDOR_OCUPADO, reintenta las "
-        f"pendientes en el siguiente turno. La respuesta es compacta: `content` es un resumen "
-        f"corto y `structuredContent` trae por escenario las columnas CODAME y la "
-        f"comprobacion completa (sin tablas ni SVG). Los perfiles sin geometria se rechazan "
-        f"por fila con PERFIL_SIN_GEOMETRIA."
+        f"Para lotes usa el flujo de trabajos: `lanzar_escenarios(rows, client_id)` -> "
+        f"job_id; `esperar_trabajo(job_id, timeout_s=60)` hasta LISTO; "
+        f"`descargar_resultado(job_id, pagina, por_pagina, detalle)`. Acepta hasta "
+        f"{config.SCENARIO_JOB_MAX_ROWS} filas por peticion (se parten en subjobs de "
+        f"{config.JOB_CHUNK_ROWS}). No se descartan filas en silencio: si se supera el "
+        f"limite, error. Repite `lanzar_escenarios` con el mismo `client_id` para "
+        f"reintentar sin duplicar trabajo. Los job_id se pierden si el servidor se "
+        f"reinicia. `disenar_escenarios_carga` es un atajo (lanza + espera + resumen) y "
+        f"acepta `timeout_s`. Las respuestas son compactas: texto corto + "
+        f"structuredContent. Los perfiles sin geometria se rechazan con "
+        f"PERFIL_SIN_GEOMETRIA."
     ),
     stateless_http=True,
     json_response=config.MCP_JSON_RESPONSE,
@@ -820,117 +908,409 @@ def _mcp_result(payload: Dict[str, Any], texto: Optional[str] = None) -> CallToo
     )
 
 
+def _launch_parent(name: str, all_rows: List[Dict[str, Any]],
+                   incremento: float, max_pasos: int,
+                   client_id: Optional[str] = None,
+                   origen: str = "mcp") -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    _cleanup_jobs()
+    client_id = (client_id or "").strip()
+    if client_id:
+        existing = _BATCH_JOBS.get(client_id)
+        if existing is not None:
+            return existing, list(existing.get("rechazadas") or [])
+    else:
+        client_id = f"mcp-{time.time_ns()}"
+
+    if len(all_rows) > config.SCENARIO_JOB_MAX_ROWS:
+        raise ValueError(
+            f"Maximo {config.SCENARIO_JOB_MAX_ROWS} filas por peticion; "
+            f"llegaron {len(all_rows)}. Divide la peticion o sube "
+            f"AI_SCENARIO_JOB_MAX_ROWS."
+        )
+
+    validas: List[Dict[str, Any]] = []
+    rechazadas: List[Dict[str, Any]] = []
+    for indice, row in enumerate(all_rows):
+        fila = dict(row)
+        fila["__web_id"] = indice
+        problema = _validar_perfiles(fila)
+        if problema:
+            rechazadas.append({
+                "fila": indice,
+                "unicode": _uid(fila),
+                "mensaje": problema,
+            })
+        else:
+            validas.append(fila)
+
+    _ensure_job_capacity()
+    parent = {
+        "id": client_id,
+        "tipo": "parent",
+        "parent_id": None,
+        "origen": origen,
+        "client_id": client_id,
+        "model": name,
+        "created": time.time(),
+        "estado": "procesando",
+        "total": len(validas),
+        "children": [],
+        "rechazadas": rechazadas,
+    }
+    _BATCH_JOBS[client_id] = parent
+    if validas:
+        options = {"incremento": incremento, "max_pasos": max_pasos}
+        for numero, inicio in enumerate(
+            range(0, len(validas), config.JOB_CHUNK_ROWS)
+        ):
+            chunk = validas[inicio:inicio + config.JOB_CHUNK_ROWS]
+            child = _create_child_job(
+                name, chunk, options, origen,
+                parent_id=client_id,
+                client_id=f"{client_id}-c{numero}",
+                check_capacity=False,
+            )
+            parent["children"].append(child["id"])
+    return parent, rechazadas
+
+
+def _texto_snapshot(snap: Dict[str, Any]) -> str:
+    texto = (
+        f"{snap['job_id']}: {snap['estado']} {snap['done']}/{snap['total']} "
+        f"({snap['pct']}%)"
+    )
+    if snap.get("eta_s") is not None:
+        texto += f", ETA {snap['eta_s']} s"
+    if snap.get("n_errores"):
+        texto += f", {snap['n_errores']} errores"
+    return texto
+
+
+def _slim_comprobacion(comprobacion: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not comprobacion:
+        return comprobacion
+    return {
+        "cumple": comprobacion.get("cumple"),
+        "estado": comprobacion.get("estado"),
+        "ratio_pesimo": comprobacion.get("ratio_pesimo"),
+        "descripcion_ratio_pesimo": comprobacion.get("descripcion_ratio_pesimo"),
+        "ratio_max_todos": comprobacion.get("ratio_max_todos"),
+        "dictamen": comprobacion.get("dictamen"),
+    }
+
+
+def _download_connection(item: Dict[str, Any], detalle: str) -> Dict[str, Any]:
+    base = {
+        "fila": item.get("fila"),
+        "unicode": item.get("unicode"),
+        "web_id": item.get("web_id"),
+        "status": item.get("status"),
+    }
+    if item.get("status") != "OK":
+        base["http_status"] = item.get("http_status")
+        base["mensaje"] = item.get("mensaje")
+        base["escenarios"] = []
+        return base
+    compact = _compact_result("", item.get("resultado") or {})
+    escenarios: List[Dict[str, Any]] = []
+    for escenario in compact.get("escenarios") or []:
+        if detalle == "resumen" and escenario.get("comprobacion"):
+            escenario = {
+                **escenario,
+                "comprobacion": _slim_comprobacion(escenario["comprobacion"]),
+            }
+        escenarios.append(escenario)
+    base.update({
+        "parada": compact.get("parada"),
+        "tiempo_s": compact.get("tiempo_s"),
+        "avisos": compact.get("avisos"),
+        "escenarios": escenarios,
+    })
+    return base
+
+
+def _download_payload(job: Dict[str, Any], pagina: int, por_pagina: int,
+                      detalle: str) -> Dict[str, Any]:
+    resultados = _job_results_ordered(job)
+    total = len(resultados)
+    if por_pagina <= 0:
+        pagina = 1
+        n_paginas = 1
+        tam = total
+        seleccion = resultados
+    else:
+        tam = min(max(1, int(por_pagina)), 100)
+        n_paginas = max(1, (total + tam - 1) // tam)
+        pagina = min(max(1, int(pagina)), n_paginas)
+        inicio = (pagina - 1) * tam
+        seleccion = resultados[inicio:inicio + tam]
+    detalle = "resumen" if str(detalle).lower() == "resumen" else "completo"
+    conexiones = [_download_connection(item, detalle) for item in seleccion]
+    return {
+        "job_id": job["id"],
+        "estado": _job_state(job),
+        "total": total,
+        "pagina": pagina,
+        "n_paginas": n_paginas,
+        "por_pagina": tam,
+        "conexiones": conexiones,
+    }
+
+
+@mcp.tool()
+async def lanzar_escenarios(rows: Any, model: str = "", incremento: float = 0.05,
+                            max_pasos: int = 40,
+                            client_id: str = "") -> CallToolResult:
+    """Lanza un lote de escenarios como trabajo asincrono y devuelve su job_id.
+
+    Acepta el lote completo (hasta `AI_SCENARIO_JOB_MAX_ROWS`); no descarta filas en
+    silencio. Las filas se parten en subjobs de `AI_JOB_CHUNK_ROWS` que se ejecutan
+    intercalados con otros clientes. `client_id` es opcional e idempotente: repetir la
+    llamada con el mismo id devuelve el mismo trabajo.
+
+    Despues usa `esperar_trabajo(job_id)` y `descargar_resultado(job_id)`.
+    """
+    name = model or config.MODEL_NAME
+    try:
+        all_rows = _parse_mcp_rows(rows)
+    except ValueError as exc:
+        return _mcp_result(_mcp_status(name, "ERROR_ENTRADA", 422, str(exc)))
+    if not all_rows:
+        return _mcp_result(_mcp_status(name, "ERROR_ENTRADA", 422, "rows vacio"))
+    try:
+        parent, rechazadas = _launch_parent(
+            name, all_rows, incremento, max_pasos, client_id=client_id, origen="mcp"
+        )
+    except ValueError as exc:
+        return _mcp_result(_mcp_status(name, "ERROR_ENTRADA", 413, str(exc)))
+    except ServerBusyError as exc:
+        return _mcp_result(_mcp_status(name, "SERVIDOR_OCUPADO", 503, str(exc), 5))
+
+    snap = _job_snapshot(parent)
+    payload = {
+        **snap,
+        "n_filas": parent["total"],
+        "n_subjobs": len(parent.get("children", [])),
+        "rechazadas": rechazadas,
+    }
+    if not parent.get("children"):
+        payload["estado"] = "ERROR"
+        payload["mensaje"] = "No hay filas validas."
+    log.info(
+        "[MCP] job %s: %d filas, %d subjobs, %d rechazadas",
+        parent["id"], parent["total"], len(parent.get("children", [])),
+        len(rechazadas),
+    )
+    return _mcp_result(payload, _texto_snapshot(snap))
+
+
+@mcp.tool()
+async def esperar_trabajo(job_id: str, timeout_s: float = 60) -> CallToolResult:
+    """Espera a que un trabajo termine o se agote `timeout_s` (max `AI_MCP_WAIT_MAX_S`).
+
+    Devuelve estado (EN_COLA/PROCESANDO/LISTO/ERROR/NO_ENCONTRADO), progreso y ETA.
+    """
+    espera = min(max(0.5, float(timeout_s)), config.MCP_WAIT_MAX_S)
+    inicio = time.monotonic()
+    while True:
+        _cleanup_jobs()
+        job = _BATCH_JOBS.get(job_id)
+        if job is None:
+            payload = {
+                "job_id": job_id,
+                "estado": "NO_ENCONTRADO",
+                "mensaje": "Trabajo no encontrado o expirado. "
+                           "Relanzalo con lanzar_escenarios.",
+            }
+            return _mcp_result(payload, payload["mensaje"])
+        snap = _job_snapshot(job)
+        if snap["estado"] in ("LISTO", "ERROR"):
+            return _mcp_result(snap, _texto_snapshot(snap))
+        if time.monotonic() - inicio >= espera:
+            snap["timeout"] = True
+            return _mcp_result(
+                snap, _texto_snapshot(snap) + ". Tiempo agotado; vuelve a llamar."
+            )
+        await asyncio.sleep(0.5)
+
+
+@mcp.tool()
+async def descargar_resultado(job_id: str, pagina: int = 1, por_pagina: int = 25,
+                              detalle: str = "completo") -> CallToolResult:
+    """Devuelve los resultados de un trabajo paginados en JSON.
+
+    `por_pagina=0` devuelve todo en una respuesta. `detalle="resumen"` omite los ratios
+    y comprobaciones complementarias detalladas.
+    """
+    _cleanup_jobs()
+    job = _BATCH_JOBS.get(job_id)
+    if job is None:
+        payload = {
+            "job_id": job_id,
+            "estado": "NO_ENCONTRADO",
+            "mensaje": "Trabajo no encontrado o expirado. "
+                       "Relanzalo con lanzar_escenarios.",
+        }
+        return _mcp_result(payload, payload["mensaje"])
+    payload = _download_payload(job, pagina, por_pagina, detalle)
+    texto = (
+        f"Descarga {payload['pagina']}/{payload['n_paginas']}: "
+        f"{len(payload['conexiones'])}/{payload['total']} conexiones "
+        f"({payload['estado']})."
+    )
+    return _mcp_result(payload, texto)
+
+
+@mcp.tool()
+async def listar_trabajos() -> CallToolResult:
+    """Lista los trabajos vivos (para recuperar job_id tras un corte)."""
+    _cleanup_jobs()
+    items: List[Dict[str, Any]] = []
+    for job in _BATCH_JOBS.values():
+        if job.get("parent_id"):
+            continue
+        snap = _job_snapshot(job)
+        items.append({
+            "job_id": job["id"],
+            "tipo": job.get("tipo", "child"),
+            "origen": job.get("origen"),
+            "estado": snap["estado"],
+            "total": snap["total"],
+            "done": snap["done"],
+            "created": round(job["created"], 1),
+        })
+    items.sort(key=lambda item: item["created"], reverse=True)
+    return _mcp_result({"n": len(items), "trabajos": items},
+                       f"{len(items)} trabajos.")
+
+
 @mcp.tool()
 async def disenar_escenarios_carga(
     rows: Any,
     model: str = "",
     incremento: float = 0.05,
     max_pasos: int = 40,
+    timeout_s: float = 60,
 ) -> CallToolResult:
-    """Disena varias conexiones en una sola llamada (maximo configurable, 25 por defecto).
+    """Lanza y espera un lote de escenarios (atajo sobre jobs).
 
-    Pasa SIEMPRE una lista en `rows` (no una llamada por conexion). Se procesan como maximo
-    `AI_SCENARIO_BATCH_ROWS` conexiones; el resto se descarta y se indica en
-    `n_descartadas`/`descartadas`.
+    Acepta hasta `AI_SCENARIO_JOB_MAX_ROWS` filas; no descarta en silencio. Crea el
+    trabajo, espera hasta `timeout_s` (max `AI_MCP_WAIT_MAX_S`) y:
+      - si termina, devuelve el detalle compacto (`resumen`, `conexiones`, `errores`);
+      - si no, devuelve `status="EN_CURSO"` + `job_id` para continuar con
+        `esperar_trabajo` y `descargar_resultado`.
 
-    Respuesta compacta y sin duplicar: `content` lleva un resumen corto y
-    `structuredContent` el detalle. Por conexion devuelve `escenarios`, y cada escenario:
-    `escenario_id` ("E1"/"E2"/"E3"), metadatos, `codame` (las columnas CODAME) y
-    `comprobacion` (todos los ratios y comprobaciones geometricas con valor, limite y
-    estado). No incluye tablas markdown ni SVG.
+    Cada escenario incluye `codame` y `comprobacion` completa. Los perfiles sin
+    geometria se rechazan con `PERFIL_SIN_GEOMETRIA` (y se listan en `rechazadas`).
 
-    Los perfiles sin geometria en el catalogo se rechazan por fila con
-    `PERFIL_SIN_GEOMETRIA` (HTTP 422) antes de llamar al modelo.
-
-    `resumen` trae recuentos por escenario y por estado; `avisos` y `motivo` usan codigos
-    (p. ej. E1_NO_CUMPLE, E3_SIN_CANTONERA).
-
-      E1: diseno de entrada (paso 0, sin tocar cargas).
-      E2: mayor carga que aguanta SIN cantonera.
-      E3: mayor carga que aguanta CON cantonera.
-    E2 y E3 priorizan siempre el diseno que cumple la comprobacion AISC 360-10; si ninguno
-    cumple, devuelven el de mayor carga (con aviso). Si no hay opcion sin/con cantonera, el
-    escenario sale `encontrado=false` con su `motivo`.
-
-    Args:
-        rows: Lista de conexiones (cada una con UNICODE, BEAM, COLUMN, ratio_moment,
-            ratio_shear, ratio_axial y opcionalmente Normativas, grado_acero, clase_tornillo).
-            Tambien acepta un unico objeto o un string JSON con la lista.
-        model: Nombre opcional del modelo (por defecto, el configurado).
-        incremento: Aumento de carga por paso (0.05 = 5 %).
-        max_pasos: Maximo de pasos de aumento a explorar.
+      E1: diseno de entrada (paso 0).
+      E2: mayor carga SIN cantonera. E3: mayor carga CON cantonera.
     """
     name = model or config.MODEL_NAME
     try:
         all_rows = _parse_mcp_rows(rows)
     except ValueError as exc:
-        log.warning("[MCP] escenarios entrada invalida: %s", exc)
         return _mcp_result(_mcp_status(name, "ERROR_ENTRADA", 422, str(exc)))
-
-    max_rows = config.SCENARIO_BATCH_ROWS
-    selected = all_rows[:max_rows]
-    discarded = all_rows[max_rows:]
-    discarded_uids = [_uid(r) for r in discarded]
-    log.info(
-        "[MCP] escenarios: modelo=%s, filas=%d, procesadas=%d, descartadas=%d",
-        name, len(all_rows), len(selected), len(discarded),
-    )
-
+    if not all_rows:
+        return _mcp_result(_mcp_status(name, "ERROR_ENTRADA", 422, "rows vacio"))
     try:
-        results, queue_wait = await _run_scenario_batch(
-            name, selected, "disenar_escenarios_carga",
-            incremento=incremento, max_pasos=max_pasos,
+        parent, rechazadas = _launch_parent(
+            name, all_rows, incremento, max_pasos, origen="mcp"
         )
+    except ValueError as exc:
+        return _mcp_result(_mcp_status(name, "ERROR_ENTRADA", 413, str(exc)))
     except ServerBusyError as exc:
-        log.warning("[MCP] escenarios ocupado: %s", exc)
         return _mcp_result(_mcp_status(name, "SERVIDOR_OCUPADO", 503, str(exc), 5))
-    except TimeoutError as exc:
-        log.error("[MCP] escenarios timeout: %s", exc)
-        return _mcp_result(_mcp_status(name, "TIMEOUT_SERVIDOR", 504, str(exc), 5))
-    except Exception as exc:  # noqa: BLE001
-        log.exception("[MCP] error generando escenarios")
-        return _mcp_result(_mcp_status(name, "ERROR_SERVIDOR", 500, str(exc)))
 
-    has_errors = any(r.get("status") != "OK" for r in results)
-    if has_errors:
-        status = "CON_ERRORES"
-    elif discarded:
-        status = "CON_DESCARTES"
-    else:
-        status = "OK"
+    if not parent.get("children"):
+        payload = {
+            **_job_snapshot(parent),
+            "status": "SIN_FILAS_VALIDAS",
+            "n_filas": len(all_rows),
+            "rechazadas": rechazadas,
+        }
+        return _mcp_result(payload, "Sin filas validas.")
 
-    resumen, errores = _batch_counts(results)
-    conexiones: List[Dict[str, Any]] = []
-    for item in results:
+    espera = min(max(0.5, float(timeout_s)), config.MCP_WAIT_MAX_S)
+    inicio = time.monotonic()
+    snap = _job_snapshot(parent)
+    while snap["estado"] not in ("LISTO", "ERROR"):
+        if time.monotonic() - inicio >= espera:
+            break
+        await asyncio.sleep(0.5)
+        snap = _job_snapshot(parent)
+
+    if snap["estado"] not in ("LISTO", "ERROR"):
+        payload = {
+            **snap,
+            "status": "EN_CURSO",
+            "n_filas": parent["total"],
+            "n_subjobs": len(parent["children"]),
+            "rechazadas": rechazadas,
+            "mensaje": "Sigue con esperar_trabajo(job_id) y "
+                       "descargar_resultado(job_id).",
+        }
+        return _mcp_result(payload, _texto_snapshot(snap))
+
+    resultados = _job_results_ordered(parent)
+    mcp_items: List[Dict[str, Any]] = []
+    for item in resultados:
         if item.get("status") == "OK":
-            conexiones.append({
+            compact = _compact_result(name, item.get("resultado") or {})
+            mcp_items.append({
                 "unicode": item.get("unicode"),
                 "status": "OK",
-                **(item.get("resultado") or {}),
+                "parada": compact.get("parada"),
+                "tiempo_s": compact.get("tiempo_s"),
+                "avisos": compact.get("avisos"),
+                "resultado": {"escenarios": compact.get("escenarios") or []},
+            })
+        else:
+            mcp_items.append({
+                "unicode": item.get("unicode"),
+                "status": item.get("status"),
+                "http_status": item.get("http_status"),
+                "mensaje": item.get("mensaje"),
+            })
+
+    resumen, errores = _batch_counts(mcp_items)
+    conexiones: List[Dict[str, Any]] = []
+    for item in mcp_items:
+        if item["status"] == "OK":
+            conexiones.append({
+                "unicode": item["unicode"],
+                "status": "OK",
+                "parada": item.get("parada"),
+                "tiempo_s": item.get("tiempo_s"),
+                "avisos": item.get("avisos"),
+                "escenarios": item["resultado"]["escenarios"],
             })
         else:
             conexiones.append({
-                "unicode": item.get("unicode"),
-                "status": item.get("status"),
+                "unicode": item["unicode"],
+                "status": item["status"],
                 "http_status": item.get("http_status"),
                 "mensaje": item.get("mensaje"),
                 "escenarios": [],
             })
 
+    status = "CON_ERRORES" if errores or rechazadas else "OK"
     payload = {
         "model_name": name,
         "status": status,
+        "job_id": parent["id"],
         "n_solicitadas": len(all_rows),
-        "n_procesadas": len(selected),
-        "n_descartadas": len(discarded),
-        "descartadas": discarded_uids,
+        "n_procesadas": len(resultados),
+        "n_descartadas": 0,
+        "descartadas": [],
+        "rechazadas": rechazadas,
         "resumen": resumen,
         "conexiones": conexiones,
         "errores": errores,
     }
     log.info(
-        "[MCP] escenarios: %s (procesadas=%d, descartadas=%d, cola=%.1fs)",
-        status, len(selected), len(discarded), queue_wait,
+        "[MCP] escenarios: %s (job=%s, procesadas=%d, rechazadas=%d)",
+        status, parent["id"], len(resultados), len(rechazadas),
     )
     return _mcp_result(payload, _resumen_texto(resumen, conexiones))
 
@@ -1251,29 +1631,30 @@ async def create_scenarios_job(payload: ScenarioJobIn):
     if existing is not None:
         return _job_payload(existing, 0, 1)
     name = payload.model or config.MODEL_NAME
-    job = {
-        "id": payload.client_id,
-        "created": time.time(),
-        "estado": "procesando",
-        "total": len(payload.rows),
-        "resultados": [],
-    }
-    _BATCH_JOBS[payload.client_id] = job
-    job["task"] = asyncio.create_task(
-        _run_job(
-            job,
+    rows = []
+    for indice, row in enumerate(payload.rows):
+        fila = dict(row)
+        fila.setdefault("__web_id", indice)
+        rows.append(fila)
+    try:
+        job = _create_child_job(
             name,
-            payload.rows,
+            rows,
             {
                 "incremento": payload.incremento,
                 "max_pasos": payload.max_pasos,
                 "max_fallos_seguidos": payload.max_fallos_seguidos,
             },
+            "web",
+            client_id=payload.client_id,
         )
-    )
+    except ServerBusyError as exc:
+        raise HTTPException(
+            status_code=503, detail=str(exc), headers={"Retry-After": "5"}
+        )
     log.info(
         "/scenarios/batch/jobs: job=%s modelo=%s %d filas",
-        payload.client_id, name, len(payload.rows),
+        payload.client_id, name, len(rows),
     )
     return _job_payload(job, 0, 1)
 

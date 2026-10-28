@@ -126,32 +126,7 @@ class ScenarioTests(unittest.TestCase):
             [r["UNICODE"] for r in main._parse_mcp_rows(json.dumps(rows))], ["A", "B"]
         )
 
-    def test_batch_runs_sequentially_and_continues_after_timeout(self):
-        rows = [dict(self.row, UNICODE=u) for u in ("A", "B", "C")]
-        calls = []
-        original = main.escenarios.run
-
-        def fake_run(name, row, timeout_s=None, **kwargs):
-            calls.append(row["UNICODE"])
-            if row["UNICODE"] == "B":
-                raise TimeoutError("agotado")
-            return {
-                "tabla_markdown": row["UNICODE"], "checks": [], "rows": [],
-                "rows_raw": [], "escenarios": [], "historial": [], "parada": "ok",
-                "tiempo_s": 0.1, "avisos": [], "parametros": {},
-            }
-
-        main.escenarios.run = fake_run
-        try:
-            out = main._run_batch_sync("V11", rows, {}, timeout_s=10)
-        finally:
-            main.escenarios.run = original
-
-        self.assertEqual(calls, ["A", "B", "C"])
-        self.assertEqual([r["status"] for r in out], ["OK", "TIMEOUT_SERVIDOR", "OK"])
-
-    def test_batch_rejects_profile_without_geometry_before_predicting(self):
-        rows = [dict(self.row, UNICODE="BAD", BEAM="UB406*152*60")]
+    def test_run_one_rejects_profile_without_geometry_before_predicting(self):
         called = []
         original = main.escenarios.run
 
@@ -159,16 +134,17 @@ class ScenarioTests(unittest.TestCase):
             called.append(args)
             return {}
 
+        row = dict(self.row, UNICODE="BAD", BEAM="UB406*152*60")
         main.escenarios.run = fake_run
         try:
-            out = main._run_batch_sync("V11", rows, {}, timeout_s=10)
+            out = asyncio.run(main._run_one_scenario("V11", row, {}, 5.0))
         finally:
             main.escenarios.run = original
 
         self.assertEqual(called, [])
-        self.assertEqual(out[0]["status"], "PERFIL_SIN_GEOMETRIA")
-        self.assertEqual(out[0]["http_status"], 422)
-        self.assertIn("UB406*152*60", out[0]["mensaje"])
+        self.assertEqual(out["status"], "PERFIL_SIN_GEOMETRIA")
+        self.assertEqual(out["http_status"], 422)
+        self.assertIn("UB406*152*60", out["mensaje"])
 
 
 if __name__ == "__main__":

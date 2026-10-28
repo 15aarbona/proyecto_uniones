@@ -43,7 +43,11 @@ class ScenarioBatchTests(unittest.TestCase):
         try:
             out = asyncio.run(
                 main._run_one_scenario(
-                    "V12", {"UNICODE": "R1", "__web_id": 4}, {}, 5.0
+                    "V12",
+                    {"UNICODE": "R1", "__web_id": 4, "BEAM": "IPE300",
+                     "COLUMN": "HEB300", "ratio_moment": 0.5,
+                     "ratio_shear": 0.1, "ratio_axial": 0.0},
+                    {}, 5.0,
                 )
             )
         finally:
@@ -96,6 +100,115 @@ class ScenarioBatchTests(unittest.TestCase):
         self.assertEqual(data["done"], 3)
         self.assertEqual(data["estado"], "hecho")
         self.assertEqual(len(data["resultados"]), 1)
+
+
+    def test_lanzar_parte_en_subjobs_y_descarga_paginada(self):
+        rows = [
+            {"UNICODE": f"L{i}", "BEAM": "IPE300", "COLUMN": "HEB300",
+             "ratio_moment": 0.5, "ratio_shear": 0.1, "ratio_axial": 0.0}
+            for i in range(60)
+        ]
+
+        async def fake_one(name, row, options, timeout_s):
+            await asyncio.sleep(0)
+            return {
+                "unicode": row.get("UNICODE"),
+                "web_id": row.get("__web_id"),
+                "fila": row.get("__web_id"),
+                "status": "OK",
+                "resultado": _fake_result(row),
+            }
+
+        original = main._run_one_scenario
+        main._run_one_scenario = fake_one
+        main._BATCH_JOBS.clear()
+        try:
+            async def scenario():
+                lanzado = await main.lanzar_escenarios(
+                    rows=rows, model="V12", client_id="launch-test"
+                )
+                estado = "PROCESANDO"
+                esperado = None
+                for _ in range(200):
+                    esperado = await main.esperar_trabajo("launch-test", timeout_s=5)
+                    estado = esperado.structuredContent["estado"]
+                    if estado in ("LISTO", "ERROR"):
+                        break
+                    await asyncio.sleep(0.01)
+                pagina = await main.descargar_resultado(
+                    "launch-test", pagina=1, por_pagina=10, detalle="completo"
+                )
+                resumen = await main.descargar_resultado(
+                    "launch-test", pagina=1, por_pagina=1, detalle="resumen"
+                )
+                return lanzado, estado, pagina, resumen
+
+            lanzado, estado, pagina, resumen = asyncio.run(scenario())
+        finally:
+            main._run_one_scenario = original
+            main._BATCH_JOBS.clear()
+
+        self.assertEqual(lanzado.structuredContent["n_subjobs"], 3)
+        self.assertEqual(estado, "LISTO")
+        pag = pagina.structuredContent
+        self.assertEqual(pag["total"], 60)
+        self.assertEqual(pag["n_paginas"], 6)
+        self.assertEqual(len(pag["conexiones"]), 10)
+        self.assertEqual(pag["conexiones"][0]["fila"], 0)
+        self.assertIn("codame", pag["conexiones"][0]["escenarios"][0])
+        comp = resumen.structuredContent["conexiones"][0]["escenarios"][0]["comprobacion"]
+        self.assertNotIn("ratios", comp)
+        self.assertNotIn("complementarios", comp)
+
+    def test_lanzar_limita_filas(self):
+        rows = [
+            {"UNICODE": f"X{i}", "BEAM": "IPE300", "COLUMN": "HEB300"}
+            for i in range(main.config.SCENARIO_JOB_MAX_ROWS + 1)
+        ]
+
+        async def scenario():
+            return await main.lanzar_escenarios(rows=rows, client_id="limite-test")
+
+        res = asyncio.run(scenario())
+        self.assertEqual(res.structuredContent["status"], "ERROR_ENTRADA")
+        self.assertEqual(res.structuredContent["http_status"], 413)
+
+    def test_esperar_trabajo_no_encontrado(self):
+        res = asyncio.run(main.esperar_trabajo("no-existe", timeout_s=0.5))
+        self.assertEqual(res.structuredContent["estado"], "NO_ENCONTRADO")
+
+    def test_esperar_trabajo_timeout(self):
+        rows = [{"UNICODE": "S1", "BEAM": "IPE300", "COLUMN": "HEB300",
+                 "ratio_moment": 0.5, "ratio_shear": 0.1, "ratio_axial": 0.0}]
+
+        async def slow_one(name, row, options, timeout_s):
+            await asyncio.sleep(0.6)
+            return {
+                "unicode": row.get("UNICODE"),
+                "web_id": row.get("__web_id"),
+                "fila": row.get("__web_id"),
+                "status": "OK",
+                "resultado": _fake_result(row),
+            }
+
+        original = main._run_one_scenario
+        main._run_one_scenario = slow_one
+        main._BATCH_JOBS.clear()
+        try:
+            async def scenario():
+                await main.lanzar_escenarios(rows=rows, client_id="timeout-test")
+                primero = await main.esperar_trabajo("timeout-test", timeout_s=0.5)
+                await asyncio.sleep(0.3)
+                segundo = await main.esperar_trabajo("timeout-test", timeout_s=5)
+                return primero, segundo
+
+            primero, segundo = asyncio.run(scenario())
+        finally:
+            main._run_one_scenario = original
+            main._BATCH_JOBS.clear()
+
+        self.assertTrue(primero.structuredContent.get("timeout"))
+        self.assertEqual(segundo.structuredContent["estado"], "LISTO")
 
 
 if __name__ == "__main__":
