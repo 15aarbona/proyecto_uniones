@@ -451,7 +451,12 @@ def to_codame(input_row: dict, design_row: dict, apply_adjustments: bool = True)
     tws_text = _mm_text(tws) if tws > 0 else "0mm"
 
     n_cantonera = int(_num(d.get("n_cantonera")))
-    lh = _haunch_length(beam_d, n_cantonera)
+    lh_pred = _num(d.get("Lh"))
+    lh = (
+        lh_pred
+        if n_cantonera > 0 and lh_pred > 0
+        else _haunch_length(beam_d, n_cantonera)
+    )
     has_haunch = lh > 0
 
     row = {
