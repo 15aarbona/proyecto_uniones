@@ -8,7 +8,7 @@ RAW_INPUT_COLUMNS = [
     "grado_acero",
     "clase_tornillo",
 ]
-CATEGORICAL_FEATURES = ["grado_acero", "clase_tornillo"]
+CATEGORICAL_FEATURES = ["BEAM_type", "COLUMN_type", "grado_acero", "clase_tornillo"]
 NUMERIC_FEATURES = [
     "BEAM_d_mm",
     "COLUMN_d_mm",
@@ -43,6 +43,8 @@ CATALOGO_tbs = CATALOGO_ts
 CATALOGO_tst = [0, 10, 12, 15, 20, 25, 30, 35, 40]
 Y_GRID_STEP = 5
 UNUSED_TRANSITION = "UNUSED"
+CATALOGO_GRADO_ACERO = ["S355JR", "S275JR"]
+CATALOGO_CLASE_TORNILLO = ["10.9", "8.8", "A325M"]
 
 
 def etiquetas_zona(z, n):

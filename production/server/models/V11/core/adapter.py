@@ -73,6 +73,21 @@ DATA_DIR = MODEL_DIR / "data"
 
 _TEKLA_FILES = ("tekla_eu.csv", "tekla_cad.csv", "tekla_faltante.csv", "tekla_uk.csv")
 
+# V11 usa `type` como categoria (solo entreno con HE/HI/IPE/W). Los perfiles
+# britanicos UB/UC son alas anchas equivalentes a W; IPN es un IPE con alas
+# inclinadas. Las secciones que el modelo no sabe disenar (canales, angulos y
+# T) se excluyen del catalogo para no ofrecerlas en el schema.
+_SECTION_TYPE_ALIASES = {
+    "UB": "W",
+    "UKB": "W",
+    "UC": "W",
+    "UKC": "W",
+    "UBP": "W",
+    "UKBP": "W",
+    "IPN": "IPE",
+}
+_SUPPORTED_SECTION_TYPES = {"HE", "HI", "IPE", "W"}
+
 # Catalogos de materiales (referencia: V7/variables.py).
 ACERO_TABLE = {
     "S275JR": {"fy_acero_mpa": 275.0, "fu_acero_mpa": 430.0},
@@ -104,12 +119,16 @@ _PROFILE_LOOKUP = None
 
 
 def _profile_lookup() -> pd.DataFrame:
+    """Tabla perfil -> geometria, indexada por nombre en MAYUSCULAS (sin espacios)."""
     global _PROFILE_LOOKUP
     if _PROFILE_LOOKUP is None:
         frames = [pd.read_csv(DATA_DIR / name) for name in _TEKLA_FILES]
         union = pd.concat(frames, ignore_index=True)
-        union = union.dropna(subset=["tekla_nomenclature_1"])   # <- nuevo
         union["_key"] = union["tekla_nomenclature_1"].astype(str).str.strip().str.upper()
+        union["type"] = (
+            union["type"].astype(str).str.strip().replace(_SECTION_TYPE_ALIASES)
+        )
+        union = union[union["type"].isin(_SUPPORTED_SECTION_TYPES)]
         _PROFILE_LOOKUP = union.drop_duplicates(subset="_key").set_index("_key")
     return _PROFILE_LOOKUP
 
@@ -298,8 +317,9 @@ def _pre(bundle: dict = None) -> Preprocessor:
 
 
 def _profile_names() -> list:
-    names = _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip()
-    return sorted(n for n in names.unique() if n)
+    return sorted(
+        _profile_lookup()["tekla_nomenclature_1"].astype(str).str.strip().unique()
+    )
 
 
 def input_schema(bundle: dict = None) -> list:
