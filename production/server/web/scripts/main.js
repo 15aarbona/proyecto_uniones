@@ -711,7 +711,6 @@ async function openViewer(connIdx, initialVarIdx = 0){
 
 async function loadViewerVariation(varIdx){
   if (!VIEW) return;
-  clearTimeout(VIEW.checkTimer);
   VIEW.activeVarIndex = varIdx;
   const vars = getConnVariations(VIEW.connIdx);
   const activeVar = vars[varIdx] || vars[0];
@@ -885,7 +884,7 @@ function buildViewerPanel(){
 
   p.querySelectorAll("[data-vkey]").forEach(inp => {
     inp.addEventListener("input", () => onField(inp));
-    inp.addEventListener("change", () => { onFieldBlur(inp); checkViewerConnection(); });
+    inp.addEventListener("blur", () => { onFieldBlur(inp); checkViewerConnection(); });
   });
 }
 
@@ -1055,7 +1054,6 @@ function syncDerived(){
 async function checkViewerConnection(){
   if (!VIEW) return null;
   const v = VIEW;
-  clearTimeout(v.checkTimer);
   v.pending = false;
 
   syncDerived();
@@ -1142,7 +1140,8 @@ function markPending(){
   renderVarList();
 }
 
-/* Mientras se escribe: se actualiza el dibujo y se programa una comprobación (campos numéricos) */
+/* Mientras se escribe: solo se actualiza el dibujo. La comprobación se lanza al salir
+   del campo (blur), para no reconstruir el panel mientras el usuario escribe. */
 function onField(inp){
   if (!VIEW) return;
   const key = inp.dataset.vkey, t = VIEW.types[key] || "text";
@@ -1156,10 +1155,6 @@ function onField(inp){
   markPending();
   updateSaveButton();
   drawAll();
-  if (t !== "text") {
-    clearTimeout(VIEW.checkTimer);
-    VIEW.checkTimer = setTimeout(() => checkViewerConnection(), 700);
-  }
 }
 
 function onFieldBlur(inp){
@@ -1919,29 +1914,37 @@ async function loadModels(){
     const sel = $("model");
     const models = o.available_models || [];
     const loaded = o.loaded_models || [];
+
+    // El modelo seleccionado debe ser el default_model que reporta el servidor.
+    const defaultModel = o.default_model && models.includes(o.default_model)
+      ? o.default_model
+      : (models[0] || "");
+
+    // Rellenar los selectores
     sel.innerHTML = models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
     const sel2 = $("model2");
     sel2.innerHTML = `<option value="">— Sin comparación —</option>` + models.map(m => `<option value="${escAttr(m)}">${escHtml(m)}</option>`).join("");
-    const num = m => { const x = String(m).match(/\d+/g); return x ? Math.max(...x.map(Number)) : -1; };
-    const best = models.reduce((a, b) => (num(b) > num(a) ? b : a), models[0]);
-    if (!best) return;
-    if (!loaded.includes(best)) {
-      setStatus("", "Cargando modelo " + best + "…");
+
+    // Seleccionar por defecto el modelo en el <select>
+    sel.value = defaultModel;
+
+    // Si el modelo por defecto no está activado en memoria en el servidor, activarlo
+    if (defaultModel && !loaded.includes(defaultModel)) {
+      setStatus("", "Cargando modelo por defecto " + defaultModel + "…");
       const a = await fetch("/model/activate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: best }),
+        body: JSON.stringify({ name: defaultModel }),
       });
       if (!a.ok) {
-        // no se pudo cargar: se usa el modelo por defecto del servidor
-        if (o.default_model && models.includes(o.default_model)) sel.value = o.default_model;
-        setStatus("bad", "No se pudo cargar " + best + "; se usa " + o.default_model);
+        setStatus("bad", "No se pudo activar el modelo " + defaultModel);
         return;
       }
       setStatus("", "");
     }
-    sel.value = best;
-  } catch(e){}
+  } catch(e){
+    setStatus("bad", "Error cargando lista de modelos", e.message);
+  }
 }
 
 async function loadSchema(){
