@@ -8,7 +8,7 @@ RAW_INPUT_COLUMNS = [
     "grado_acero",
     "clase_tornillo",
 ]
-CATEGORICAL_FEATURES = ["BEAM_type", "COLUMN_type", "grado_acero", "clase_tornillo"]
+CATEGORICAL_FEATURES = ["grado_acero", "clase_tornillo"]
 NUMERIC_FEATURES = [
     "BEAM_d_mm",
     "COLUMN_d_mm",

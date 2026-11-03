@@ -1,5 +1,6 @@
 import json, os, subprocess, sys, threading, time
 import pandas as pd
+import pyarrow.parquet as pq
 import config, model_registry
 
 import logging
@@ -46,7 +47,8 @@ def update(**kw):
 
 
 def n_rows():
-    return len(pd.read_parquet(MASTER, columns=["UNICODE"])) if MASTER.exists() else 0
+    # Cuenta filas por metadatos del parquet: no depende del nombre de ninguna columna
+    return pq.read_metadata(MASTER).num_rows if MASTER.exists() else 0
 
 
 def init_baseline():
