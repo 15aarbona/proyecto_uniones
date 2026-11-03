@@ -43,22 +43,33 @@ def validate_connection_targets(df):
 
 class Preprocessor:
     def fit(self, df):
-        self.cat_encoders = {
-            c: LabelEncoder().fit(df[c].astype(str)) for c in CATEGORICAL_FEATURES
-        }
+        self.cat_encoders = {}
+        for c in CATEGORICAL_FEATURES:
+            le = LabelEncoder()
+            if c == "grado_acero":
+                le.fit(CATALOGO_GRADO_ACERO)
+            elif c == "clase_tornillo":
+                le.fit(CATALOGO_CLASE_TORNILLO)
+            else:
+                le.fit(df[c].astype(str))
+            self.cat_encoders[c] = le
+
         self.num_scaler = StandardScaler().fit(df[NUMERIC_FEATURES])
         self.reg_always_scaler = StandardScaler().fit(df[REGRESSION_ALWAYS])
         self.standard_encoder = LabelEncoder().fit(df.standard.astype(str))
+        
         x = df[MASKED_COLUMNS].fillna(0).to_numpy(float)
         self.masked_mean = np.zeros(x.shape[1])
         self.masked_std = np.ones(x.shape[1])
         frac = np.zeros(x.shape[1])
+        
         for j in range(x.shape[1]):
             a = x[:, j] > 0
             frac[j] = a.mean()
             if a.sum() > 1:
                 self.masked_mean[j] = x[a, j].mean()
                 self.masked_std[j] = max(x[a, j].std(), 1e-6)
+                
         self.presence_pos_weight = np.maximum(
             (1 - frac) / np.maximum(frac, 1e-6), 1
         ).astype(np.float32)
