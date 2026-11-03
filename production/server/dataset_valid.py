@@ -6,9 +6,11 @@ from catalogo import ACERO_TABLE, get_profile
 MASTER = config.MODELS_DIR / "V11" / "data" / "datos_modelo.parquet"
 LOCK = threading.Lock()
 TORN = {"8.8": (640., 800., 480.), "10.9": (900., 1000., 500.), "A325M": (660., 830., 372.)}
-NORMAS = {"EN 1993-1-8", "AISC-360-05/10", "CSA S16-09"}
+# El Excel usa otros nombres para la normativa; se normalizan a los del parquet
+NORMAS = {"EN 1993-1-8": "EN 1993-1-8", "BS EN 1993": "EN 1993-1-8", "Eurocode 3": "EN 1993-1-8",
+          "AISC-360-05/10": "AISC-360-05/10", "CSA S16-09": "CSA S16-09"}
 BOLTS = {16, 20, 22, 24, 27, 30, 36}
-COLS = (["UNICODE", "BEAM", "COLUMN", "ratio_moment", "ratio_shear", "ratio_axial", "grado_acero",
+COLS = (["Lh", "Unicode", "Lp", "BEAM", "COLUMN", "ratio_moment", "ratio_shear", "ratio_axial", "grado_acero",
          "clase_tornillo", "BEAM_type", "COLUMN_type", "BEAM_d_mm", "COLUMN_d_mm", "standard", "Bolt",
          "SlipCritical", "n_alma", "n_cantonera", "fy_acero_mpa", "fu_acero_mpa", "fy_tornillo_mpa",
          "fu_tornillo_mpa", "fv_tornillo_mpa", "g", "e", "d", "Bp", "tp", "tws", "ts", "tbs", "tst"]
@@ -74,14 +76,14 @@ def to_row(r):
     if clase not in TORN: raise ValueError(f"clase tornillo {clase}")
     bolt = int(_n("".join(ch for ch in str(r.get("BoltName_ep", "")) if ch.isdigit())))
     if bolt not in BOLTS: raise ValueError(f"tornillo {bolt}")
-    norma = str(r.get("Normativas", "")).strip()
-    if norma not in NORMAS: raise ValueError(f"normativa '{norma}'")
+    norma = NORMAS.get(str(r.get("Normativas", "")).strip())
+    if not norma: raise ValueError(f"normativa '{r.get('Normativas')}'")
     tr = _trans(na, nc)
-    o = {"UNICODE": uid, "BEAM": beam, "COLUMN": col,
-         "ratio_moment": _n(r.get("MzEd_Porcen")) / 100, "ratio_shear": _n(r.get("FyEd_Porcen")) / 100,
-         "ratio_axial": _n(r.get("FxEd_Porcen")) / 100, "grado_acero": grado, "clase_tornillo": clase,
+    o = {"Lh": _n(r.get("Lh")), "Unicode": uid, "Lp": _n(r.get("Lp")), "BEAM": beam, "COLUMN": col,
+         "ratio_moment": _n(r.get("ratio_moment")) / 100, "ratio_shear": _n(r.get("ratio_shear")) / 100,
+         "ratio_axial": _n(r.get("ratio_axial")) / 100, "grado_acero": grado, "clase_tornillo": clase,
          "BEAM_type": str(pb.get("type")), "COLUMN_type": str(pc.get("type")),
-         "BEAM_d_mm": h, "COLUMN_d_mm": _n(pc.get("d_mm")), "standard": norma, "Bolt": str(bolt),
+         "BEAM_d_mm": h, "COLUMN_d_mm": _n(pc.get("d_mm")), "standard": norma, "Bolt": f"M{bolt}",
          "SlipCritical": str(r.get("SlipCritical") or "NO").upper().replace("TRUE", "YES").replace("FALSE", "NO"),
          "n_alma": na, "n_cantonera": nc, "fy_acero_mpa": fy, "fu_acero_mpa": ACERO_TABLE[grado]["fu_acero_mpa"],
          "fy_tornillo_mpa": TORN[clase][0], "fu_tornillo_mpa": TORN[clase][1], "fv_tornillo_mpa": TORN[clase][2],
@@ -95,6 +97,22 @@ def to_row(r):
     return o
 
 
+def _load_master():
+    """Lee el maestro y normaliza nombres de columna (p.ej. UNICODE -> Unicode) al esquema COLS."""
+    if not MASTER.exists():
+        return pd.DataFrame(columns=COLS)
+    cur = pd.read_parquet(MASTER)
+    canon = {c.lower(): c for c in COLS}
+    cur = cur.rename(columns={c: canon[c.lower()] for c in cur.columns
+                              if c.lower() in canon and c != canon[c.lower()]})
+    cur = cur.loc[:, ~cur.columns.duplicated()]          # por si quedaron dos columnas iguales
+    for c in COLS:                                        # columnas que falten (p.ej. Lh/Lp en maestros antiguos)
+        if c not in cur.columns:
+            cur[c] = pd.NA
+    cur = cur[cur["Unicode"].notna()]                     # filas sin ID no sirven
+    return cur[COLS + [c for c in cur.columns if c not in COLS]]
+
+
 def append(rows):
     ok, rej = [], []
     for i, r in enumerate(rows, 1):
@@ -104,12 +122,16 @@ def append(rows):
         return {"added": 0, "updated": 0, "rejected": rej, "total_rows": 0}
     new = pd.DataFrame(ok)
     with LOCK:
-        cur = pd.read_parquet(MASTER) if MASTER.exists() else pd.DataFrame(columns=COLS)
+        cur = _load_master()
         cols = list(cur.columns) if len(cur) else COLS
         new = new.reindex(columns=cols)
-        ex_ids = set(cur["UNICODE"].astype(str))
-        ids = set(new["UNICODE"])
-        comb = pd.concat([cur, new], ignore_index=True).drop_duplicates("UNICODE", keep="last")
+        for c in cols:  # conserva los dtypes del maestro (int/float/bool/str)
+            if c in cur.columns and len(cur):
+                try: new[c] = new[c].astype(cur[c].dtype)
+                except (ValueError, TypeError): pass
+        ex_ids = set(cur["Unicode"].astype(str))
+        ids = set(new["Unicode"])
+        comb = pd.concat([cur, new], ignore_index=True).drop_duplicates("Unicode", keep="last")
         tmp = MASTER.with_suffix(".tmp")
         comb.to_parquet(tmp, index=False)
         os.replace(tmp, MASTER)

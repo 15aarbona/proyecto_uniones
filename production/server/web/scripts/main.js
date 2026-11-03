@@ -408,6 +408,33 @@ function renderResults(){
 }
 
 /* =====================================================================
+   Acción: Marcar todas las variantes que cumplen
+   ===================================================================== */
+const selectAllCumpleBtn = $("selectAllCumple");
+if (selectAllCumpleBtn) {
+  selectAllCumpleBtn.onclick = () => {
+    let count = 0;
+    state.results.forEach((conn, connIdx) => {
+      const vars = getConnVariations(connIdx);
+      vars.forEach(v => {
+        if (!v.unavailable) {
+          const isCumple = evaluateCumple(v.check);
+          const st = v.status || (isCumple ? "CUMPLE" : "NO CUMPLE");
+          if (st === "CUMPLE" || isCumple) {
+            v.accepted = true;
+            count++;
+          }
+        }
+      });
+    });
+    renderResults();
+    renderAcceptedTable();
+    if (VIEW) buildViewerPanel();
+    setStatus("ok", `Se han marcado ${count} variantes con la marca "CUMPLE".`);
+  };
+}
+
+/* =====================================================================
    Renderizado de la Pantalla Inicial (Sección 2: Variantes Aceptadas)
    ===================================================================== */
 const colName = c => (typeof c === "string") ? c : String((c && (c.key || c.name || c.label)) || "");
