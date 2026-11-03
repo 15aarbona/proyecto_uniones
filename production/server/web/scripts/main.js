@@ -132,9 +132,58 @@ function diffSectionHtml(){
 }
 function renderDiffCard(){ const el = $("viewerDiff"); if (el && VIEW) el.innerHTML = diffSectionHtml(); }
 
-function renderAdjStats(){
+function profileForRow(row){
+  const name = String((row && row.BEAM) || "").trim();
+  return name ? PROFILE_CACHE[name] || null : null;
+}
+
+function adjustBelowCount(row, beamD, beamTf, lhOverride){
+  if (!(beamD > 0)) return null;
+  const e = vNum(row.dev != null ? row.dev : row.e);
+  const d = vNum(row.pfo != null ? row.pfo : row.d);
+  const lh = lhOverride != null ? vNum(lhOverride) : vNum(row.Lh);
+  const p1 = d + beamTf + vNum(row.pfi);
+  const steps = [p1, vNum(row.pb), ...P_KEYS.map(k => vNum(row[k]))].filter(v => v > 0);
+  let y = e;
+  const ys = [e];
+  steps.forEach(step => { y += step; ys.push(y); });
+  const angleBottom = e + d + beamD + lh;
+  return ys.filter(v => v > angleBottom + 0.5).length;
+}
+
+function wasCorrectedToOneBelow(raw, adjusted, beamD, beamTf){
+  if (raw == null || adjusted == null || !(beamD > 0)) return false;
+  // La comparacion se hace con la Lh FINAL: si el diseno ajustado tiene
+  // cantonera, ambas geometrias se evaluan por debajo del ala de la cantonera.
+  const lhFinal = vNum(adjusted.Lh);
+  const before = adjustBelowCount(raw, beamD, beamTf, lhFinal);
+  const after = adjustBelowCount(adjusted, beamD, beamTf, lhFinal);
+  return before != null && after != null && before !== 1 && after === 1;
+}
+
+async function renderAdjStats(){
   const el = $("adjStats"); if (!el) return;
-  const A = {}, B = {}; let nA = 0, chA = 0, nB = 0, chB = 0, nameA = "", nameB = "";
+  const A = {}, B = {};
+  let nA = 0, chA = 0, oneBelowA = 0;
+  let nB = 0, chB = 0, oneBelowB = 0;
+  let nameA = "", nameB = "";
+
+  const pairs = [];
+  state.results.forEach((_, i) => getConnVariations(i).forEach(v => {
+    if (v.unavailable || !v.raw || !Object.keys(v.raw).length) return;
+    pairs.push({ side: "A", raw: v.raw, adjusted: v.adjusted, model: v.model || "" });
+    if (v.cmp && v.cmp.raw && Object.keys(v.cmp.raw).length) {
+      pairs.push({ side: "B", raw: v.cmp.raw, adjusted: v.cmp.adjusted, model: v.cmp.model || "" });
+    }
+  }));
+
+  const profileNames = [];
+  pairs.forEach(p => {
+    const r = p.raw.BEAM || p.adjusted.BEAM;
+    if (r) profileNames.push(String(r).trim());
+  });
+  await fetchProfiles([...new Set(profileNames)]);
+
   const acc = (store, raw, adj) => {
     const d = diffRows(raw, adj);
     d.forEach(x => {
@@ -144,23 +193,41 @@ function renderAdjStats(){
     });
     return d.length;
   };
-  state.results.forEach((_, i) => getConnVariations(i).forEach(v => {
-    if (v.unavailable || !v.raw || !Object.keys(v.raw).length) return;
-    nA++; nameA = v.model || nameA;
-    if (acc(A, v.raw, v.adjusted)) chA++;
-    if (v.cmp && v.cmp.raw && Object.keys(v.cmp.raw).length) {
-      nB++; nameB = v.cmp.model || nameB;
-      if (acc(B, v.cmp.raw, v.cmp.adjusted)) chB++;
+
+  pairs.forEach(p => {
+    const prof = profileForRow(p.raw) || profileForRow(p.adjusted);
+    const beamD = vNum(prof && prof.d_mm) || vNum(p.raw.BEAM_d_mm) || vNum(p.adjusted.BEAM_d_mm);
+    const beamTf = vNum(prof && prof.tf_mm) || vNum(p.raw.BEAM_tf_mm) || vNum(p.adjusted.BEAM_tf_mm);
+    const oneBelow = wasCorrectedToOneBelow(p.raw, p.adjusted, beamD, beamTf);
+    if (p.side === "A") {
+      nA++; nameA = p.model || nameA;
+      if (acc(A, p.raw, p.adjusted)) chA++;
+      if (oneBelow) oneBelowA++;
+    } else {
+      nB++; nameB = p.model || nameB;
+      if (acc(B, p.raw, p.adjusted)) chB++;
+      if (oneBelow) oneBelowB++;
     }
-  }));
+  });
+
   if (!nA) { el.innerHTML = ""; return; }
   const hasB = nB > 0;
-  const pct = (s, n) => s ? `${s.n} (${Math.round(100 * s.n / n)}%)` : "–";
-  const dm = s => s && s.nn ? fmtD(s.sum / s.nn) : "";
-  const am = s => s && s.nn ? fmtD(s.abs / s.nn) : "";
+  const noData = "—";
+  const pct = (s, n) => s ? `${s.n} (${Math.round(100 * s.n / n)}%)` : noData;
+  const dm = s => s && s.nn ? fmtD(s.sum / s.nn) : noData;
+  const am = s => s && s.nn ? fmtD(s.abs / s.nn) : noData;
+  const countPct = (n, total) => total ? `${n} (${Math.round(100 * n / total)}%)` : noData;
   const keys = [...new Set([...Object.keys(A), ...Object.keys(B)])]
     .sort((a, b) => ((B[b]?.n || 0) + (A[b]?.n || 0)) - ((B[a]?.n || 0) + (A[a]?.n || 0)));
-  const rows = keys.map(k => hasB
+
+  // "1 fila debajo" se muestra como un parámetro más de la tabla.
+  const oneBelowRow = hasB
+    ? `<tr><td><b>1 fila debajo</b></td><td>${countPct(oneBelowA, nA)}</td><td>${noData}</td><td>${noData}</td>` +
+      `<td style="border-left:2px solid var(--tr-line)">${countPct(oneBelowB, nB)}</td><td>${noData}</td><td>${noData}</td></tr>`
+    : `<tr><td><b>1 fila debajo</b></td><td>${countPct(oneBelowA, nA)}</td><td>${noData}</td><td>${noData}</td>` +
+      `<td><div style="background:#0066B3;height:8px;width:${Math.round(100 * oneBelowA / nA)}px"></div></td></tr>`;
+
+  const rows = oneBelowRow + keys.map(k => hasB
     ? `<tr><td><b>${escHtml(k)}</b></td><td>${pct(A[k], nA)}</td><td>${dm(A[k])}</td><td>${am(A[k])}</td>` +
       `<td style="border-left:2px solid var(--tr-line)">${pct(B[k], nB)}</td><td>${dm(B[k])}</td><td>${am(B[k])}</td></tr>`
     : `<tr><td><b>${escHtml(k)}</b></td><td>${pct(A[k], nA)}</td><td>${dm(A[k])}</td><td>${am(A[k])}</td>` +
@@ -174,6 +241,7 @@ function renderAdjStats(){
     ? `Correcciones al modelo: ${escHtml(nameA)} ${chA}/${nA} · ${escHtml(nameB)} ${chB}/${nB} variantes ajustadas`
     : `Correcciones al modelo: ${chA}/${nA} variantes ajustadas`;
   el.innerHTML = `<details style="margin-top:14px" ${hasB ? "open" : ""}><summary style="font-weight:700;color:var(--tr-navy);cursor:pointer">${title}</summary>
+    <div style="margin-top:8px;color:var(--tr-muted);font-size:12.5px;">La fila <b>1 fila debajo</b> cuenta los casos corregidos para dejar exactamente una fila por debajo de la cantonera o del ala inferior.</div>
     <table style="margin-top:8px"><thead>${head}</thead>
     <tbody>${rows || `<tr><td colspan="7">Sin ajustes.</td></tr>`}</tbody></table></details>`;
 }
