@@ -11,9 +11,11 @@ Aqui se usa el propio comprobador (`checker`) como oraculo:
    Reglas fijas (ver `codame.ajustar_cantonera_y_chapa`): último tornillo por debajo de
    viga/cantonera, chapa = última fila + e, b_ep entre el ala de la viga y la del pilar.
 
-2. REAJUSTE DE ESPESORES DE PLACAS:
-   Mientras algun ratio (sin contar soldaduras ni tornillos) supere 1, se sube UN escalon
-   del catalogo el espesor de la placa responsable (tp, tst, tws, tbs) y se vuelve a comprobar.
+2. REAJUSTE DE ESPESORES DE PLACAS Y TORNILLOS:
+   Mientras algun ratio (sin contar soldaduras) supere 1, se aplica UN remedio y se vuelve a
+   comprobar. Placas: se sube un escalon del catalogo (tp, tst, tws, tbs). Tornillos: segun
+   el ratio y el termino que gobierna (dev, tp o diametro). La clase de tornillo y el grado de
+   acero los impone el cliente y NUNCA se tocan.
 
 3. OPTIMIZACIÓN Y MAXIMIZACIÓN DE CARGA:
    Quita elementos sobrantes con demanda residual <= 0 y busca el mayor porcentaje de carga.
@@ -57,6 +59,9 @@ _REMEDY = (
     (("Beam web yielding", "Haunch web"), "tbs"),
 )
 
+# Ratios que se corrigen con remedios de tornillos (ver `_apply_bolt`)
+_BOLT_RATIOS = ("Bolts in Tension", "Bolts in Shear", "Bolts in combined", "Slip Resistance")
+
 
 def _mm(v) -> int:
     try:
@@ -81,6 +86,8 @@ def _ratios(row: Dict[str, Any]) -> Dict[str, float]:
 def _variable_for(ratio_name: str) -> Optional[str]:
     if "Weld" in ratio_name:
         return None
+    if ratio_name.startswith(_BOLT_RATIOS):
+        return "bolt"
     for prefixes, var in _REMEDY:
         if ratio_name.startswith(prefixes):
             return var
@@ -382,10 +389,10 @@ def _ajustar_geometria(work: Dict[str, Any], max_iter: int = 40) -> List[str]:
         if "SPACING_MIN" in fallos or "SPACING_MAX" in fallos:
             _ajustar_separaciones(work, calc)
 
-        if sin_cambio() and any(k.startswith("ENTER_") and "HAUNCH" not in k for k in fallos):
-            _despejar_alas(work, calc)
-        if sin_cambio():                       # cantonera sobre tornillo / ultimo tornillo / Lp
+        if sin_cambio():                       # alas de viga/cantonera + fila exterior unica
             _ajustar_cantonera(work, calc)
+        if sin_cambio() and any(k.startswith("ENTER_") and "HAUNCH" not in k for k in fallos):
+            _despejar_alas(work, calc)         # respaldo: filas 0 y 1 (pfo / pfi)
         if sin_cambio() and falla_placa and not ok_placa:
             _bajar_tornillo(work)
         if sin_cambio():
@@ -403,6 +410,64 @@ def _ajustar_geometria(work: Dict[str, Any], max_iter: int = 40) -> List[str]:
     if changes and calc is not None:
         _actualizar_lp(work, calc)
     return changes
+
+
+# ---------------------------------------------------------------------------
+# Remedios de tornillos (la clase de tornillo y el acero los impone el cliente: no se tocan)
+# ---------------------------------------------------------------------------
+def _gobierna_cortante(calc) -> str:
+    """Que limita la resistencia por tornillo en 'Bolts in Shear':
+    'tornillo' (Fnv*A), 'Vr1' (aplastamiento chapa), 'Vr2' (aplastamiento ala pilar),
+    'Vr3' (desgarro por borde, depende de dev y tp) o 'Vr4' (entre filas, depende de c y tp)."""
+    vmin = calc.VrminAME_
+    if abs(vmin - calc.FnvAME_) <= 1e-9:
+        return "tornillo"
+    for nombre, v in (("Vr1", calc.Vr1_), ("Vr2", calc.Vr2_), ("Vr3", calc.Vr3_), ("Vr4", calc.Vr4_)):
+        if abs(vmin - v) <= 1e-9:
+            return nombre
+    return "tornillo"
+
+
+def _subir_diametro(work: Dict[str, Any]) -> Optional[List[str]]:
+    """Sube un diametro del catalogo y reajusta la geometria (los minimos de borde, paso y
+    holgura crecen con el diametro). Si con el nuevo diametro la geometria queda peor que antes
+    (o el ajuste lo vuelve a bajar), se deshace y devuelve None."""
+    d = int(codame.diametro_tornillo(work.get("BoltName_ep")))
+    nuevo = next((c for c in config.CATALOGO_BOLT if c > d), None)
+    if nuevo is None:
+        return None
+    antes = dict(work)
+    fallos_antes = set(_evaluar_geometria(antes)[1])
+    work["BoltName_ep"] = f"M{nuevo}"
+    cambios = [f"BoltName_ep M{d}->M{nuevo}"] + _ajustar_geometria(work)
+    if work.get("BoltName_ep") != f"M{nuevo}" or not set(_evaluar_geometria(work)[1]) <= fallos_antes:
+        work.clear(); work.update(antes)
+        return None
+    return cambios
+
+
+def _apply_bolt(work: Dict[str, Any], ratio_name: str, calc) -> Optional[List[str]]:
+    """Remedio para un ratio de tornillos. Devuelve la lista de cambios o None si no queda ninguno.
+      - Slip Resistance: Tb solo depende del diametro -> diametro.
+      - Bolts in Shear: segun el termino que gobierna (dev -> tp -> diametro).
+      - Bolts in Tension / combined: unicamente el diametro (la clase la fija el cliente)."""
+    if ratio_name.startswith("Slip"):
+        return _subir_diametro(work)
+
+    if ratio_name.startswith("Bolts in Shear"):
+        g = _gobierna_cortante(calc)
+        if g == "Vr3":                                   # borde: primero dev, luego tp
+            dev = _n(work.get("dev"), 50.0)
+            if dev + 5.0 <= calc.MAXedge:
+                work["dev"] = dev + 5.0
+                _actualizar_lp(work, calc)
+                return [f"dev {_fmt(dev)}->{_fmt(dev + 5.0)}"]
+        if g in ("Vr1", "Vr3", "Vr4"):
+            c = _apply(work, "tp")
+            return [c] if c else _subir_diametro(work)
+        return _subir_diametro(work)                     # 'Vr2' o cortante del propio tornillo
+
+    return _subir_diametro(work)                         # tension / combinado
 
 
 # Elementos que SOBRAN cuando la demanda residual es <= 0 (el perfil solo ya aguanta):
@@ -559,7 +624,7 @@ def refine(row: Dict[str, Any], maximize_load: Optional[bool] = None) -> Tuple[D
         except Exception:  # noqa: BLE001
             log.exception("refinar %s: ajuste geometrico fallo; se sigue sin el", uid)
 
-        # 2. Ajuste de espesores de placas
+        # 2. Ajuste de espesores de placas y de tornillos (dev / tp / diametro)
         blocked = set()
         rs, calc = _eval(work)
         res = _residuos(calc)
@@ -569,14 +634,19 @@ def refine(row: Dict[str, Any], maximize_load: Optional[bool] = None) -> Tuple[D
             if not failing:
                 break
             worst = max(failing, key=failing.get)
-            change = _apply(work, _variable_for(worst))
-            if change is None:
+            var = _variable_for(worst)
+            if var == "bolt":
+                cambios = _apply_bolt(work, worst, calc)
+            else:
+                c = _apply(work, var)
+                cambios = [c] if c else None
+            if not cambios:
                 blocked.add(worst)
-                log.warning("refinar %s: %s sigue en %.2f (sin mas catalogo)",
+                log.warning("refinar %s: %s sigue en %.2f (sin mas remedios)",
                             uid, worst, failing[worst])
                 continue
-            changes.append(change)
-            rs, _calc = _eval(work)
+            changes.extend(cambios)
+            rs, calc = _eval(work)
 
         # 3. Quitar sobrantes y maximizar cargas
         quitados, rs = _quitar_sobrantes(work, rs, res)
