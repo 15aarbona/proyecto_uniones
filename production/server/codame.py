@@ -84,23 +84,19 @@ def _web_plate_dims(col, beam_d: float, beam_tf: float, t_stiff: float):
 
 
 def ajustar_cantonera_y_chapa(work: dict, lim: dict) -> bool:
-    """Patron vertical de tornillos por debajo de la fila 1, en posiciones ABSOLUTAS.
+    """Reconstruye el patrón vertical de tornillos (idempotente).
 
-    - Ninguna fila puede caer sobre el ala inferior de la viga ni sobre el ala de la cantonera.
-      Zona prohibida de una cara y: (min(y - tf - holgura_fisica, y - holgura_herramienta),
-      y + holgura_herramienta), igual que `calcular_geometria`.
-    - Una fila prohibida se mueve al borde valido mas cercano que respete el paso minimo y
-      maximo con la fila anterior. Las filas siguientes NO se desplazan.
-    - UNA sola fila por debajo de viga/cantonera (la exterior); las sobrantes se eliminan y,
-      si no habia, se anade. `Lh` no se toca. Las filas 0 (dev) y 1 (dev + c) no se tocan.
-
-    `lim` trae los limites del calculador: clearance, minsp, maxsp, c.
-    Modifica `work` (pb, p3..p12) y devuelve True si cambio algo.
+    Reglas: 1 fila exterior superior (dev), N filas interiores, 1 fila exterior inferior
+    bajo el ala más baja (viga o cantonera). Cada cara de ala (viga y cantonera) impone
+    |y - cara| >= tolerancia, igual que `calcular_geometria`: holgura de herramienta en las
+    caras exteriores y db/2 + wf + 5 en las interiores. Todas las separaciones respetan
+    minsp <= paso <= maxsp y nunca se superan las 13 filas que caben en pb..p12.
+    Devuelve True si ha cambiado algo.
     """
     beam = get_profile(str(work.get("BEAM", "")).strip())
-    d, tf = _geom(beam, "d_mm"), _geom(beam, "tf_mm")
-    c = _num(lim.get("c"))
-    if d <= 0 or tf <= 0 or c <= 0:
+    d = _geom(beam, "d_mm")
+    tf = _geom(beam, "tf_mm")
+    if d <= 0 or tf <= 0:
         return False
 
     angulo = _num(work.get("AnguloCantonera"))
@@ -108,66 +104,109 @@ def ajustar_cantonera_y_chapa(work: dict, lim: dict) -> bool:
     h_h = factor * d / math.sin(math.radians(angulo)) if angulo != 0.0 else 0.0
 
     dev = _num(work.get("dev"), 50.0)
-    pfo = _num(work.get("pfo"), 50.0)
-    minsp = max(_num(lim.get("minsp")), 1.0)
-    maxsp = _num(lim.get("maxsp")) or float("inf")
-    m_tool = _num(lim.get("clearance"))
-    wf = _num(work.get("wf")) or DEFAULT_WELD_MM
-    m_fis = diametro_tornillo(work.get("BoltName_ep")) / 2.0 + wf + 5.0
+    minsp = _num(lim.get("minsp")) or 60.0
+    maxsp = _num(lim.get("maxsp")) or 305.0
+    m_tool = _num(lim.get("clearance")) or 35.0
+    db = diametro_tornillo(str(work.get("BoltName_ep", "M24")))
+    wf = _num(work.get("wf")) or 6.0
+    m_fis = db / 2.0 + wf + 5.0
     eps = 1e-6
+    max_rows = len(_SEP_KEYS) + 2            # fila 0 + fila 1 + 11 separaciones = 13
+    cambiado = False
 
-    ys = [dev, dev + c]
-    for k in _SEP_KEYS:
-        v = _num(work.get(k))
-        if v > 0:
-            ys.append(ys[-1] + v)
+    # --- fila 0 (pfo): debe quedar a >= holgura de herramienta de la cara superior del ala ---
+    pfo0 = _num(work.get("pfo"), 50.0)
+    pfo = pfo0 if pfo0 >= m_tool - eps else _ceil5(m_tool)
+    p_ext_min = max(pfo, db + 15.0)          # el paso mínimo con la fila anterior ya lo garantiza ys[-1] + minsp
 
-    y_viga = dev + pfo + d               # cara inferior del ala inferior de la viga
-    y_bot = y_viga + h_h                 # cara inferior de viga o del ala de la cantonera
+    y_top = dev + pfo                        # cara superior del ala superior
+    y_viga_bot = dev + pfo + d               # cara inferior del ala inferior de la viga
+    y_bot = y_viga_bot + h_h                 # cara inferior del ala más baja (viga o cantonera)
 
-    def zona(y_cara):
-        return (min(y_cara - tf - m_fis, y_cara - m_tool), y_cara + m_tool)
+    # (cota de la cara, tolerancia) exactamente como en calcular_geometria
+    obst = [(y_top, m_tool), (y_top + tf, m_fis),
+            (y_viga_bot - tf, m_fis), (y_viga_bot, m_tool)]
+    if h_h > 0:
+        obst += [(y_bot - tf, m_fis), (y_bot, m_tool)]
+    zonas = [(o - t, o + t) for o, t in obst]
 
-    zonas = [zona(y_viga)] + ([zona(y_bot)] if h_h > 0 else [])
-    zone_hi = zonas[-1][1]
-
-    def prohibido(y):
+    def en_zona(y):
         return any(lo + eps < y < hi - eps for lo, hi in zonas)
 
-    def candidatos(y):
-        cands = {y}
+    # --- fila 1 (pfi): c = round5(pfo + pfi + tf) ---
+    pfi0 = _num(work.get("pfi"), 30.0)
+    c0 = _round5(pfo + pfi0 + tf)
+    c = max(c0, _ceil5(pfo + tf + m_fis), _ceil5(pfo + m_tool), _ceil5(minsp))
+    while c < maxsp and en_zona(dev + c):
+        c += 5.0
+    if abs(pfo - pfo0) > 1e-9:
+        work["pfo"] = pfo
+        cambiado = True
+    if abs(c - c0) > eps:
+        work["pfi"] = round(c - pfo - tf, 6)
+        cambiado = True
+    y_first = dev + c
+
+    # Centro más bajo de una fila INTERIOR y cota mínima de la fila exterior inferior
+    bajos = obst[-2:]                        # caras del ala más baja
+    y_last_max = min(o - t for o, t in bajos)
+    z_ext = max(o + t for o, t in bajos)
+
+    def colocar(objetivo, prev, tope):
+        """Posición válida (rejilla 5 mm) más cercana al objetivo, o None."""
+        hi_lim = min(prev + maxsp, tope)
+        cands = {_round5(objetivo), _ceil5(prev + minsp), _floor5(hi_lim)}
         for lo, hi in zonas:
-            cands.add(float(math.floor(round(lo, 6))))
-            cands.add(float(math.ceil(round(hi, 6))))
-        return sorted(cands, key=lambda v: abs(v - y))
+            cands.update((_floor5(lo), _ceil5(hi)))
+        validos = [y for y in cands
+                   if not en_zona(y) and prev + minsp - eps <= y <= hi_lim + eps]
+        return min(validos, key=lambda y: abs(y - objetivo)) if validos else None
 
-    nuevas = ys[:2]
-    for y in ys[2:]:
-        prev = nuevas[-1]
-        y = max(y, prev + minsp)
-        validos = [v for v in candidatos(y) if v >= prev + minsp - 1e-9 and not prohibido(v)]
-        elegido = next((v for v in validos if v - prev <= maxsp + 1e-9), None)
-        if elegido is None:              # sin opcion dentro del paso maximo: se prioriza no chocar
-            elegido = validos[0] if validos else y
-        nuevas.append(elegido)
-
-    resto = nuevas[2:]
-    dentro = nuevas[:2] + [y for y in resto if y < zone_hi - 1e-9]
-    fuera = [y for y in resto if y >= zone_hi - 1e-9]
-
-    y_min = max(zone_hi, dentro[-1] + minsp)
-    if fuera and fuera[0] >= y_min - 1e-9:
-        y_ext = fuera[0]
+    # 1. Nº de vanos interiores tras la fila 1 (idempotente: nº de separaciones - 1)
+    n_prop = sum(1 for k in _SEP_KEYS if _num(work.get(k)) > 0)
+    span = y_last_max - y_first
+    if span < minsp:
+        vanos = 0
     else:
-        y_ext = _ceil5(y_min)
+        v_min = math.ceil(span / maxsp - eps)
+        v_max = math.floor(span / minsp + eps)
+        vanos = max(v_min, min(max(1, n_prop - 1), v_max))
+        vanos = max(1, min(vanos, max_rows - 3))
 
-    finales = dentro + [y_ext]
-    seps = [round(finales[i + 1] - finales[i], 6) for i in range(1, len(finales) - 1)]
-    if len(seps) > len(_SEP_KEYS):
-        return False
+    # 2. Filas interiores
+    ys = [dev, y_first]
+    if vanos > 0:
+        paso = min(maxsp, max(minsp, span / vanos))
+        for i in range(1, vanos + 1):
+            objetivo = y_last_max if i == vanos else y_first + i * paso
+            y = colocar(objetivo, ys[-1], y_last_max)
+            if y is None:
+                break
+            ys.append(y)
+
+    # 3. Única fila exterior inferior, estrictamente bajo el ala más baja
+    y_ext = max(_ceil5(y_bot + p_ext_min), _ceil5(z_ext), _ceil5(ys[-1] + minsp))
+    while y_ext - ys[-1] > maxsp + eps and len(ys) + 1 < max_rows:
+        y = colocar(ys[-1] + (y_ext - ys[-1]) / 2.0, ys[-1], y_last_max)
+        if y is None:
+            break
+        ys.append(y)
+        y_ext = max(y_ext, _ceil5(ys[-1] + minsp))
+    ys_final = ys + [y_ext]
+    if y_ext - ys[-1] > maxsp + eps:
+        log.warning("cantonera: no se pudo cumplir maxsp (%.0f) en la fila inferior", maxsp)
+
+    # 4. Lp y contadores
+    lp = _ceil5(ys_final[-1] + db / 2.0 + dev)
+    if abs(_num(work.get("Lp")) - lp) > 1e-9:
+        cambiado = True
+    work["Lp"] = lp
+    work["NumeTotalFilasTornillos"] = len(ys_final)
+    work["nbol"] = 2.0 * len(ys_final)
+
+    # 5. Separaciones pb..p12 (el resto a 0.0)
+    seps = [round(ys_final[i] - ys_final[i - 1], 6) for i in range(2, len(ys_final))]
     seps += [0.0] * (len(_SEP_KEYS) - len(seps))
-
-    cambiado = False
     for k, v in zip(_SEP_KEYS, seps):
         if abs(_num(work.get(k)) - v) > 1e-9:
             work[k] = v

@@ -28,14 +28,20 @@ _ESPESORES_PLACA = ["10mm", "12mm", "15mm", "20mm", "25mm", "30mm", "35mm", "40m
 
 
 def reorganizar_patron_tornillos_estricto(
-    inp, min_spacing: float, min_edge: float, clearance_herramienta: float
+    inp,
+    min_spacing: float,
+    min_edge: float,
+    clearance_herramienta: float,
+    target_filas_viga: int = 1,
 ) -> Tuple[Any, bool]:
     """
-    Garantiza el cumplimiento estricto del patrón vertical de tornillos:
-      1. Exactamente 1 fila exterior superior (pfo).
-      2. Al menos 1 fila interior dentro del canto libre de la viga (pfi/pb).
-      3. Al menos 1 fila interior dentro del canto de la cantonera (si existe).
-      4. Exactamente 1 fila exterior inferior (bajo el ala de la cantonera o viga).
+    Garantiza el cumplimiento estricto del patrón vertical de tornillos independientemente
+    de la altura de la viga o el canto de la cantonera:
+      1. EXACTAMENTE 1 fila exterior superior (pfo).
+      2. N filas interiores distribuidas en el canto libre de la viga (pfi, pb...).
+      3. AL MENOS 1 fila interior centrada en la cantonera (si existe).
+      4. EXACTAMENTE 1 fila exterior inferior por debajo de la cantonera o viga.
+      5. Recálculo automático de Lp para cubrir todo el perfil.
     """
     viga = inp.viga
     if not viga:
@@ -45,7 +51,7 @@ def reorganizar_patron_tornillos_estricto(
     tf_v = viga.tf
     has_haunch = (inp.AnguloCantonera or 0.0) > 0.0 and (inp.Lh or 0.0) > 0.0
 
-    # Altura vertical de la cantonera
+    # Altura vertical real de la cantonera
     h_h = 0.0
     if has_haunch:
         rad = math.radians(inp.AnguloCantonera)
@@ -56,70 +62,82 @@ def reorganizar_patron_tornillos_estricto(
 
     pfo_min = _ceil5(db_val + wf_val + 10.0)
     pfi_min = _ceil5(db_val + 15.0)
+    e_val = _ceil5(max(inp.dev or min_edge, min_edge))
+    inp.dev = e_val
 
-    # 1. Resetear explícitamente todos los pasos sobrantes
+    # Resetear campos de distancias sobrantes (pb, p3...p12)
     campos_todos = ["pb", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12"]
     for campo in campos_todos:
         setattr(inp, campo, 0.0)
 
-    # 2. FILA 1: Exterior Superior (Única)
-    inp.pfo = max(_round5(inp.pfo), pfo_min)
+    # 1. FILA EXTERIOR SUPERIOR
+    inp.pfo = max(_round5(inp.pfo or pfo_min), pfo_min)
 
-    # 3. FILAS INTERIORES VIGA
+    # 2. FILAS INTERIORES EN VIGA (Despejando zonas de alas)
     canto_libre_viga = h_v - 2.0 * tf_v
     inp.pfi = max(_ceil5(inp.pfi or pfi_min), pfi_min)
-    filas_viga = [inp.pfi]
 
-    espacio_disp_viga = canto_libre_viga - inp.pfi - pfi_min
-    if espacio_disp_viga >= min_spacing:
-        pb_val = _ceil5(max(inp.pb or min_spacing, min_spacing))
-        if pb_val <= espacio_disp_viga:
-            filas_viga.append(pb_val)
+    espacio_util_viga = canto_libre_viga - inp.pfi - pfi_min
+    max_filas_adicionales = max(0, int(espacio_util_viga // min_spacing))
+    n_adicionales = max(0, min(target_filas_viga - 1, max_filas_adicionales))
 
-    # 4. FILA INTERIOR CANTONERA (Si existe cantonera)
-    dist_cantonera = 0.0
+    filas_viga_pasos: List[float] = []
+    if n_adicionales > 0:
+        paso_ideal = espacio_util_viga / n_adicionales
+        paso_redondeado = _floor5(paso_ideal)
+        if paso_redondeado < min_spacing:
+            paso_redondeado = _ceil5(min_spacing)
+        for _ in range(n_adicionales):
+            filas_viga_pasos.append(paso_redondeado)
+
+    # 3. FILAS INTERIORES EN CANTONERA (Si existe cartela)
+    filas_cantonera_pasos: List[float] = []
     if has_haunch and h_h > 0:
-        # Colocar la fila centrada en la cantonera respetando holguras
-        dist_cantonera = _ceil5(max(h_h / 2.0, pfi_min))
-        if dist_cantonera > (h_h - pfi_min):
-            dist_cantonera = max(pfi_min, h_h - pfi_min)
+        canto_libre_cantonera = h_h - tf_v
+        dist_cant_centrada = _ceil5(max(h_h / 2.0, pfi_min))
+        if dist_cant_centrada > canto_libre_cantonera:
+            dist_cant_centrada = max(pfi_min, canto_libre_cantonera)
+        filas_cantonera_pasos.append(dist_cant_centrada)
 
-    # 5. FILA EXTERIOR INFERIOR (Única)
+    # 4. FILA EXTERIOR INFERIOR (Bajo el elemento final)
     p_ext_inf = max(pfo_min, _ceil5(min_spacing))
 
-    # 6. CÁLCULO DE PASOS CONSECUTIVOS
-    separaciones = []
-    if len(filas_viga) > 1:
-        separaciones.append(filas_viga[1])  # pb
+    # 5. CÁLCULO DE PASOS RELATIVOS ENTRE FILAS (pfo -> pfi -> pb -> p3...)
+    separaciones: List[float] = list(filas_viga_pasos)
 
-    cota_ult_viga = inp.pfo + sum(filas_viga)
+    # Cota acumulada dentro de la viga desde la fila 1 interior (pfi)
+    cota_ult_viga = inp.pfi + sum(filas_viga_pasos)
 
     if has_haunch and h_h > 0:
-        # Fila dentro de la cantonera
-        cota_fila_cant = inp.pfo + h_v + dist_cantonera
+        # Paso desde última fila de viga hasta la fila interior de cantonera
+        cota_fila_cant = h_v + filas_cantonera_pasos[0]
         p_paso_cant = _ceil5(cota_fila_cant - cota_ult_viga)
         separaciones.append(p_paso_cant)
 
-        # Fila exterior inferior bajo la cantonera
-        cota_ext_inf = inp.pfo + h_v + h_h + p_ext_inf
+        # Paso desde fila de cantonera hasta fila exterior inferior
+        cota_ext_inf = h_v + h_h + p_ext_inf
         p_paso_ext = _ceil5(cota_ext_inf - cota_fila_cant)
         separaciones.append(p_paso_ext)
     else:
-        # Fila exterior inferior bajo la viga
-        cota_ext_inf = inp.pfo + h_v + p_ext_inf
+        # Paso directo a fila exterior inferior bajo la viga
+        cota_ext_inf = h_v + p_ext_inf
         p_paso_ext = _ceil5(cota_ext_inf - cota_ult_viga)
         separaciones.append(p_paso_ext)
 
-    # 7. Asignar a inp (pb, p3, p4...)
+    # Asignación a los parámetros pb, p3... p12
     if len(separaciones) > 0:
         inp.pb = separaciones[0]
     for idx, sep in enumerate(separaciones[1:], start=3):
-        setattr(inp, f"p{idx}", sep)
+        if idx <= 12:
+            setattr(inp, f"p{idx}", sep)
 
-    # Actualizar contador de filas y pernos
-    total_filas = 1 + len(filas_viga) + (1 if (has_haunch and h_h > 0) else 0) + 1
+    # 6. RECALCULAR TOTAL DE FILAS Y LONGITUD TOTAL DE CHAPA (Lp)
+    total_filas = 1 + 1 + len(filas_viga_pasos) + len(filas_cantonera_pasos) + 1
     inp.NumeTotalFilasTornillos = total_filas
     inp.nbol = 2.0 * total_filas
+
+    cota_total_tornillos = inp.pfo + inp.pfi + sum(separaciones)
+    inp.Lp = _ceil5(cota_total_tornillos + 2.0 * e_val)
 
     return inp, True
 
@@ -173,17 +191,20 @@ def resolver_geometria_y_ratios_automatico(
 ) -> Dict[str, Any]:
     """
     Ejecuta el bucle de auto-corrección geométrica obligatoria y validación cruzada con ratios mecánicos.
+    Incrementa dinámicamente el número de filas de tornillos en el canto de la viga si los tornillos
+    alcanzan su resistencia máxima sin reducir el ratio a valores admisibles.
     """
     from calculador import CalculadorAISC36010
 
     motivo_fallo: Optional[str] = None
     exito_global = False
 
+    target_filas_viga = 1
     idx_perno = _ORDEN_PERNOS.index(inp.BoltName_ep) if inp.BoltName_ep in _ORDEN_PERNOS else 1
     idx_clase = _ORDEN_CLASES.index(inp.BoltGrade) if inp.BoltGrade in _ORDEN_CLASES else 0
     idx_tp = _ESPESORES_PLACA.index(inp.ThicknessName_t_ep) if inp.ThicknessName_t_ep in _ESPESORES_PLACA else 2
 
-    for _ in range(40):
+    for _ in range(50):
         tbl_pernos = tablapernos()
         tbl_pernos.nombretornillo = inp.BoltName_ep
         db = tbl_pernos.dmetrico or float("".join(filter(str.isdigit, str(inp.BoltName_ep))) or 24)
@@ -195,13 +216,16 @@ def resolver_geometria_y_ratios_automatico(
 
         geom_ok = False
 
-        # BUCLE DE CORRECCIÓN GEOMÉTRICA OBLIGATORIA
+        # -------------------------------------------------------------
+        # 1. BUCLE DE CORRECCIÓN GEOMÉTRICA OBLIGATORIA
+        # -------------------------------------------------------------
         for _ in range(max_iter_geom):
             inp, _ = reorganizar_patron_tornillos_estricto(
                 inp,
                 min_spacing=min_spacing,
                 min_edge=min_edge,
                 clearance_herramienta=clearance_herramienta,
+                target_filas_viga=target_filas_viga,
             )
 
             calc = CalculadorAISC36010(inp)
@@ -283,7 +307,9 @@ def resolver_geometria_y_ratios_automatico(
             motivo_fallo = "No se logró estabilizar la geometría tras agotar las iteraciones de ajuste espacial."
             break
 
-        # VALIDACIÓN DE RATIOS MECÁNICOS
+        # -------------------------------------------------------------
+        # 2. VALIDACIÓN DE RATIOS MECÁNICOS
+        # -------------------------------------------------------------
         calc = CalculadorAISC36010(inp)
         resul = calc.calcular_conexion()
 
@@ -293,12 +319,14 @@ def resolver_geometria_y_ratios_automatico(
 
         desc = resul.descripcion_ratio_pesimo
 
+        # A) Fallo de flexión en chapa / apalancamiento
         if "yield" in desc.lower() or "prying" in desc.lower() or "plate" in desc.lower():
             if idx_tp < len(_ESPESORES_PLACA) - 1:
                 idx_tp += 1
                 inp.ThicknessName_t_ep = _ESPESORES_PLACA[idx_tp]
                 continue
 
+        # B) Fallo en pernos (tracción, cortante o cortante/tracción combinados)
         if "bolts" in desc.lower() or "shear" in desc.lower() or "tension" in desc.lower():
             if idx_clase < len(_ORDEN_CLASES) - 1:
                 idx_clase += 1
@@ -310,7 +338,16 @@ def resolver_geometria_y_ratios_automatico(
                 inp.BoltGrade = _ORDEN_CLASES[0]
                 idx_clase = 0
                 continue
+            elif target_filas_viga < 6:
+                # Si alcanzamos M36 y sigue sin dar resistencia, incrementamos filas en viga
+                target_filas_viga += 1
+                idx_perno = 1  # Reiniciamos a M20 para probar diámetro menor con más filas
+                idx_clase = 0
+                inp.BoltName_ep = _ORDEN_PERNOS[idx_perno]
+                inp.BoltGrade = _ORDEN_CLASES[0]
+                continue
 
+        # C) Para otros fallos o si se agotaron las vías de pernos, incrementar espesor de chapa
         if idx_tp < len(_ESPESORES_PLACA) - 1:
             idx_tp += 1
             inp.ThicknessName_t_ep = _ESPESORES_PLACA[idx_tp]
@@ -318,7 +355,7 @@ def resolver_geometria_y_ratios_automatico(
 
         motivo_fallo = (
             f"Resistencia insuficiente: Ratio pésimo {resul.ratio_pesimo:.3f} en '{desc}' "
-            f"usando pernos máximos {inp.BoltName_ep} {inp.BoltGrade} y chapa {inp.ThicknessName_t_ep}. "
+            f"usando pernos máximos {inp.BoltName_ep} {inp.BoltGrade} y {target_filas_viga + 2} filas totales. "
             f"Se requiere redimensionar los perfiles de la estructura."
         )
         break
